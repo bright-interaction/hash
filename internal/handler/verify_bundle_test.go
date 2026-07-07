@@ -217,6 +217,18 @@ func TestVerifyEvidenceBundle_NotAPDF(t *testing.T) {
 }
 
 func TestPemPublicKeyToBase64(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawB64 := base64.StdEncoding.EncodeToString(pub) // the 32-byte key sign.Verify wants
+	spki, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spkiPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: spki}))
+	rawPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pub}))
+
 	cases := []struct {
 		name  string
 		in    string
@@ -224,14 +236,21 @@ func TestPemPublicKeyToBase64(t *testing.T) {
 		isErr bool
 	}{
 		{
-			name: "pem wrapped",
-			in:   "-----BEGIN PUBLIC KEY-----\nABCDEF\nGHIJ\n-----END PUBLIC KEY-----\n",
-			want: "ABCDEFGHIJ",
+			// Production format: SPKI DER (44-byte body) must decode to the raw key.
+			name: "spki pem (production)",
+			in:   spkiPEM,
+			want: rawB64,
+		},
+		{
+			// Legacy bundles wrapped the raw 32-byte key in PEM markers.
+			name: "legacy raw key in pem",
+			in:   rawPEM,
+			want: rawB64,
 		},
 		{
 			name: "bare base64",
-			in:   "ABCDEFGHIJ",
-			want: "ABCDEFGHIJ",
+			in:   rawB64,
+			want: rawB64,
 		},
 		{
 			name:  "empty",
