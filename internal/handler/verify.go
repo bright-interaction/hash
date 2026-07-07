@@ -2,10 +2,15 @@ package handler
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -242,28 +247,36 @@ func VerifyEvidenceBundle(pdfBytes []byte) VerifyBundleReport {
 // /verify endpoint expects. We accept either a PEM-wrapped key or a bare
 // base64 string so a reviewer can paste either form into the manual
 // verify form.
-func pemPublicKeyToBase64(pem []byte) (string, error) {
-	s := string(pem)
-	if !bytes.Contains(pem, []byte("BEGIN PUBLIC KEY")) {
+func pemPublicKeyToBase64(pemBytes []byte) (string, error) {
+	s := string(pemBytes)
+	if !bytes.Contains(pemBytes, []byte("BEGIN PUBLIC KEY")) {
 		trimmed := stripWhitespace(s)
 		if trimmed == "" {
 			return "", errors.New("public key is empty")
 		}
 		return trimmed, nil
 	}
-	const startMarker = "-----BEGIN PUBLIC KEY-----"
-	const endMarker = "-----END PUBLIC KEY-----"
-	start := bytes.Index(pem, []byte(startMarker))
-	end := bytes.Index(pem, []byte(endMarker))
-	if start < 0 || end < 0 || end <= start {
+	// Production emits SPKI/DER (x509.MarshalPKIXPublicKey), whose PEM body
+	// base64-decodes to 44 bytes, but sign.Verify wants the raw 32-byte ed25519
+	// key. Parse the SPKI and re-emit the raw key so the in-product offline
+	// verifier accepts the exact bundle the product produces. (Older bundles
+	// wrapped a raw 32-byte key in PEM markers; the len==32 fallback keeps them
+	// verifiable too.)
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
 		return "", errors.New("public key PEM markers malformed")
 	}
-	body := string(pem[start+len(startMarker) : end])
-	body = stripWhitespace(body)
-	if body == "" {
-		return "", errors.New("public key body empty")
+	if pub, err := x509.ParsePKIXPublicKey(block.Bytes); err == nil {
+		edPub, ok := pub.(ed25519.PublicKey)
+		if !ok {
+			return "", fmt.Errorf("public key is %T, want ed25519", pub)
+		}
+		return base64.StdEncoding.EncodeToString(edPub), nil
 	}
-	return body, nil
+	if len(block.Bytes) == ed25519.PublicKeySize {
+		return base64.StdEncoding.EncodeToString(block.Bytes), nil
+	}
+	return "", errors.New("public key PEM is neither SPKI nor a raw ed25519 key")
 }
 
 func stripWhitespace(s string) string {

@@ -5,9 +5,11 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,8 +33,15 @@ func buildTestBundle(t *testing.T, mutate func(map[string][]byte)) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pubB64 := base64.StdEncoding.EncodeToString(pub)
-	pem := "-----BEGIN PUBLIC KEY-----\n" + pubB64 + "\n-----END PUBLIC KEY-----\n"
+	// Production format: SPKI/DER wrapped in PEM (x509.MarshalPKIXPublicKey),
+	// whose body base64-decodes to 44 bytes. The old test wrapped the raw
+	// 32-byte key, which never exercised the shipped format and masked the
+	// SPKI-vs-raw verify break.
+	spki, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemStr := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: spki}))
 
 	payload := []byte(`<div class="hash-cert-page"><h2>Audit Certificate</h2><p>Doc test</p></div>`)
 	digest := sha256.Sum256(append([]byte("hash:audit-cert:v1:"), payload...))
@@ -54,7 +63,7 @@ func buildTestBundle(t *testing.T, mutate func(map[string][]byte)) []byte {
 		"generated_at":            "2026-05-12T00:00:00Z",
 		"events_sha256":           hash(events),
 		"versions_sha256":         hash(versions),
-		"public_key_pem_sha256":   hash([]byte(pem)),
+		"public_key_pem_sha256":   hash([]byte(pemStr)),
 		"cert_payload_sha256":     hash(payload),
 		"cert_signature_sha256":   hash(signature),
 		"signature_algorithm":     "ed25519",
@@ -66,7 +75,7 @@ func buildTestBundle(t *testing.T, mutate func(map[string][]byte)) []byte {
 		"manifest.json":            manifestJSON,
 		"events.json":              events,
 		"versions.json":            versions,
-		"public-key.pem":           []byte(pem),
+		"public-key.pem":           []byte(pemStr),
 		"audit-cert-payload.txt":   payload,
 		"audit-cert-signature.txt": signature,
 	}

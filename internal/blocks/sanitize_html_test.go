@@ -42,6 +42,28 @@ func TestSanitizeRawHTML_KeepsSafeBodyMarkup(t *testing.T) {
 	}
 }
 
+func TestSanitizeRawHTML_BlocksRemoteResourceURLs(t *testing.T) {
+	// SSRF: raw_html is rendered to PDF by Chromium; a remote <img src> makes it
+	// dial an attacker-chosen internal host. Absolute + protocol-relative URLs
+	// must be stripped; relative in-app paths must survive.
+	blocked := map[string]string{
+		`<img src="http://169.254.169.254/latest/meta-data/">`: "169.254.169.254",
+		`<img src="http://minio:9000/hash/secret">`:            "minio:9000",
+		`<img src="https://evil.example/x.png">`:               "evil.example",
+		`<img src="//evil.example/x.png">`:                     "evil.example",
+		`<a href="http://10.0.0.5/admin">x</a>`:                "10.0.0.5",
+	}
+	for in, bad := range blocked {
+		if got := SanitizeRawHTML(in); contains(got, bad) {
+			t.Errorf("SanitizeRawHTML(%q) = %q still contains remote target %q", in, got, bad)
+		}
+	}
+	keep := `<img src="/api/v1/storage/org/doc/asset.png">`
+	if got := SanitizeRawHTML(keep); !contains(got, "/api/v1/storage/org/doc/asset.png") {
+		t.Errorf("relative in-app URL wrongly dropped: %q -> %q", keep, got)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
 }
