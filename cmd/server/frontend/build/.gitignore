@@ -1,0 +1,8 @@
+# Populated at Docker build time from frontend/build via the Dockerfile's
+# COPY --from=frontend stage. Local Go builds embed an empty FS plus the
+# .gitkeep sentinel; the SPA falls back to a friendly error message
+# pointing devs at `bun run build` if hit without a real build.
+*
+!.gitkeep
+!.gitignore
+!README.md

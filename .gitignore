@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+*.env
+node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/static/_app/
+bin/
+dist/
+tmp/
+*.log
+.DS_Store
+.vscode/
+.idea/
+coverage.out
+coverage.html
+e2e/test-results/
+e2e/playwright-report/
+e2e/.cache/
+
+# Local-only docker overrides (e.g. MinIO KMS dev key)
+docker-compose.override.yml

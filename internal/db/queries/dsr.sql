@@ -1,0 +1,71 @@
+-- name: CreateDataSubjectRequest :one
+INSERT INTO data_subject_requests (
+    org_id, document_id, recipient_id, subject_email, subject_name,
+    kind, requested_via, requested_note, payload_json
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING *;
+
+-- name: ListDataSubjectRequestsByOrg :many
+SELECT * FROM data_subject_requests
+WHERE org_id = $1
+  AND ($2::text = '' OR status = $2)
+ORDER BY requested_at DESC
+LIMIT $3;
+
+-- name: GetDataSubjectRequest :one
+SELECT * FROM data_subject_requests
+WHERE id = $1 AND org_id = $2;
+
+-- name: UpdateDataSubjectRequestStatus :one
+UPDATE data_subject_requests
+SET status          = $3,
+    resolution_note = $4,
+    fulfilled_by    = $5,
+    fulfilled_at    = CASE WHEN $3 IN ('fulfilled','denied','withdrawn') THEN now() ELSE fulfilled_at END
+WHERE id = $1 AND org_id = $2
+RETURNING *;
+
+-- name: AnonymizeRecipient :execrows
+-- Erasure under GDPR Art. 17 with the Art. 17(3)(e) retention override
+-- baked in: signed-PDF retention is a legal requirement so we cannot
+-- delete the document. We redact the PII fields on the recipient row
+-- while keeping the audit trail (signature timestamps, IP country) so
+-- the cert remains verifiable. Idempotent: re-running is a no-op.
+--
+-- Org-scoped through the documents FK: recipients carry no org_id, so a
+-- raw `WHERE id = $1` is globally addressable and was the sink for a
+-- cross-tenant erasure IDOR. The JOIN + org predicate means a recipient
+-- belonging to another tenant matches 0 rows; callers treat 0 rows as a
+-- hard failure so a stale/cross-tenant id can never report "fulfilled".
+UPDATE recipients r
+SET email = $2,
+    name = $3
+FROM documents d
+WHERE r.id = $1
+  AND r.document_id = d.id
+  AND d.org_id = $4;
+
+-- name: ExportSubjectData :many
+-- Article 15 + 20 data export: every recipient row for the supplied
+-- email across the org, with the parent document context. Sender
+-- workflow joins this to the signed PDFs in MinIO when fulfilling.
+SELECT r.id            AS recipient_id,
+       r.email         AS recipient_email,
+       r.name          AS recipient_name,
+       r.role          AS recipient_role,
+       r.status        AS recipient_status,
+       r.created_at    AS recipient_created_at,
+       r.signed_at     AS recipient_signed_at,
+       r.first_viewed_at AS recipient_first_viewed_at,
+       d.id            AS document_id,
+       d.name          AS document_name,
+       d.status        AS document_status,
+       d.created_at    AS document_created_at,
+       d.final_pdf_key AS document_final_pdf_key,
+       d.audit_cert_key AS document_audit_cert_key
+FROM recipients r
+JOIN documents d ON d.id = r.document_id
+WHERE d.org_id = $1
+  AND lower(r.email) = lower($2)
+ORDER BY d.created_at DESC;

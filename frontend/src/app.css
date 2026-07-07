@@ -1,0 +1,114 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-display: 'Geist', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+  --color-bg: var(--t-bg);
+  --color-bg-surface: var(--t-bg-surface);
+  --color-bg-elevated: var(--t-bg-elevated);
+  --color-bg-hover: var(--t-bg-hover);
+
+  --color-border: var(--t-border);
+  --color-border-light: var(--t-border-light);
+
+  --color-text-primary: var(--t-text-primary);
+  --color-text-secondary: var(--t-text-secondary);
+  --color-text-muted: var(--t-text-muted);
+
+  --color-accent: var(--t-accent);
+  --color-accent-hover: var(--t-accent-hover);
+  --color-accent-foreground: var(--t-accent-foreground);
+
+  --color-success: var(--t-success);
+  --color-warning: var(--t-warning);
+  --color-danger: var(--t-danger);
+  --color-info: var(--t-info);
+}
+
+:root,
+[data-theme='light'] {
+  --t-bg: #f7f7f7;
+  --t-bg-surface: #ffffff;
+  --t-bg-elevated: #fafafa;
+  --t-bg-hover: #f0f0f0;
+  --t-border: #e5e5e5;
+  --t-border-light: #ededed;
+  --t-text-primary: #0a0a0a;
+  --t-text-secondary: #525252;
+  --t-text-muted: #a3a3a3;
+  --t-accent: #171717;
+  --t-accent-hover: #262626;
+  --t-accent-foreground: #fafafa;
+  --t-success: #15803d;
+  --t-warning: #d97706;
+  --t-danger: #dc2626;
+  --t-info: #4f46e5;
+}
+
+body {
+  background-color: var(--t-bg);
+  color: var(--t-text-primary);
+  font-family: var(--font-sans);
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.page-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: var(--t-text-muted);
+}
+
+.page-title {
+  font-family: var(--font-display);
+  font-weight: 200;
+  font-size: 2.25rem;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  font-size: 0.875rem;
+  transition: background-color 200ms ease, transform 100ms ease;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-primary {
+  background-color: var(--t-accent);
+  color: var(--t-accent-foreground);
+}
+
+.btn-primary:hover {
+  background-color: var(--t-accent-hover);
+}
+
+.btn-secondary {
+  background-color: var(--t-bg-elevated);
+  color: var(--t-text-primary);
+  border: 1px solid var(--t-border-light);
+}
+
+.btn-secondary:hover {
+  background-color: var(--t-bg-hover);
+}
+
+.card {
+  background-color: var(--t-bg-surface);
+  border: 1px solid var(--t-border-light);
+  border-radius: 0.75rem;
+}

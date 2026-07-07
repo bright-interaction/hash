@@ -1,0 +1,163 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hash
+      POSTGRES_USER: hash
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpass}
+    volumes:
+      - hash_pg:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${HASH_PG_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hash -d hash"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - hash_minio:/data
+    # Host ports are env-overridable so production (where 9000/9001 are
+    # already taken by listmonk + production minio at 9030/9031) can pick
+    # collision-free ones. Defaults keep local dev working at the usual
+    # 127.0.0.1:9000 / 9001. Staging deploy overrides via .env on the
+    # server: HASH_MINIO_API_PORT + HASH_MINIO_CONSOLE_PORT.
+    ports:
+      - "127.0.0.1:${HASH_MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${HASH_MINIO_CONSOLE_PORT:-9001}:9001"
+    # Unique alias on the project network. Without this, the bare name
+    # `minio` collides with the production MinIO container (restic
+    # backup store) once hash-app joins web-proxy: docker DNS
+    # resolves `minio` to the production container, hash hits it
+    # with minioadmin/minioadmin (the staging defaults), and crashes
+    # with "The Access Key Id you provided does not exist". Force the
+    # staging app to talk to the staging minio explicitly.
+    networks:
+      default:
+        aliases:
+          - hash-minio
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    restart: unless-stopped
+    command:
+      - "gotenberg"
+      - "--api-port=3000"
+      - "--api-timeout=60s"
+      # Default Chromium URL policy: allow all (so file:// works for the
+      # uploaded index.html, https://fonts.googleapis.com works for fonts).
+      # Production should add a chromium-deny-list to block internal IPs;
+      # local dev runs with the defaults.
+    ports:
+      - "127.0.0.1:${HASH_GOTENBERG_PORT:-3010}:3000"
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    restart: unless-stopped
+    # 1025 = SMTP intake; 8025 = web UI for inspecting captured messages.
+    ports:
+      - "127.0.0.1:${HASH_MAILHOG_SMTP_PORT:-1025}:1025"
+      - "127.0.0.1:${HASH_MAILHOG_UI_PORT:-8025}:8025"
+
+  webhook-sink:
+    # http-https-echo accepts any method, returns 200, and logs the full
+    # request body + headers so we can grep them in e2e.
+    image: mendhak/http-https-echo:31
+    restart: unless-stopped
+    environment:
+      HTTP_PORT: "8080"
+      LOG_WITHOUT_NEWLINE: "true"
+      DISABLE_REQUEST_LOGS_FOR_PATHS: "[\"/healthz\"]"
+    ports:
+      - "127.0.0.1:${HASH_WEBHOOK_SINK_PORT:-8084}:8080"
+
+  worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    entrypoint: ["/usr/local/bin/hash-worker"]
+    environment:
+      HASH_PORT: "0"
+      HASH_PUBLIC_URL: ${HASH_PUBLIC_URL:-http://localhost:8080}
+      HASH_LOG_LEVEL: ${HASH_LOG_LEVEL:-info}
+      HASH_DB_URL: postgres://hash:${POSTGRES_PASSWORD:-devpass}@postgres:5432/hash?sslmode=disable
+      HASH_S3_ENDPOINT: ${HASH_S3_ENDPOINT:-hash-minio:9000}
+      HASH_S3_REGION: eu-central-1
+      HASH_S3_BUCKET: hash
+      HASH_S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      HASH_S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      HASH_S3_USE_SSL: "false"
+      HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-http://localhost:9999}
+      HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
+      HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-dev}
+      HASH_OIDC_REDIRECT_URL: ${HASH_OIDC_REDIRECT_URL:-http://localhost:8080/auth/callback}
+      # Dev-only placeholders (non-uniform so they pass the weak-key check).
+      # Production MUST override these with 64 hex chars of real entropy; the
+      # boot guard rejects short / all-identical keys.
+      HASH_SIGNER_TOKEN_KEY: ${HASH_SIGNER_TOKEN_KEY:-dev-only-signer-token-key-change-in-prod-0123456789ab}
+      HASH_SESSION_KEY: ${HASH_SESSION_KEY:-dev-only-session-key-change-in-prod-0123456789abcdef01}
+      HASH_GOTENBERG_URL: ${HASH_GOTENBERG_URL:-http://gotenberg:3000}
+      HASH_SMTP_HOST: ${HASH_SMTP_HOST:-mailhog}
+      HASH_SMTP_PORT: ${HASH_SMTP_PORT:-1025}
+      HASH_SMTP_FROM: ${HASH_SMTP_FROM:-Hash <esign@brightinteraction.example>}
+      HASH_WEBHOOK_SECRET: ${HASH_WEBHOOK_SECRET:-dev-webhook-secret}
+
+  hash:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      HASH_PORT: "8080"
+      HASH_PUBLIC_URL: ${HASH_PUBLIC_URL:-http://localhost:8080}
+      HASH_LOG_LEVEL: ${HASH_LOG_LEVEL:-info}
+      HASH_DB_URL: postgres://hash:${POSTGRES_PASSWORD:-devpass}@postgres:5432/hash?sslmode=disable
+      HASH_S3_ENDPOINT: ${HASH_S3_ENDPOINT:-hash-minio:9000}
+      HASH_S3_REGION: eu-central-1
+      HASH_S3_BUCKET: hash
+      HASH_S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      HASH_S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      HASH_S3_USE_SSL: "false"
+      HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-http://localhost:9999}
+      HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
+      HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-dev}
+      HASH_OIDC_REDIRECT_URL: ${HASH_OIDC_REDIRECT_URL:-http://localhost:8080/auth/callback}
+      # Dev-only placeholders (non-uniform so they pass the weak-key check).
+      # Production MUST override these with 64 hex chars of real entropy; the
+      # boot guard rejects short / all-identical keys.
+      HASH_SIGNER_TOKEN_KEY: ${HASH_SIGNER_TOKEN_KEY:-dev-only-signer-token-key-change-in-prod-0123456789ab}
+      HASH_SESSION_KEY: ${HASH_SESSION_KEY:-dev-only-session-key-change-in-prod-0123456789abcdef01}
+      HASH_GOTENBERG_URL: ${HASH_GOTENBERG_URL:-http://gotenberg:3000}
+      HASH_SMTP_HOST: ${HASH_SMTP_HOST:-mailhog}
+      HASH_SMTP_PORT: ${HASH_SMTP_PORT:-1025}
+      HASH_SMTP_FROM: ${HASH_SMTP_FROM:-Hash <esign@brightinteraction.example>}
+      HASH_WEBHOOK_SECRET: ${HASH_WEBHOOK_SECRET:-dev-webhook-secret}
+      # Flare error reporting; empty default keeps dev/self-host a no-op.
+      FLARE_DSN: ${FLARE_DSN:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    ports:
+      - "127.0.0.1:${HASH_APP_PORT:-8090}:8080"
+
+volumes:
+  hash_pg:
+  hash_minio:

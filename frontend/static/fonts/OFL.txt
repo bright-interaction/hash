@@ -1,0 +1,15 @@
+Self-hosted webfonts in this directory are distributed under the SIL Open Font
+License Version 1.1 (OFL-1.1). Each font's authoritative license text lives at
+the upstream repository:
+
+- Inter:           https://github.com/rsms/inter
+- Geist:           https://github.com/vercel/geist-font
+- JetBrains Mono:  https://github.com/JetBrains/JetBrainsMono
+- Caveat:          https://github.com/googlefonts/caveat
+- Dancing Script:  https://github.com/impallari/DancingScript
+- Great Vibes:     https://github.com/googlefonts/greatvibes
+- Sacramento:      https://github.com/astigmatic/sacramento
+- Homemade Apple:  https://fonts.google.com/specimen/Homemade+Apple
+
+These woff2 binaries are redistributed under OFL-1.1. No third-party CDN is
+used at runtime. To refresh, run: scripts/refresh-fonts.sh
