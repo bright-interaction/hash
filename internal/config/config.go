@@ -186,7 +186,9 @@ func Load() (*Config, error) {
 	require("HASH_S3_SECRET_KEY", c.S3SecretKey)
 	require("HASH_OIDC_ISSUER", c.OIDCIssuer)
 	require("HASH_OIDC_CLIENT_ID", c.OIDCClientID)
-	require("HASH_OIDC_CLIENT_SECRET", c.OIDCClientSecret)
+	// HASH_OIDC_CLIENT_SECRET is optional: the login flow uses PKCE, so a public
+	// OIDC client (no secret, the estate's Zitadel pattern) is supported; a
+	// confidential deployment may still set a secret and it will be used.
 	require("HASH_OIDC_REDIRECT_URL", c.OIDCRedirectURL)
 	require("HASH_SIGNER_TOKEN_KEY", c.SignerTokenKey)
 	require("HASH_SESSION_KEY", c.SessionKey)

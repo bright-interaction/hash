@@ -49,23 +49,41 @@ func NewOIDC(ctx context.Context, cfg OIDCConfig) (*OIDC, error) {
 }
 
 // Login redirects the browser to the IdP authorize endpoint with a
-// crypto-random state cookie for CSRF protection.
+// crypto-random state cookie (CSRF), a nonce (binds the id_token to this
+// request), and a PKCE S256 challenge (binds the code to this client without a
+// client secret). The estate's Zitadel apps are public PKCE clients, so PKCE is
+// required, not optional.
 func (o *OIDC) Login(w http.ResponseWriter, r *http.Request) {
 	state, err := randomString(24)
 	if err != nil {
 		http.Error(w, "state generation failed", http.StatusInternalServerError)
 		return
 	}
+	nonce, err := randomString(24)
+	if err != nil {
+		http.Error(w, "nonce generation failed", http.StatusInternalServerError)
+		return
+	}
+	verifier := oauth2.GenerateVerifier()
+	setLoginCookie(w, "hash_oauth_state", state)
+	setLoginCookie(w, "hash_oauth_nonce", nonce)
+	setLoginCookie(w, "hash_oauth_verifier", verifier)
+	url := o.oauth2.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))
+	http.Redirect(w, r, url, http.StatusFound)
+}
+
+// setLoginCookie writes one short-lived HttpOnly leg of the login handshake
+// (state / nonce / PKCE verifier).
+func setLoginCookie(w http.ResponseWriter, name, value string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     "hash_oauth_state",
-		Value:    state,
+		Name:     name,
+		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(10 * time.Minute),
 	})
-	http.Redirect(w, r, o.oauth2.AuthCodeURL(state), http.StatusFound)
 }
 
 // Callback exchanges the authorization code for an ID token and returns the
@@ -78,11 +96,19 @@ func (o *OIDC) Callback(ctx context.Context, r *http.Request) (sub, email, name 
 	if r.URL.Query().Get("state") != stateCookie.Value {
 		return "", "", "", false, errors.New("state mismatch")
 	}
+	verifierCookie, err := r.Cookie("hash_oauth_verifier")
+	if err != nil {
+		return "", "", "", false, errors.New("missing PKCE verifier cookie")
+	}
+	nonceCookie, err := r.Cookie("hash_oauth_nonce")
+	if err != nil {
+		return "", "", "", false, errors.New("missing nonce cookie")
+	}
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		return "", "", "", false, errors.New("missing code")
 	}
-	tok, err := o.oauth2.Exchange(ctx, code)
+	tok, err := o.oauth2.Exchange(ctx, code, oauth2.VerifierOption(verifierCookie.Value))
 	if err != nil {
 		return "", "", "", false, fmt.Errorf("token exchange: %w", err)
 	}
@@ -93,6 +119,9 @@ func (o *OIDC) Callback(ctx context.Context, r *http.Request) (sub, email, name 
 	idTok, err := o.verifier.Verify(ctx, rawID)
 	if err != nil {
 		return "", "", "", false, fmt.Errorf("verify id_token: %w", err)
+	}
+	if idTok.Nonce != nonceCookie.Value {
+		return "", "", "", false, errors.New("nonce mismatch")
 	}
 	// email_verified MUST be decoded and honored: the find-or-create path links an
 	// existing account by email, so an unverified attacker-set email claim equal to a
