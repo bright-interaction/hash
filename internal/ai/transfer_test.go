@@ -4,7 +4,7 @@ import "testing"
 
 func TestTransferJurisdictionForEndpoint(t *testing.T) {
 	cases := map[string]string{
-		"":                                           "local",
+		"": "local",
 		"https://api.mistral.ai/v1/chat/completions": "EU->EU",
 		"https://chat.api.mistral.ai/v1/c":           "EU->EU",
 		"https://eu.anthropic.com/v1/messages":       "EU->EU",

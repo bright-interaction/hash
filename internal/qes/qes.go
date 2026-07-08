@@ -30,17 +30,17 @@ import (
 // engine stays decoupled from sqlc so unit tests can construct sessions
 // without a database.
 type Session struct {
-	ID                 uuid.UUID
-	DocumentID         uuid.UUID
-	RecipientID        uuid.UUID
-	OrgID              uuid.UUID
-	Provider           string
-	ProviderSessionID  string
-	Status             string
-	RedirectURL        string
-	CallbackSecret     string
-	CompletedAt        *time.Time
-	ExpiresAt          time.Time
+	ID                uuid.UUID
+	DocumentID        uuid.UUID
+	RecipientID       uuid.UUID
+	OrgID             uuid.UUID
+	Provider          string
+	ProviderSessionID string
+	Status            string
+	RedirectURL       string
+	CallbackSecret    string
+	CompletedAt       *time.Time
+	ExpiresAt         time.Time
 }
 
 // StartInput is what the engine hands a Provider when starting a
@@ -116,7 +116,7 @@ var (
 // route correctly without forcing dev to set up a real QTSP.
 type NoopProvider struct{}
 
-func (NoopProvider) Name() string                                          { return "noop" }
+func (NoopProvider) Name() string                                            { return "noop" }
 func (NoopProvider) Start(context.Context, StartInput) (*StartResult, error) { return nil, ErrDisabled }
 func (NoopProvider) Callback(context.Context, CallbackInput) (*CallbackResult, error) {
 	return nil, ErrDisabled

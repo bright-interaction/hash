@@ -46,7 +46,7 @@ func (s *Server) handleQESStart(w http.ResponseWriter, r *http.Request) {
 	// finalization happens.
 	html, err := s.Sign.RenderForSigner(r.Context(), rc)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "render for QES digest: "+err.Error())
+		writeInternalErrorMsg(w, "render for QES digest", err)
 		return
 	}
 	digest := sha256.Sum256([]byte(html))
@@ -177,7 +177,7 @@ func (s *Server) handleQESCallback(w http.ResponseWriter, r *http.Request) {
 	// the human who actually authenticated.
 	rc, err := s.Sign.LookupByRecipientID(r.Context(), session.RecipientID, session.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "load recipient: "+err.Error())
+		writeInternalErrorMsg(w, "load recipient", err)
 		return
 	}
 	signerName := result.SignerName
@@ -191,7 +191,7 @@ func (s *Server) handleQESCallback(w http.ResponseWriter, r *http.Request) {
 		UserAgent: r.UserAgent() + " (via QES " + session.Provider + ")",
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "qes finalize: "+err.Error())
+		writeInternalErrorMsg(w, "qes finalize", err)
 		return
 	}
 

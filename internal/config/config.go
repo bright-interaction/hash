@@ -43,7 +43,6 @@ type Config struct {
 
 	WebhookSecret         string
 	WebhookSecretPrevious string
-	AdminReloadToken      string
 
 	GotenbergURL string
 
@@ -143,7 +142,6 @@ func Load() (*Config, error) {
 		SessionKey:              os.Getenv("HASH_SESSION_KEY"),
 		WebhookSecret:           os.Getenv("HASH_WEBHOOK_SECRET"),
 		WebhookSecretPrevious:   os.Getenv("HASH_WEBHOOK_SECRET_PREVIOUS"),
-		AdminReloadToken:        os.Getenv("HASH_ADMIN_RELOAD_TOKEN"),
 		GotenbergURL:            envString("HASH_GOTENBERG_URL", "http://gotenberg:3000"),
 		BrightCRMURL:            os.Getenv("HASH_BRIGHTCRM_URL"),
 		BrightCRMToken:          os.Getenv("HASH_BRIGHTCRM_TOKEN"),

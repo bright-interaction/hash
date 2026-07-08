@@ -19,18 +19,18 @@ import (
 // Update this set when adding a new public event surface. The hook in
 // cmd/server checks membership before enqueuing.
 var PublicEventKinds = map[string]struct{}{
-	"document.created":    {},
-	"document.sent":       {},
-	"document.opened":     {},
-	"document.viewed":     {},
+	"document.created":      {},
+	"document.sent":         {},
+	"document.opened":       {},
+	"document.viewed":       {},
 	"document.field_filled": {},
-	"document.signed":     {},
-	"document.completed":  {},
-	"document.declined":   {},
-	"document.voided":     {},
-	"document.expired":    {},
-	"recipient.invited":   {},
-	"recipient.bounced":   {},
+	"document.signed":       {},
+	"document.completed":    {},
+	"document.declined":     {},
+	"document.voided":       {},
+	"document.expired":      {},
+	"recipient.invited":     {},
+	"recipient.bounced":     {},
 }
 
 // IsPublicEventKind reports whether kind is in PublicEventKinds. Callers

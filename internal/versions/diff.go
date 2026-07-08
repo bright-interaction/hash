@@ -45,12 +45,12 @@ type DiffResult struct {
 
 // DiffSide is the version pointer for either side of a diff.
 type DiffSide struct {
-	VersionID    string `json:"version_id"`
-	VersionNo    int32  `json:"version_no"`
-	DocumentID   string `json:"document_id"`
-	BlockCount   int    `json:"block_count"`
-	NameAtRev    string `json:"name_at_rev"`
-	HumanLabel   string `json:"human_label,omitempty"`
+	VersionID  string `json:"version_id"`
+	VersionNo  int32  `json:"version_no"`
+	DocumentID string `json:"document_id"`
+	BlockCount int    `json:"block_count"`
+	NameAtRev  string `json:"name_at_rev"`
+	HumanLabel string `json:"human_label,omitempty"`
 }
 
 // DiffCounts are the per-kind tallies. Callers use them for compact summaries.

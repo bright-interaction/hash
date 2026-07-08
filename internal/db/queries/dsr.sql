@@ -69,3 +69,28 @@ JOIN documents d ON d.id = r.document_id
 WHERE d.org_id = $1
   AND lower(r.email) = lower($2)
 ORDER BY d.created_at DESC;
+
+-- name: AnonymizeSignaturesByRecipient :execrows
+-- Erasure completeness (Art 17): the signatures row independently stores the
+-- signer's typed legal name, IP and user-agent. These are NOT the retained
+-- evidentiary artefact (the signed PDF + cert verify from signed_at +
+-- image_sha256), so they are redacted alongside the recipient row rather than
+-- kept under the 17(3)(e) override. Org-scoped via the documents FK so a
+-- cross-tenant recipient_id matches 0 rows. Idempotent.
+UPDATE signatures s
+SET typed_name = $2,
+    signer_ip = NULL,
+    signer_ua = NULL
+FROM documents d
+WHERE s.recipient_id = $1
+  AND s.document_id = d.id
+  AND d.org_id = $3;
+
+-- name: RedactDSRSubjectIdentifiers :exec
+-- L7: the erasure request row itself stores subject_email + subject_name; once
+-- fulfilled they are no longer needed (the request id ties the row to the audit
+-- trail) and must not linger in plaintext. Redact in place, org-scoped.
+UPDATE data_subject_requests
+SET subject_email = $3,
+    subject_name = $4
+WHERE id = $1 AND org_id = $2;

@@ -57,7 +57,7 @@ func (s *Server) handleListBillingPlans(w http.ResponseWriter, r *http.Request) 
 	}
 	plans, err := s.Billing.ListPlans(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(plans))
@@ -92,7 +92,7 @@ func (s *Server) handleGetBillingSubscription(w http.ResponseWriter, r *http.Req
 	}
 	plan, sub, err := s.Billing.PlanForOrg(r.Context(), u.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	planOut := map[string]any{}
@@ -218,7 +218,7 @@ func (s *Server) handleListBillingInvoices(w http.ResponseWriter, r *http.Reques
 	}
 	rows, err := s.Queries.ListBillingInvoicesForOrg(r.Context(), generated.ListBillingInvoicesForOrgParams{OrgID: u.OrgID, Limit: 50})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(rows))

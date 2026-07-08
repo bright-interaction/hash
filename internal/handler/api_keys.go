@@ -118,7 +118,7 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: expires,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create api key failed: "+err.Error())
+		writeInternalErrorMsg(w, "create api key failed", err)
 		return
 	}
 

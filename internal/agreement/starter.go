@@ -52,13 +52,17 @@ func Get(key string) (Starter, bool) {
 func h(id string, level int, text string) blocks.Block {
 	return blocks.Block{ID: id, Type: blocks.TypeHeading, Attrs: map[string]any{"level": level}, Text: text}
 }
-func p(id, text string) blocks.Block { return blocks.Block{ID: id, Type: blocks.TypeParagraph, Text: text} }
+func p(id, text string) blocks.Block {
+	return blocks.Block{ID: id, Type: blocks.TypeParagraph, Text: text}
+}
 func quote(id, text string) blocks.Block {
 	return blocks.Block{ID: id, Type: blocks.TypeQuote, Text: text}
 }
-func divider(id string) blocks.Block  { return blocks.Block{ID: id, Type: blocks.TypeDivider} }
+func divider(id string) blocks.Block   { return blocks.Block{ID: id, Type: blocks.TypeDivider} }
 func pageBreak(id string) blocks.Block { return blocks.Block{ID: id, Type: blocks.TypePageBreak} }
-func li(id, text string) blocks.Block  { return blocks.Block{ID: id, Type: blocks.TypeListItem, Text: text} }
+func li(id, text string) blocks.Block {
+	return blocks.Block{ID: id, Type: blocks.TypeListItem, Text: text}
+}
 
 func table(id string, columns []string, rows [][]string) blocks.Block {
 	// Validation + the renderer read attrs.columns as []any (JSON array shape),

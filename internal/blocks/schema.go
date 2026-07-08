@@ -24,26 +24,26 @@ const SchemaVersion = 1
 type Type string
 
 const (
-	TypeHeading       Type = "heading"
-	TypeParagraph     Type = "paragraph"
-	TypeBulletList    Type = "bullet_list"
-	TypeOrderedList   Type = "ordered_list"
-	TypeListItem      Type = "list_item"
-	TypeTable         Type = "table"
-	TypeImage         Type = "image"
-	TypeDivider       Type = "divider"
-	TypePageBreak     Type = "page_break"
+	TypeHeading        Type = "heading"
+	TypeParagraph      Type = "paragraph"
+	TypeBulletList     Type = "bullet_list"
+	TypeOrderedList    Type = "ordered_list"
+	TypeListItem       Type = "list_item"
+	TypeTable          Type = "table"
+	TypeImage          Type = "image"
+	TypeDivider        Type = "divider"
+	TypePageBreak      Type = "page_break"
 	TypeSignatureField Type = "signature_field"
-	TypeInitialField  Type = "initial_field"
-	TypeTextField     Type = "text_field"
-	TypeDateField     Type = "date_field"
-	TypeCheckbox      Type = "checkbox"
-	TypeDynamicVar    Type = "dynamic_variable"
-	TypeConditional   Type = "conditional"
-	TypeCode          Type = "code"
-	TypeQuote         Type = "quote"
-	TypeCallout       Type = "callout"
-	TypeRawHTML       Type = "raw_html"
+	TypeInitialField   Type = "initial_field"
+	TypeTextField      Type = "text_field"
+	TypeDateField      Type = "date_field"
+	TypeCheckbox       Type = "checkbox"
+	TypeDynamicVar     Type = "dynamic_variable"
+	TypeConditional    Type = "conditional"
+	TypeCode           Type = "code"
+	TypeQuote          Type = "quote"
+	TypeCallout        Type = "callout"
+	TypeRawHTML        Type = "raw_html"
 )
 
 // AllTypes returns the full set of valid block types. Order is stable; safe
@@ -197,10 +197,9 @@ func (t Type) IsField() bool {
 // Errors surfaced by the validator. Wrapped so callers can do errors.Is()
 // against ErrInvalidBlock for any structural issue.
 var (
-	ErrInvalidBlock   = errors.New("invalid block")
-	ErrUnknownType    = errors.New("unknown block type")
-	ErrSchemaVersion  = errors.New("unsupported schema version")
-	ErrMissingID      = errors.New("block missing id")
-	ErrDuplicateID    = errors.New("duplicate block id")
+	ErrInvalidBlock  = errors.New("invalid block")
+	ErrUnknownType   = errors.New("unknown block type")
+	ErrSchemaVersion = errors.New("unsupported schema version")
+	ErrMissingID     = errors.New("block missing id")
+	ErrDuplicateID   = errors.New("duplicate block id")
 )
-

@@ -113,10 +113,10 @@ func capabilitiesPayload(s *Server) map[string]any {
 			"OIDC / Zitadel administration",
 		},
 		"policy": map[string]any{
-			"org_scoped":     "every tool runs under the API key owner's org_id; cross-tenant queries return not-found",
-			"audit_trail":    "every write fires an event with via=mcp + tool name; readable via hash://events/recent",
-			"draft_only":     "block edits require status=draft; sent or completed documents are immutable to authoring tools",
-			"agent_marker":   "documents authored or edited via MCP are tagged in the audit trail so reviewers can filter",
+			"org_scoped":   "every tool runs under the API key owner's org_id; cross-tenant queries return not-found",
+			"audit_trail":  "every write fires an event with via=mcp + tool name; readable via hash://events/recent",
+			"draft_only":   "block edits require status=draft; sent or completed documents are immutable to authoring tools",
+			"agent_marker": "documents authored or edited via MCP are tagged in the audit trail so reviewers can filter",
 		},
 	}
 }

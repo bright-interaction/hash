@@ -178,7 +178,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:     expiresAt,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "create document failed: "+err.Error())
+			writeInternalErrorMsg(w, "create document failed", err)
 			return
 		}
 		_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -216,7 +216,7 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:     expiresAt,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "create document failed: "+err.Error())
+			writeInternalErrorMsg(w, "create document failed", err)
 			return
 		}
 		// Phase 8.7: every pdf-source template was sanitized on upload

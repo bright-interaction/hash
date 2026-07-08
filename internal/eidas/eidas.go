@@ -8,17 +8,17 @@
 //
 // Tier ladder (low to high):
 //
-//   SES (Simple Electronic Signature):    default. Magic link + typed
-//                                         name + ed25519 audit cert.
-//   AES (Advanced Electronic Signature):  identity-bound. Requires the
-//                                         signer to authenticate via
-//                                         OIDC OR provide a verified
-//                                         email proof challenge.
-//   QES (Qualified Electronic Signature): QTSP-backed (Idura/Signicat/
-//                                         Scrive). Wired via the
-//                                         resolver path in Phase 11+;
-//                                         here we just gate on
-//                                         routing_tier=QES.
+//	SES (Simple Electronic Signature):    default. Magic link + typed
+//	                                      name + ed25519 audit cert.
+//	AES (Advanced Electronic Signature):  identity-bound. Requires the
+//	                                      signer to authenticate via
+//	                                      OIDC OR provide a verified
+//	                                      email proof challenge.
+//	QES (Qualified Electronic Signature): QTSP-backed (Idura/Signicat/
+//	                                      Scrive). Wired via the
+//	                                      resolver path in Phase 11+;
+//	                                      here we just gate on
+//	                                      routing_tier=QES.
 //
 // Predicate shape (predicate_json):
 //
@@ -105,18 +105,18 @@ type EvaluateInput struct {
 
 // Decision is what Evaluate returns.
 type Decision struct {
-	RequiredTier   Tier            `json:"required_tier"`
-	MatchedRules   []MatchedRule   `json:"matched_rules"`
-	EvaluatedCount int             `json:"evaluated_count"`
+	RequiredTier   Tier          `json:"required_tier"`
+	MatchedRules   []MatchedRule `json:"matched_rules"`
+	EvaluatedCount int           `json:"evaluated_count"`
 }
 
 // MatchedRule names the rule that contributed to the required tier so
 // the UI can show "this rule forced AES" + the rule's reason.
 type MatchedRule struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	RequiredTier  Tier   `json:"required_tier"`
-	Reason        string `json:"reason"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	RequiredTier Tier   `json:"required_tier"`
+	Reason       string `json:"reason"`
 }
 
 // Evaluate runs every active rule for the org against the input and

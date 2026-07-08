@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/brightinteraction/hash/internal/nethard"
 )
 
 // AnthropicProvider talks to api.anthropic.com via the Messages API.
@@ -23,7 +25,11 @@ type AnthropicProvider struct {
 	Client  HTTPDoer
 }
 
-func NewAnthropicProvider(baseURL, apiKey, model string) *AnthropicProvider {
+// NewAnthropicProvider builds a provider. allowPrivate=false (production) uses
+// an SSRF-hardened transport that refuses to dial an internal/private IP, so a
+// tenant BYOAI base_url cannot be rebound to reach cloud metadata or internal
+// services at call time.
+func NewAnthropicProvider(baseURL, apiKey, model string, allowPrivate bool) *AnthropicProvider {
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com/v1/messages"
 	}
@@ -35,7 +41,7 @@ func NewAnthropicProvider(baseURL, apiKey, model string) *AnthropicProvider {
 		APIKey:  apiKey,
 		ModelID: model,
 		Version: "2023-06-01",
-		Client:  &http.Client{Timeout: 30 * time.Second},
+		Client:  nethard.Client(30*time.Second, func() bool { return allowPrivate }),
 	}
 }
 

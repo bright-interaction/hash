@@ -75,16 +75,16 @@ func TestEnvInt(t *testing.T) {
 
 func TestIsLocalDevelopment(t *testing.T) {
 	cases := map[string]bool{
-		"":                                      false, // unconfigured fails closed, not local
-		"http://localhost":                      true,
-		"http://localhost:8080":                 true,
-		"https://127.0.0.1":                     true,
-		"http://[::1]:8090":                     true,
-		"http://0.0.0.0":                        true,
-		"http://laptop.local":                   true,
-		"http://x.localhost":                    true,
-		"https://hash.brightinteraction.com": false,
-		"https://esign.brightinteraction.com":   false,
+		"":                                    false, // unconfigured fails closed, not local
+		"http://localhost":                    true,
+		"http://localhost:8080":               true,
+		"https://127.0.0.1":                   true,
+		"http://[::1]:8090":                   true,
+		"http://0.0.0.0":                      true,
+		"http://laptop.local":                 true,
+		"http://x.localhost":                  true,
+		"https://hash.brightinteraction.com":  false,
+		"https://esign.brightinteraction.com": false,
 		// Adversarial: substring-of-"localhost"/".local" must NOT pass.
 		"https://app.localhost.company.com": false,
 		"https://prod.local.attacker.com":   false,

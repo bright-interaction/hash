@@ -40,7 +40,7 @@ func (s *Server) handleEvidenceBundle(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if s.Evidence == nil {
@@ -53,7 +53,7 @@ func (s *Server) handleEvidenceBundle(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "evidence bundle only available for terminal documents (completed, declined, voided, expired)")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -95,7 +95,7 @@ func (s *Server) handleEvidenceManifest(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if s.Evidence == nil {
@@ -108,7 +108,7 @@ func (s *Server) handleEvidenceManifest(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusConflict, "manifest only available for terminal documents")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res.Manifest)

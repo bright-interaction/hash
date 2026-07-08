@@ -242,7 +242,7 @@ func (s *Server) handlePreviewHTML(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if doc.SourceKind != "blocks" {
@@ -251,12 +251,12 @@ func (s *Server) handlePreviewHTML(w http.ResponseWriter, r *http.Request) {
 	}
 	tree, err := blocks.ParseTree(doc.BlocksJson)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "stored blocks invalid: "+err.Error())
+		writeInternalErrorMsg(w, "stored blocks invalid", err)
 		return
 	}
 	vars, _, err := s.resolveVariables(r.Context(), doc)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "resolve vars: "+err.Error())
+		writeInternalErrorMsg(w, "resolve vars", err)
 		return
 	}
 	body := blocks.RenderHTML(tree, vars)
@@ -302,10 +302,10 @@ func (s *Server) mutateTree(r *http.Request, orgID, userID uuid.UUID, docID uuid
 	s.snapshotAfterMutate(r.Context(), doc, &userID, versions.ViaHuman, toolName)
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
 		OrgID: orgID, ActorUserID: &userID, DocumentID: &docID,
-		Kind: audit.KindDocumentUpdated,
-		IP:   firstIPFromHeader(r),
+		Kind:      audit.KindDocumentUpdated,
+		IP:        firstIPFromHeader(r),
 		UserAgent: r.UserAgent(),
-		Payload: map[string]any{"via": "rest", "tool": toolName, "blocks": len(tree.Blocks)},
+		Payload:   map[string]any{"via": "rest", "tool": toolName, "blocks": len(tree.Blocks)},
 	})
 	return doc, nil
 }

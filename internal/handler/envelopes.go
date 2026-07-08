@@ -117,7 +117,7 @@ func (s *Server) handleDetachFromEnvelope(w http.ResponseWriter, r *http.Request
 	}
 	row, err := s.Envelopes.Detach(r.Context(), childID, sess.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -164,7 +164,7 @@ func (s *Server) handleReorderEnvelope(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Envelopes.Reorder(r.Context(), envelopeID, sess.OrgID, ids); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -176,7 +176,7 @@ func (s *Server) handleReorderEnvelope(w http.ResponseWriter, r *http.Request) {
 	})
 	children, err := s.Envelopes.Children(r.Context(), envelopeID, sess.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]any, 0, len(children))
@@ -198,7 +198,7 @@ func (s *Server) handleListEnvelopeChildren(w http.ResponseWriter, r *http.Reque
 	}
 	children, err := s.Envelopes.Children(r.Context(), envelopeID, sess.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]any, 0, len(children))
@@ -227,7 +227,7 @@ func (s *Server) handleEnvelopeManifest(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusNotFound, "envelope not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if !env.IsEnvelope {
@@ -236,7 +236,7 @@ func (s *Server) handleEnvelopeManifest(w http.ResponseWriter, r *http.Request) 
 	}
 	manifest, err := s.Envelopes.BuildManifest(r.Context(), env)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, manifest)

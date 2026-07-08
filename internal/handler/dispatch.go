@@ -33,7 +33,7 @@ func (s *Server) handleRemindDocument(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, send.ErrNotRemindable):
 			writeError(w, http.StatusConflict, "document not in a remindable state")
 		default:
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternalError(w, err)
 		}
 		return
 	}

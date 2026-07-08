@@ -35,7 +35,7 @@ func registerBrandingTools(s *Server, d Deps) {
 		Name:        "set_org_branding",
 		Write:       true,
 		MinRole:     auth.RoleOwner, // REST PUT /branding is owner-only; match it (branding renders into every signer page + final PDF)
-		MinFeature:  "branding", // paid-feature gate, mirroring the REST handleSetBranding
+		MinFeature:  "branding",     // paid-feature gate, mirroring the REST handleSetBranding
 		Description: "Upsert the org-level brand palette. All fields optional; missing fields default to the system palette. Hex colours accept 3- or 6-char form with optional leading '#' and normalise to '#RRGGBB'.",
 		InputSchema: schemaObject(map[string]any{
 			"primary_hex":     stringSchema("hex color for primary surfaces"),

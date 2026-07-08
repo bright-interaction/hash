@@ -231,6 +231,17 @@ func (r *Runtime) Complete(ctx context.Context, req Request, opts CompleteOption
 
 	// Gather the document's party names so Shield redacts them too: no regex
 	// catches a free-text personal name, but the recipients table knows them.
+	//
+	// KNOWN COVERAGE LIMIT (audit L2): structured PII (email/IBAN/personnummer/
+	// phone) in free text IS tokenized, and recipient names are added below, but a
+	// person named ONLY in clause text (e.g. a guarantor who is not a recipient)
+	// matches no regex and is not in the recipients table, so it can reach the
+	// provider untokenized. This is a defense-in-depth/marketing-accuracy gap, NOT
+	// a residency breach: both the instance-default and BYOAI provider paths are
+	// EU-endpoint-locked (config.validateAIEUConfig + ai_provider validateBYOAIBaseURL),
+	// so the text only reaches an EU-hosted processor. Callers can pass extra
+	// non-recipient party names via opts.KnownPII; closing the gap fully needs an
+	// NER/address pass, deferred.
 	known := append([]string{}, opts.KnownPII...)
 	if opts.DocumentID != nil && r.Q != nil {
 		if recs, rerr := r.Q.ListRecipientsByDocument(ctx, *opts.DocumentID); rerr == nil {

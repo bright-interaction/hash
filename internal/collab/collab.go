@@ -2,21 +2,21 @@
 // block editor. The server is a relay: clients hold the CRDT state,
 // the server only:
 //
-//   1. Broadcasts binary updates between connected peers on a per-
-//      document hub.
-//   2. Persists a snapshot of the document state so a fresh client
-//      gets the current state at connect time.
-//   3. Tracks awareness (cursors, user labels) so peers can render
-//      "Alice is typing here" indicators.
+//  1. Broadcasts binary updates between connected peers on a per-
+//     document hub.
+//  2. Persists a snapshot of the document state so a fresh client
+//     gets the current state at connect time.
+//  3. Tracks awareness (cursors, user labels) so peers can render
+//     "Alice is typing here" indicators.
 //
 // Wire protocol matches y-websocket so the standard yjs client library
 // plugs in without a custom adapter:
 //
-//   * Binary frames only
-//   * Message types (first byte):
-//       0x00  sync   (subtypes: 0=sync_step1, 1=sync_step2, 2=update)
-//       0x01  awareness
-//       0x03  query awareness
+//   - Binary frames only
+//   - Message types (first byte):
+//     0x00  sync   (subtypes: 0=sync_step1, 1=sync_step2, 2=update)
+//     0x01  awareness
+//     0x03  query awareness
 //
 // We forward frames as-is without re-encoding, so the Go side doesn't
 // need a Yjs CRDT implementation. Persistence stores the most recent
@@ -150,7 +150,7 @@ type Room struct {
 // state to bootstrap their local Y.Doc and a Send hook for outgoing
 // frames.
 type JoinResult struct {
-	Room       *Room
+	Room         *Room
 	InitialState []byte // raw bytes a y-websocket client unwraps via Y.applyUpdate
 }
 

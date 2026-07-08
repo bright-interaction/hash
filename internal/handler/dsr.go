@@ -109,7 +109,7 @@ func (s *Server) handleSignerDSR(w http.ResponseWriter, r *http.Request) {
 		PayloadJson:   raw,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "persist: "+err.Error())
+		writeInternalErrorMsg(w, "persist", err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -209,7 +209,7 @@ func (s *Server) handleCreateSenderDSR(w http.ResponseWriter, r *http.Request) {
 		PayloadJson:   raw,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "persist: "+err.Error())
+		writeInternalErrorMsg(w, "persist", err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -240,7 +240,7 @@ func (s *Server) handleListDSR(w http.ResponseWriter, r *http.Request) {
 		Limit:   100,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"requests": rows})
@@ -274,7 +274,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if !IsValidDSRStatusTransition(cur.Status, in.Status) {
@@ -289,7 +289,7 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 		FulfilledBy:    uuidToPgUUID(nonZero(u.UserID)),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 
@@ -320,12 +320,20 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 				FulfilledBy:    cur.FulfilledBy,
 			})
 			if anonErr != nil {
-				writeError(w, http.StatusInternalServerError, "anonymize: "+anonErr.Error())
+				writeInternalErrorMsg(w, "anonymize", anonErr)
 			} else {
 				writeError(w, http.StatusConflict, "anonymize: linked recipient not found in this org")
 			}
 			return
 		}
+		// M2: the recipient row is not the only PII store. The signatures row
+		// independently holds the signer's typed legal name, IP and user-agent;
+		// scrub them too. Non-fatal if the recipient never signed (0 rows).
+		_, _ = s.Queries.AnonymizeSignaturesByRecipient(r.Context(), generated.AnonymizeSignaturesByRecipientParams{
+			RecipientID: cur.RecipientID.Bytes,
+			TypedName:   AnonymizationMarker,
+			OrgID:       u.OrgID,
+		})
 		_, _ = s.Audit.Log(r.Context(), audit.Entry{
 			OrgID:       u.OrgID,
 			ActorUserID: &u.UserID,
@@ -335,6 +343,18 @@ func (s *Server) handleTransitionDSR(w http.ResponseWriter, r *http.Request) {
 				"request_id": row.ID,
 				"marker":     AnonymizationMarker,
 			},
+		})
+	}
+
+	// L7: redact the erasure request's OWN subject_email/subject_name once
+	// fulfilled, so the request row doesn't retain the identifiers it was asked
+	// to erase. Runs for any erasure (even sender-side, no recipient link).
+	if in.Status == "fulfilled" && cur.Kind == "erasure" {
+		_ = s.Queries.RedactDSRSubjectIdentifiers(r.Context(), generated.RedactDSRSubjectIdentifiersParams{
+			ID:           id,
+			OrgID:        u.OrgID,
+			SubjectEmail: AnonymizedEmail(row.ID),
+			SubjectName:  AnonymizationMarker,
 		})
 	}
 
@@ -376,7 +396,7 @@ func (s *Server) handleDSRExport(w http.ResponseWriter, r *http.Request) {
 		Lower: email,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{

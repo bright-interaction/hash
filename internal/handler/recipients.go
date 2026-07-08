@@ -144,7 +144,7 @@ func (s *Server) handleCreateRecipient(w http.ResponseWriter, r *http.Request) {
 		MagicTokenExpiresAt: computeMagicTokenExpiry(doc, time.Now()),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create recipient failed: "+err.Error())
+		writeInternalErrorMsg(w, "create recipient failed", err)
 		return
 	}
 

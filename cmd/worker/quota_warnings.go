@@ -125,13 +125,13 @@ func (w *worker) sendQuotaWarning(ctx context.Context, row *generated.ListSubscr
 // (shouldn't happen given the SQL filter, but kept defensively).
 func pickTrippedQuota(row *generated.ListSubscriptionsOverQuotaWarningRow, thresholdPct int) (string, int32, int32, int) {
 	if row.DocumentQuotaMonthly > 0 {
-		pct := int(int64(row.DocumentsUsed)*100 / int64(row.DocumentQuotaMonthly))
+		pct := int(int64(row.DocumentsUsed) * 100 / int64(row.DocumentQuotaMonthly))
 		if pct >= thresholdPct {
 			return "documents", row.DocumentsUsed, row.DocumentQuotaMonthly, pct
 		}
 	}
 	if row.RecipientQuotaMonthly > 0 {
-		pct := int(int64(row.RecipientsUsed)*100 / int64(row.RecipientQuotaMonthly))
+		pct := int(int64(row.RecipientsUsed) * 100 / int64(row.RecipientQuotaMonthly))
 		if pct >= thresholdPct {
 			return "recipients", row.RecipientsUsed, row.RecipientQuotaMonthly, pct
 		}

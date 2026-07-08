@@ -138,12 +138,12 @@ func (s *Seeder) Seed(ctx context.Context, in SeedInput) (*SeedResult, error) {
 	}
 
 	row, err := s.Q.UpsertComplianceBaseline(ctx, generated.UpsertComplianceBaselineParams{
-		OrgID:            in.OrgID,
-		BusinessType:     string(in.BusinessType),
-		Jurisdiction:     juris,
-		DpaTemplateID:    dpaTemplateID,
-		RecordsDocID:     recordsDocID,
-		PrivacyNoticeID:  privacyDocID,
+		OrgID:           in.OrgID,
+		BusinessType:    string(in.BusinessType),
+		Jurisdiction:    juris,
+		DpaTemplateID:   dpaTemplateID,
+		RecordsDocID:    recordsDocID,
+		PrivacyNoticeID: privacyDocID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compliance: upsert baseline: %w", err)

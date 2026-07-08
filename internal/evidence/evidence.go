@@ -2,15 +2,15 @@
 //
 // Builds a single PDF containing:
 //
-//   * The signed final PDF as the visible body.
-//   * The audit certificate PDF as the next page (already concatenated
+//   - The signed final PDF as the visible body.
+//   - The audit certificate PDF as the next page (already concatenated
 //     in Phase 3 via Gotenberg; we reuse it without re-rendering).
-//   * Attached files (PDF/A-3-style embeddings) for machine readers:
-//       - manifest.json     evidence manifest with hashes + signing key
-//       - events.json       complete audit event timeline for the doc
-//       - versions.json     version history with block-level diffs
-//       - public-key.pem    ed25519 public key in PEM form
-//       - cert.ots          optional OpenTimestamps proof for manifest.json
+//   - Attached files (PDF/A-3-style embeddings) for machine readers:
+//   - manifest.json     evidence manifest with hashes + signing key
+//   - events.json       complete audit event timeline for the doc
+//   - versions.json     version history with block-level diffs
+//   - public-key.pem    ed25519 public key in PEM form
+//   - cert.ots          optional OpenTimestamps proof for manifest.json
 //
 // Full PDF/A-3 conformance (ICC color profile, XMP /A flag, tagged
 // structure) is a follow-up: pdfcpu's PDF/A validation is incomplete in
@@ -48,12 +48,12 @@ import (
 
 // Builder produces evidence bundles. Hold one process-wide.
 type Builder struct {
-	Q             *generated.Queries
-	Storage       *storage.Client
-	Versions      *versions.Engine
-	OTSAnchor     OTSAnchor // optional; nil disables anchoring
-	PublicKeyPEM  string    // pre-formatted ed25519 public key in PEM
-	Issuer        string    // human-readable issuer (e.g. "Hash / Bright Interaction AB")
+	Q            *generated.Queries
+	Storage      *storage.Client
+	Versions     *versions.Engine
+	OTSAnchor    OTSAnchor // optional; nil disables anchoring
+	PublicKeyPEM string    // pre-formatted ed25519 public key in PEM
+	Issuer       string    // human-readable issuer (e.g. "Hash / Bright Interaction AB")
 }
 
 // OTSAnchor is the optional OpenTimestamps client. Default impl lives in
@@ -90,23 +90,23 @@ type Manifest struct {
 // without needing access to the live database. One entry per
 // recipient that signed via QES.
 type QTSPBlock struct {
-	Provider           string `json:"provider"`
-	SessionID          string `json:"session_id"`
-	RecipientID        string `json:"recipient_id"`
-	CompletedAt        string `json:"completed_at,omitempty"`
-	CertChainSHA256    string `json:"cert_chain_pem_sha256"`
+	Provider            string `json:"provider"`
+	SessionID           string `json:"session_id"`
+	RecipientID         string `json:"recipient_id"`
+	CompletedAt         string `json:"completed_at,omitempty"`
+	CertChainSHA256     string `json:"cert_chain_pem_sha256"`
 	CertChainAttachment string `json:"cert_chain_attachment"`
-	SubjectCN          string `json:"subject_cn,omitempty"`
-	IssuerCN           string `json:"issuer_cn,omitempty"`
-	NotBefore          string `json:"not_before,omitempty"`
-	NotAfter           string `json:"not_after,omitempty"`
+	SubjectCN           string `json:"subject_cn,omitempty"`
+	IssuerCN            string `json:"issuer_cn,omitempty"`
+	NotBefore           string `json:"not_before,omitempty"`
+	NotAfter            string `json:"not_after,omitempty"`
 }
 
 type BundleSummary struct {
-	FinalPDFKey   string `json:"final_pdf_key,omitempty"`
-	AuditCertKey  string `json:"audit_cert_key,omitempty"`
-	EventCount    int    `json:"event_count"`
-	VersionCount  int    `json:"version_count"`
+	FinalPDFKey  string `json:"final_pdf_key,omitempty"`
+	AuditCertKey string `json:"audit_cert_key,omitempty"`
+	EventCount   int    `json:"event_count"`
+	VersionCount int    `json:"version_count"`
 }
 
 type AnchorSummary struct {
@@ -209,10 +209,10 @@ func (b *Builder) Build(ctx context.Context, doc *generated.Document) (*Evidence
 	// 4. Version history with per-step diffs.
 	versionRows, _ := b.Versions.History(ctx, doc.ID, 1000)
 	type versionDelta struct {
-		VersionNo  int32            `json:"version_no"`
-		CreatedAt  string           `json:"created_at"`
-		CreatedVia string           `json:"created_via"`
-		Summary    string           `json:"summary,omitempty"`
+		VersionNo  int32                  `json:"version_no"`
+		CreatedAt  string                 `json:"created_at"`
+		CreatedVia string                 `json:"created_via"`
+		Summary    string                 `json:"summary,omitempty"`
 		Diff       []versions.BlockChange `json:"diff,omitempty"`
 	}
 	deltas := make([]versionDelta, 0, len(versionRows))

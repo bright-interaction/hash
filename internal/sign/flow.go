@@ -371,10 +371,18 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 // document's final PDF + cert are persisted. Shared by the inline last-signer
 // path and the finalize-retry worker so both emit identical events/emails.
 func (e *Engine) afterFinalize(ctx context.Context, doc *generated.Document, finalKey, certKey string) {
+	payload := map[string]any{"final_pdf_key": finalKey, "audit_cert_key": certKey}
+	// Bind the final PDF digest into the completion event so the ed25519-anchored
+	// audit hash chain covers the exact signed document bytes. Without this an
+	// actor with object-store write could swap final.pdf and no signed structure
+	// would detect it (envelope children already bind via the manifest).
+	if fresh, err := e.Queries.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: doc.OrgID}); err == nil && len(fresh.FinalPdfSha) > 0 {
+		payload["final_pdf_sha256"] = fmt.Sprintf("%x", fresh.FinalPdfSha)
+	}
 	_, _ = e.Audit.Log(ctx, audit.Entry{
 		OrgID: doc.OrgID, DocumentID: &doc.ID,
 		Kind:    audit.KindDocumentCompleted,
-		Payload: map[string]any{"final_pdf_key": finalKey, "audit_cert_key": certKey},
+		Payload: payload,
 	})
 	e.notifyCompleted(ctx, doc, finalKey)
 	// Phase 8.6.1: envelope completion propagates to every child.

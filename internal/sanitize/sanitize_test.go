@@ -123,6 +123,25 @@ func TestClean_SVGStripsScriptsAndMetadata(t *testing.T) {
 	}
 }
 
+func TestClean_SVGStripsGluedEventHandlers(t *testing.T) {
+	// Glued attributes (no whitespace before the name) must be stripped too:
+	// fill="red"onload=... and fill="x"xlink:href="javascript:...".
+	in := `<svg xmlns="http://www.w3.org/2000/svg"><rect fill="red"onload="alert(1)"/><a fill="x"xlink:href="javascript:alert(2)">y</a></svg>`
+	res, err := Clean("logo", "image/svg+xml", []byte(in))
+	if err != nil {
+		t.Fatalf("clean: %v", err)
+	}
+	out := string(res.Bytes)
+	for _, banned := range []string{"onload", "javascript:"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("glued attribute survived: %q still contains %q", out, banned)
+		}
+	}
+	if !strings.Contains(out, `fill="red"`) {
+		t.Errorf("legit attribute wrongly stripped: %s", out)
+	}
+}
+
 func TestSyntheticTemplateReportShape(t *testing.T) {
 	raw, err := SyntheticTemplateReport()
 	if err != nil {

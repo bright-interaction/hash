@@ -92,7 +92,7 @@ func (s *Server) handleSignerClarify(w http.ResponseWriter, r *http.Request) {
 		Question:           in.Question,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -162,7 +162,7 @@ func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
@@ -210,7 +210,7 @@ func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
 		ParentID:     parent,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -245,7 +245,7 @@ func (s *Server) handleListProposals(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	rows, err := s.Queries.ListProposalsByDocument(r.Context(), generated.ListProposalsByDocumentParams{
@@ -253,7 +253,7 @@ func (s *Server) handleListProposals(w http.ResponseWriter, r *http.Request) {
 		Limit:      200,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(rows))
@@ -296,7 +296,7 @@ func (s *Server) handleSetProposalStatus(w http.ResponseWriter, r *http.Request)
 		Status: in.Status,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -335,7 +335,7 @@ func (s *Server) handleSuggestCounter(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
@@ -350,7 +350,7 @@ func (s *Server) handleSuggestCounter(w http.ResponseWriter, r *http.Request) {
 	}
 	tree, err := blocks.ParseTree(doc.BlocksJson)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	block, _, _ := lookupBlockWithNeighbours(tree, in.BlockID)
@@ -367,7 +367,7 @@ func (s *Server) handleSuggestCounter(w http.ResponseWriter, r *http.Request) {
 		RedLines:       in.RedLines,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -395,7 +395,7 @@ func (s *Server) handleBilingualEquivalence(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
@@ -432,7 +432,7 @@ func (s *Server) handleBilingualEquivalence(w http.ResponseWriter, r *http.Reque
 		ClauseB:    in.ClauseB,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -472,7 +472,7 @@ func (s *Server) handleSetNegotiationEnabled(w http.ResponseWriter, r *http.Requ
 	if err := s.Queries.SetDocumentNegotiationEnabled(r.Context(), generated.SetDocumentNegotiationEnabledParams{
 		ID: docID, OrgID: sess.OrgID, NegotiationEnabled: in.Enabled,
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"negotiation_enabled": in.Enabled})
@@ -501,7 +501,7 @@ func (s *Server) handleSetBilingualTarget(w http.ResponseWriter, r *http.Request
 	if err := s.Queries.SetDocumentBilingualTarget(r.Context(), generated.SetDocumentBilingualTargetParams{
 		ID: docID, OrgID: sess.OrgID, BilingualTargetLang: in.Lang,
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"bilingual_target_lang": in.Lang})
@@ -534,7 +534,7 @@ func (s *Server) handleRunRiskAnalysis(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
@@ -548,7 +548,7 @@ func (s *Server) handleRunRiskAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 	tree, err := blocks.ParseTree(doc.BlocksJson)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "parse blocks: "+err.Error())
+		writeInternalErrorMsg(w, "parse blocks", err)
 		return
 	}
 	res, err := s.RiskAnalyzer.Analyze(r.Context(), aiapps.AnalyzeInput{
@@ -560,7 +560,7 @@ func (s *Server) handleRunRiskAnalysis(w http.ResponseWriter, r *http.Request) {
 		SenderContext: in.SenderContext,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{

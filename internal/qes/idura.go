@@ -18,20 +18,20 @@ import (
 // Idura is a Swedish QTSP that proxies BankID + delivers eIDAS QES.
 // Required env:
 //
-//   HASH_QES_IDURA_BASE_URL  default https://api.idura.se
-//   HASH_QES_IDURA_API_KEY   bearer token issued by Idura
-//   HASH_QES_IDURA_TENANT    tenant slug
+//	HASH_QES_IDURA_BASE_URL  default https://api.idura.se
+//	HASH_QES_IDURA_API_KEY   bearer token issued by Idura
+//	HASH_QES_IDURA_TENANT    tenant slug
 //
 // Wire shape (Idura v1 REST):
 //
-//   POST {base}/v1/qes/sessions
-//     {tenant, callback_url, document_digest_hex, signer_email, signer_name}
-//     200 {session_id, redirect_url, expires_at}
+//	POST {base}/v1/qes/sessions
+//	  {tenant, callback_url, document_digest_hex, signer_email, signer_name}
+//	  200 {session_id, redirect_url, expires_at}
 //
-//   POST callback_url
-//     headers: X-Idura-Signature: t=<unix>,v1=<hex>
-//     body: {session_id, status, identity_assertion: {...}, signature_b64,
-//            cert_chain_pem, signer_name, signer_serial}
+//	POST callback_url
+//	  headers: X-Idura-Signature: t=<unix>,v1=<hex>
+//	  body: {session_id, status, identity_assertion: {...}, signature_b64,
+//	         cert_chain_pem, signer_name, signer_serial}
 //
 // On any 4xx/5xx, Start/Callback return wrapped errors so the handler
 // can fail the session row + surface a clear message.
@@ -126,7 +126,7 @@ type iduraCallback struct {
 
 // Callback validates the QTSP's HMAC-signed callback. Idura signs:
 //
-//   X-Idura-Signature: t=<unix>,v1=<hex>
+//	X-Idura-Signature: t=<unix>,v1=<hex>
 //
 // over: "t=<ts>." + body. We bound the timestamp skew at 10 minutes so
 // a replayed callback from yesterday can't complete a session.

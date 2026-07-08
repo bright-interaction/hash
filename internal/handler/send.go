@@ -78,7 +78,7 @@ func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 			})
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 	}
 }
 
@@ -107,7 +107,7 @@ func (s *Server) handleVoidDocument(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, send.ErrAlreadyFinalised):
 			writeError(w, http.StatusConflict, "document already finalised")
 		default:
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternalError(w, err)
 		}
 		return
 	}

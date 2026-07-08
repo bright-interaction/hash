@@ -58,14 +58,17 @@ func buildAIRuntime(cfg *config.Config, q *generated.Queries) (*ai.Runtime, erro
 	// Providers: register everything we can; default is plan-recommended
 	// 'mistral' unless overridden by config.
 	providers := []ai.Provider{}
+	// allowPrivate gates the SSRF guard on outbound AI calls: false in prod so a
+	// (rebound) BYOAI base_url can't reach an internal IP; true only in local dev.
+	allowPrivate := config.IsLocalDevelopment(cfg.PublicURL)
 	if cfg.MistralAPIKey != "" || cfg.MistralBaseURL != "" {
 		providers = append(providers, ai.NewMistralProvider(
-			cfg.MistralBaseURL, cfg.MistralAPIKey, cfg.MistralModel,
+			cfg.MistralBaseURL, cfg.MistralAPIKey, cfg.MistralModel, allowPrivate,
 		))
 	}
 	if cfg.AnthropicAPIKey != "" || cfg.AnthropicBaseURL != "" {
 		providers = append(providers, ai.NewAnthropicProvider(
-			cfg.AnthropicBaseURL, cfg.AnthropicAPIKey, cfg.AnthropicModel,
+			cfg.AnthropicBaseURL, cfg.AnthropicAPIKey, cfg.AnthropicModel, allowPrivate,
 		))
 	}
 
@@ -101,9 +104,9 @@ func buildAIRuntime(cfg *config.Config, q *generated.Queries) (*ai.Runtime, erro
 			}
 			switch row.Provider {
 			case "anthropic":
-				return ai.NewAnthropicProvider(row.BaseUrl, string(plain), row.Model), true
+				return ai.NewAnthropicProvider(row.BaseUrl, string(plain), row.Model, allowPrivate), true
 			case "mistral":
-				return ai.NewMistralProvider(row.BaseUrl, string(plain), row.Model), true
+				return ai.NewMistralProvider(row.BaseUrl, string(plain), row.Model, allowPrivate), true
 			}
 			return nil, false
 		}

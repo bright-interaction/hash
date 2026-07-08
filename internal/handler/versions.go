@@ -74,13 +74,13 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	limit := int32(parseLimit(r.URL.Query().Get("limit"), 50, 200))
 	rows, err := s.Versions.History(r.Context(), docID, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]versionDTO, 0, len(rows))
@@ -111,7 +111,7 @@ func (s *Server) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	v, err := s.Versions.GetByNo(r.Context(), docID, int32(n64))
@@ -120,7 +120,7 @@ func (s *Server) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "version not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if v.OrgID != sess.OrgID {
@@ -149,12 +149,12 @@ func (s *Server) handleDiffVersions(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	maxNo, err := s.Queries.GetLatestDocumentVersionNo(r.Context(), docID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if maxNo <= 0 {
@@ -176,7 +176,7 @@ func (s *Server) handleDiffVersions(w http.ResponseWriter, r *http.Request) {
 		// diffing a version against itself: zero changes by definition.
 		v, err := s.Versions.GetByNo(r.Context(), docID, to)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternalError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -189,12 +189,12 @@ func (s *Server) handleDiffVersions(w http.ResponseWriter, r *http.Request) {
 	}
 	fromV, err := s.Versions.GetByNo(r.Context(), docID, from)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	toV, err := s.Versions.GetByNo(r.Context(), docID, to)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if fromV.OrgID != sess.OrgID || toV.OrgID != sess.OrgID {
@@ -203,7 +203,7 @@ func (s *Server) handleDiffVersions(w http.ResponseWriter, r *http.Request) {
 	}
 	changes, err := versions.Diff(fromV.BlockTreeJson, toV.BlockTreeJson)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -266,7 +266,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if doc.Status != "draft" {
@@ -298,7 +298,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		VariablesJson: target.VariablesJson,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -309,10 +309,10 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		IP:          firstIPFromHeader(r),
 		UserAgent:   r.UserAgent(),
 		Payload: map[string]any{
-			"via":               "rest",
-			"tool":              "restore_document_version",
-			"restored_from_v":   target.VersionNo,
-			"restored_blocks":   blockCountOrZero(target.BlockTreeJson),
+			"via":             "rest",
+			"tool":            "restore_document_version",
+			"restored_from_v": target.VersionNo,
+			"restored_blocks": blockCountOrZero(target.BlockTreeJson),
 		},
 	})
 	writeJSON(w, http.StatusOK, map[string]any{

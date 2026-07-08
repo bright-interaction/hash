@@ -43,12 +43,12 @@ func (s *Server) handleEngagement(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	recipients, err := s.Queries.ListRecipientsByDocument(r.Context(), doc.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 
@@ -72,7 +72,7 @@ func (s *Server) handleEngagement(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.Queries.ListEngagementByDocument(r.Context(), doc.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]engagementBlockDTO, 0, len(rows))
@@ -86,9 +86,9 @@ func (s *Server) handleEngagement(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"blocks":           out,
-		"recipient_count":  len(recipients),
-		"privacy_gated":    false,
+		"blocks":          out,
+		"recipient_count": len(recipients),
+		"privacy_gated":   false,
 	})
 }
 
@@ -113,12 +113,12 @@ func (s *Server) handleTelemetryStream(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	recipients, err := s.Queries.ListRecipientsByDocument(r.Context(), docID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	allSigned := true
@@ -140,17 +140,17 @@ func (s *Server) handleTelemetryStream(w http.ResponseWriter, r *http.Request) {
 		Limit:      200,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	events := make([]map[string]any, 0, len(rows))
 	for _, ev := range rows {
 		entry := map[string]any{
-			"id":           ev.ID.String(),
-			"kind":         ev.Kind,
-			"payload":      json.RawMessage(ev.PayloadJson),
-			"ua_class":     ev.UaClass,
-			"created_at":   ev.CreatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+			"id":         ev.ID.String(),
+			"kind":       ev.Kind,
+			"payload":    json.RawMessage(ev.PayloadJson),
+			"ua_class":   ev.UaClass,
+			"created_at": ev.CreatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
 		}
 		if ev.BlockID.Valid {
 			entry["block_id"] = ev.BlockID.String

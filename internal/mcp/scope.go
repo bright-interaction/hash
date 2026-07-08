@@ -14,10 +14,10 @@ import (
 // scopedDocLookup is the single doc-fetch primitive MCP tools should
 // call. It enforces:
 //
-//   1. the v1.1 per-document agent-token scope (auth.EnforceDocScope),
-//      so a scoped token cannot read documents other than its bound one;
-//   2. the standard org-membership check via the existing
-//      Queries.GetDocument OrgID parameter.
+//  1. the v1.1 per-document agent-token scope (auth.EnforceDocScope),
+//     so a scoped token cannot read documents other than its bound one;
+//  2. the standard org-membership check via the existing
+//     Queries.GetDocument OrgID parameter.
 //
 // Returns the document on success, a "document not found" error on
 // pgx.ErrNoRows or scope mismatch, and the raw error for anything else.

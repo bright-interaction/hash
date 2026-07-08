@@ -56,18 +56,18 @@ func buildTestBundle(t *testing.T, mutate func(map[string][]byte)) []byte {
 		return hex.EncodeToString(s[:])
 	}
 	manifest := map[string]any{
-		"schema_version":          1,
-		"document_id":             "11111111-1111-1111-1111-111111111111",
-		"document_name":           "Test Doc",
-		"issuer":                  "Hash Test",
-		"generated_at":            "2026-05-12T00:00:00Z",
-		"events_sha256":           hash(events),
-		"versions_sha256":         hash(versions),
-		"public_key_pem_sha256":   hash([]byte(pemStr)),
-		"cert_payload_sha256":     hash(payload),
-		"cert_signature_sha256":   hash(signature),
-		"signature_algorithm":     "ed25519",
-		"signature_domain":        "hash:audit-cert:v1",
+		"schema_version":        1,
+		"document_id":           "11111111-1111-1111-1111-111111111111",
+		"document_name":         "Test Doc",
+		"issuer":                "Hash Test",
+		"generated_at":          "2026-05-12T00:00:00Z",
+		"events_sha256":         hash(events),
+		"versions_sha256":       hash(versions),
+		"public_key_pem_sha256": hash([]byte(pemStr)),
+		"cert_payload_sha256":   hash(payload),
+		"cert_signature_sha256": hash(signature),
+		"signature_algorithm":   "ed25519",
+		"signature_domain":      "hash:audit-cert:v1",
 	}
 	manifestJSON, _ := json.MarshalIndent(manifest, "", "  ")
 

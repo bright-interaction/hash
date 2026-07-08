@@ -4,10 +4,29 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	sentry "github.com/getsentry/sentry-go"
 )
+
+// signTokenPath matches the signer magic token in the request path
+// (/sign/<token>/...) so it can be redacted before an event leaves the process.
+var signTokenPath = regexp.MustCompile(`(/sign/)[^/?#]+`)
+
+// scrubSensitive strips credentials that ride in the request line: the signer
+// magic token (/sign/<token>/...) and the one-click action token (?t=<token> on
+// /a/cr, /a/comment). sentry-go serialises URL path + query regardless of
+// SendDefaultPII, so without this a Flare viewer could lift a still-valid token
+// off a panic event and replay a signing link. Applied to every event via
+// BeforeSend so it covers panics and CaptureException alike.
+func scrubSensitive(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+	if event != nil && event.Request != nil {
+		event.Request.QueryString = ""
+		event.Request.URL = signTokenPath.ReplaceAllString(event.Request.URL, "${1}[redacted]")
+	}
+	return event
+}
 
 // InitFlare wires error reporting to the house Flare instance (Sentry-wire
 // protocol) when FLARE_DSN is set in the environment. The DSN is injected by
@@ -22,6 +41,7 @@ func InitFlare(service, release string) bool {
 		Dsn:        dsn,
 		Release:    release,
 		ServerName: service,
+		BeforeSend: scrubSensitive,
 	})
 	if err != nil {
 		slog.Warn("flare: error reporting disabled (sentry init failed)", "error", err)

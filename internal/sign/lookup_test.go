@@ -18,10 +18,10 @@ func TestCheckMagicLinkExpiry(t *testing.T) {
 	future := now.Add(time.Hour)
 
 	cases := []struct {
-		name     string
-		rowExp   pgtype.Timestamptz
-		docExp   pgtype.Timestamptz
-		wantErr  error
+		name    string
+		rowExp  pgtype.Timestamptz
+		docExp  pgtype.Timestamptz
+		wantErr error
 	}{
 		{"both null is always valid", pgtype.Timestamptz{}, pgtype.Timestamptz{}, nil},
 		{"row expiry in past expires the link", ts(past), pgtype.Timestamptz{}, ErrMagicLinkExpired},

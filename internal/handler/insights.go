@@ -20,22 +20,22 @@ func (s *Server) handleOrgInsights(w http.ResponseWriter, r *http.Request) {
 	}
 	counts, err := s.Queries.OrgInsightsCounts(r.Context(), sess.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	completion, err := s.Queries.OrgInsightsCompletionRecent(r.Context(), sess.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	tts, err := s.Queries.OrgInsightsTimeToSign(r.Context(), sess.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	authoring, err := s.Queries.OrgInsightsAgentAuthored(r.Context(), sess.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	top, err := s.Queries.OrgInsightsTopEngagedBlocks(r.Context(), generated.OrgInsightsTopEngagedBlocksParams{
@@ -43,7 +43,7 @@ func (s *Server) handleOrgInsights(w http.ResponseWriter, r *http.Request) {
 		Limit: 10,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	engagement := make([]map[string]any, 0, len(top))

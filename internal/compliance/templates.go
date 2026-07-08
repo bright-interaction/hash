@@ -49,12 +49,12 @@ func (bt BusinessType) Valid() bool {
 // language drafts: senders edit them before sending. They are NOT
 // legal advice; we annotate that in a banner at the top.
 type Templates struct {
-	DPATitle             string
-	DPABody              string
-	RecordsTitle         string
-	RecordsBody          string
-	PrivacyNoticeTitle   string
-	PrivacyNoticeBody    string
+	DPATitle           string
+	DPABody            string
+	RecordsTitle       string
+	RecordsBody        string
+	PrivacyNoticeTitle string
+	PrivacyNoticeBody  string
 	// EIDAS hints: list of extra rule names the seeder should consider
 	// installing for this business type. The Phase 9.2 SeedSwedishDefaults
 	// always runs first; these augment for healthcare / fintech /

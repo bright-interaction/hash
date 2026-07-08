@@ -16,10 +16,10 @@ import (
 // from BlocksJson.
 func TestRenderEnvelopeBody_ConcatenatesChildrenWithPageBreaks(t *testing.T) {
 	envelope := &generated.Document{
-		ID:         uuid.New(),
-		Name:       "Acme Acquisition Package",
-		IsEnvelope: true,
-		BlocksJson: []byte(`{"version":1,"blocks":[]}`),
+		ID:            uuid.New(),
+		Name:          "Acme Acquisition Package",
+		IsEnvelope:    true,
+		BlocksJson:    []byte(`{"version":1,"blocks":[]}`),
 		VariablesJson: []byte(`{}`),
 	}
 	child1 := &generated.Document{

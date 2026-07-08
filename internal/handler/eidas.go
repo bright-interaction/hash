@@ -54,7 +54,7 @@ func (s *Server) handleListEIDASRules(w http.ResponseWriter, r *http.Request) {
 	}
 	rules, err := s.Queries.ListEIDASRules(r.Context(), sess.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]ruleDTO, 0, len(rules))
@@ -111,7 +111,7 @@ func (s *Server) handleCreateEIDASRule(w http.ResponseWriter, r *http.Request) {
 		Active:        active,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -139,7 +139,7 @@ func (s *Server) handleUpdateEIDASRule(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "rule not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
@@ -194,7 +194,7 @@ func (s *Server) handleUpdateEIDASRule(w http.ResponseWriter, r *http.Request) {
 		Active:        active,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -217,7 +217,7 @@ func (s *Server) handleDeleteEIDASRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Queries.DeleteEIDASRule(r.Context(), generated.DeleteEIDASRuleParams{ID: id, OrgID: sess.OrgID}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -238,7 +238,7 @@ func (s *Server) handleSeedSwedishEIDASRules(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if err := s.EIDAS.SeedSwedishDefaults(r.Context(), sess.OrgID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	rules, _ := s.Queries.ListEIDASRules(r.Context(), sess.OrgID)
@@ -282,7 +282,7 @@ func (s *Server) handlePreviewEIDASRules(w http.ResponseWriter, r *http.Request)
 		Variables:    in.Variables,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := map[string]any{
@@ -323,7 +323,7 @@ func (s *Server) handleSetDocumentRoutingTier(w http.ResponseWriter, r *http.Req
 	if err := s.Queries.SetDocumentRoutingTier(r.Context(), generated.SetDocumentRoutingTierParams{
 		ID: docID, OrgID: sess.OrgID, RoutingTier: in.RoutingTier,
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{

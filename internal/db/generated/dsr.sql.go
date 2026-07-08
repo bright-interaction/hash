@@ -54,6 +54,37 @@ func (q *Queries) AnonymizeRecipient(ctx context.Context, arg AnonymizeRecipient
 	return result.RowsAffected(), nil
 }
 
+const anonymizeSignaturesByRecipient = `-- name: AnonymizeSignaturesByRecipient :execrows
+UPDATE signatures s
+SET typed_name = $2,
+    signer_ip = NULL,
+    signer_ua = NULL
+FROM documents d
+WHERE s.recipient_id = $1
+  AND s.document_id = d.id
+  AND d.org_id = $3
+`
+
+type AnonymizeSignaturesByRecipientParams struct {
+	RecipientID uuid.UUID `json:"recipient_id"`
+	TypedName   string    `json:"typed_name"`
+	OrgID       uuid.UUID `json:"org_id"`
+}
+
+// Erasure completeness (Art 17): the signatures row independently stores the
+// signer's typed legal name, IP and user-agent. These are NOT the retained
+// evidentiary artefact (the signed PDF + cert verify from signed_at +
+// image_sha256), so they are redacted alongside the recipient row rather than
+// kept under the 17(3)(e) override. Org-scoped via the documents FK so a
+// cross-tenant recipient_id matches 0 rows. Idempotent.
+func (q *Queries) AnonymizeSignaturesByRecipient(ctx context.Context, arg AnonymizeSignaturesByRecipientParams) (int64, error) {
+	result, err := q.db.Exec(ctx, anonymizeSignaturesByRecipient, arg.RecipientID, arg.TypedName, arg.OrgID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createDataSubjectRequest = `-- name: CreateDataSubjectRequest :one
 INSERT INTO data_subject_requests (
     org_id, document_id, recipient_id, subject_email, subject_name,
@@ -274,6 +305,33 @@ func (q *Queries) ListDataSubjectRequestsByOrg(ctx context.Context, arg ListData
 		return nil, err
 	}
 	return items, nil
+}
+
+const redactDSRSubjectIdentifiers = `-- name: RedactDSRSubjectIdentifiers :exec
+UPDATE data_subject_requests
+SET subject_email = $3,
+    subject_name = $4
+WHERE id = $1 AND org_id = $2
+`
+
+type RedactDSRSubjectIdentifiersParams struct {
+	ID           uuid.UUID `json:"id"`
+	OrgID        uuid.UUID `json:"org_id"`
+	SubjectEmail string    `json:"subject_email"`
+	SubjectName  string    `json:"subject_name"`
+}
+
+// L7: the erasure request row itself stores subject_email + subject_name; once
+// fulfilled they are no longer needed (the request id ties the row to the audit
+// trail) and must not linger in plaintext. Redact in place, org-scoped.
+func (q *Queries) RedactDSRSubjectIdentifiers(ctx context.Context, arg RedactDSRSubjectIdentifiersParams) error {
+	_, err := q.db.Exec(ctx, redactDSRSubjectIdentifiers,
+		arg.ID,
+		arg.OrgID,
+		arg.SubjectEmail,
+		arg.SubjectName,
+	)
+	return err
 }
 
 const updateDataSubjectRequestStatus = `-- name: UpdateDataSubjectRequestStatus :one

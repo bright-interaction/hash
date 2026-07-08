@@ -13,12 +13,12 @@ import (
 // MockProvider is wired when HASH_BILLING_PROVIDER is empty or
 // 'mock'. Behaviour:
 //
-//   * CreateCheckout returns a redirect URL pointing back at our own
+//   - CreateCheckout returns a redirect URL pointing back at our own
 //     webhook with a deterministic synthetic event so the checkout
 //     completes locally with no external service.
-//   * CancelSubscription is a no-op (the engine still flips the
+//   - CancelSubscription is a no-op (the engine still flips the
 //     persisted cancel_at_period_end flag).
-//   * ParseWebhook accepts any payload (no signature check). Used by
+//   - ParseWebhook accepts any payload (no signature check). Used by
 //     the mock checkout return + by tests that POST synthetic events.
 //
 // Production never runs MockProvider; it's intentionally permissive so
@@ -57,18 +57,18 @@ func (MockProvider) ParseWebhook(_ context.Context, raw []byte, _ map[string]str
 		return &WebhookEvent{Kind: "subscription.created"}, nil
 	}
 	var ev struct {
-		Kind                   string  `json:"kind"`
-		OrgID                  string  `json:"org_id"`
-		ProviderCustomerID     string  `json:"provider_customer_id"`
-		ProviderSubscriptionID string  `json:"provider_subscription_id"`
-		ProviderPaymentID      string  `json:"provider_payment_id"`
-		Status                 string  `json:"status"`
-		AmountCents            int     `json:"amount_cents"`
-		Currency               string  `json:"currency"`
-		PeriodStartUnix        int64   `json:"period_start_unix"`
-		PeriodEndUnix          int64   `json:"period_end_unix"`
-		HostedInvoiceURL       string  `json:"hosted_invoice_url"`
-		PDFURL                 string  `json:"pdf_url"`
+		Kind                   string `json:"kind"`
+		OrgID                  string `json:"org_id"`
+		ProviderCustomerID     string `json:"provider_customer_id"`
+		ProviderSubscriptionID string `json:"provider_subscription_id"`
+		ProviderPaymentID      string `json:"provider_payment_id"`
+		Status                 string `json:"status"`
+		AmountCents            int    `json:"amount_cents"`
+		Currency               string `json:"currency"`
+		PeriodStartUnix        int64  `json:"period_start_unix"`
+		PeriodEndUnix          int64  `json:"period_end_unix"`
+		HostedInvoiceURL       string `json:"hosted_invoice_url"`
+		PDFURL                 string `json:"pdf_url"`
 	}
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return &WebhookEvent{Kind: "subscription.created"}, nil

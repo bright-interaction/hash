@@ -11,15 +11,15 @@ import (
 // Template kinds Hash can send. Values match `events.kind` so the same
 // enum drives the audit log and the dispatcher.
 const (
-	KindInvite          = "email.invite"
-	KindReminder        = "email.reminder"
-	KindCompletedSigner = "email.completed_signer"
-	KindCompletedSender = "email.completed_sender"
+	KindInvite           = "email.invite"
+	KindReminder         = "email.reminder"
+	KindCompletedSigner  = "email.completed_signer"
+	KindCompletedSender  = "email.completed_sender"
 	KindDeclined         = "email.declined"
 	KindChangesRequested = "email.changes_requested"
 	KindNewComment       = "email.new_comment"
 	KindVoided           = "email.voided"
-	KindQuotaWarning80  = "email.quota_warning_80"
+	KindQuotaWarning80   = "email.quota_warning_80"
 )
 
 // TemplateContext is everything every email needs to render. Optional

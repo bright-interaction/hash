@@ -54,7 +54,7 @@ func (s *Server) handleSeedCompliance(w http.ResponseWriter, r *http.Request) {
 		Jurisdiction: in.Jurisdiction,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -84,7 +84,7 @@ func (s *Server) handleGetComplianceBaseline(w http.ResponseWriter, r *http.Requ
 			writeJSON(w, http.StatusOK, map[string]any{"baseline": nil})
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"baseline": baselineToDTO(row)})
@@ -103,7 +103,7 @@ func (s *Server) handleListComplianceFlags(w http.ResponseWriter, r *http.Reques
 		Limit:   500,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(rows))
@@ -147,7 +147,7 @@ func (s *Server) handleSetComplianceFlagStatus(w http.ResponseWriter, r *http.Re
 		Status: in.Status,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, flagToDTO(row))
@@ -169,7 +169,7 @@ func (s *Server) handleComplianceFlagRun(w http.ResponseWriter, r *http.Request)
 	}
 	items, err := s.ComplianceFeed.Fetch(r.Context(), zeroTime())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if len(items) == 0 {
@@ -177,7 +177,7 @@ func (s *Server) handleComplianceFlagRun(w http.ResponseWriter, r *http.Request)
 	}
 	raised, err := s.ComplianceFlagger.FlagRun(r.Context(), items)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items_processed": len(items), "flags_raised": raised})
@@ -206,16 +206,16 @@ func baselineToDTO(b *generated.ComplianceBaseline) map[string]any {
 
 func flagToDTO(f *generated.ComplianceFlag) map[string]any {
 	out := map[string]any{
-		"id":              f.ID.String(),
-		"org_id":          f.OrgID.String(),
-		"update_ref":      f.UpdateRef,
-		"update_title":    f.UpdateTitle,
-		"affected_topic":  f.AffectedTopic,
-		"block_id":        f.BlockID,
-		"severity":        f.Severity,
+		"id":               f.ID.String(),
+		"org_id":           f.OrgID.String(),
+		"update_ref":       f.UpdateRef,
+		"update_title":     f.UpdateTitle,
+		"affected_topic":   f.AffectedTopic,
+		"block_id":         f.BlockID,
+		"severity":         f.Severity,
 		"suggested_action": f.SuggestedAction,
-		"status":          f.Status,
-		"raised_at":       f.RaisedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"status":           f.Status,
+		"raised_at":        f.RaisedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}
 	if f.DocumentID.Valid {
 		out["document_id"] = uuid.UUID(f.DocumentID.Bytes).String()

@@ -186,12 +186,12 @@ func run() error {
 	brandingResolver := branding.NewResolver(queries)
 
 	signEngine := &sign.Engine{
-		Pool:    pool,
-		Queries: queries,
-		Storage: store,
-		PDF:     pdfClient,
-		Audit:   auditLog,
-		Mailer:  mailer,
+		Pool:         pool,
+		Queries:      queries,
+		Storage:      store,
+		PDF:          pdfClient,
+		Audit:        auditLog,
+		Mailer:       mailer,
 		Signer:       signer,
 		OrgName:      "Bright Interaction",
 		BaseURL:      cfg.PublicURL,

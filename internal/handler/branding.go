@@ -70,7 +70,7 @@ func (s *Server) handleGetOrgBranding(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := s.resolveOrgBranding(r.Context(), sess.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, b)
@@ -112,7 +112,7 @@ func (s *Server) handleUpsertOrgBranding(w http.ResponseWriter, r *http.Request)
 		SignatureColor: merged.SignatureColor,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -181,7 +181,7 @@ func (s *Server) handleUploadBrandingLogo(w http.ResponseWriter, r *http.Request
 	defer file.Close()
 	raw, err := io.ReadAll(io.LimitReader(file, 4*1024*1024))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	ext := strings.ToLower(extOf(header.Filename))
@@ -202,7 +202,7 @@ func (s *Server) handleUploadBrandingLogo(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if _, err := s.Storage.Put(r.Context(), key, ctype, cleaned.Bytes); err != nil {
-		writeError(w, http.StatusInternalServerError, "storage put: "+err.Error())
+		writeInternalErrorMsg(w, "storage put", err)
 		return
 	}
 	// Logos are served through Hash (GET /branding/logo/{org_id}) so the

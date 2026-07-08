@@ -48,7 +48,7 @@ func (s *Server) handleMintDocAgentToken(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4*1024)
@@ -84,7 +84,7 @@ func (s *Server) handleMintDocAgentToken(w http.ResponseWriter, r *http.Request)
 	}
 	minted, err := auth.MintAPIKey()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "mint: "+err.Error())
+		writeInternalErrorMsg(w, "mint", err)
 		return
 	}
 	row, err := s.Queries.InsertDocAgentToken(r.Context(), generated.InsertDocAgentTokenParams{
@@ -99,7 +99,7 @@ func (s *Server) handleMintDocAgentToken(w http.ResponseWriter, r *http.Request)
 		MaxUses:    int32(in.MaxUses),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -142,7 +142,7 @@ func (s *Server) handleListDocAgentTokens(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	rows, err := s.Queries.ListDocAgentTokens(r.Context(), generated.ListDocAgentTokensParams{
@@ -150,7 +150,7 @@ func (s *Server) handleListDocAgentTokens(w http.ResponseWriter, r *http.Request
 		OrgID:      sess.OrgID,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(rows))
@@ -195,7 +195,7 @@ func (s *Server) handleRevokeDocAgentToken(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusNotFound, "token not found or already revoked")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	docID := row.DocumentID

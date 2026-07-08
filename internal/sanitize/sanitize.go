@@ -261,10 +261,10 @@ func cleanSVG(asset, ct string, raw []byte) (Result, error) {
 	// would corrupt SVG camelCase (viewBox, gradientUnits), breaking the logo
 	// render. A targeted regex strip removes the dangerous bits while leaving
 	// the SVG structure intact.
-	src = svgOnHandlerRE.ReplaceAllString(src, "")
+	src = svgOnHandlerRE.ReplaceAllString(src, "$1")
 	// Strip active-scheme URIs from href / xlink:href so an <a>/<use> can't
 	// navigate to script. data:image and #fragment refs are left untouched.
-	src = svgActiveHrefRE.ReplaceAllString(src, "")
+	src = svgActiveHrefRE.ReplaceAllString(src, "$1")
 
 	cleaned := []byte(src)
 	return Result{
@@ -280,12 +280,17 @@ func cleanSVG(asset, ct string, raw []byte) (Result, error) {
 	}, nil
 }
 
-// svgOnHandlerRE matches an on<word>=<value> attribute (quoted or bare).
-var svgOnHandlerRE = regexp.MustCompile(`(?i)\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)`)
+// svgOnHandlerRE matches an on<word>=<value> attribute (quoted or bare). Group
+// 1 is the attribute BOUNDARY: start-of-string, whitespace, the closing quote of
+// the previous attribute value, or a slash. Anchoring on the boundary (not a
+// leading \s) catches glued attributes like `fill="red"onload=...`, which a
+// whitespace-only prefix let through; the boundary char is preserved on strip.
+var svgOnHandlerRE = regexp.MustCompile(`(?i)(^|[\s"'/])on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)`)
 
 // svgActiveHrefRE matches href / xlink:href attributes whose value uses an
-// active scheme (javascript:, vbscript:, data:text/html).
-var svgActiveHrefRE = regexp.MustCompile(`(?i)\s(?:xlink:)?href\s*=\s*("(?:javascript|vbscript|data:text/html)[^"]*"|'(?:javascript|vbscript|data:text/html)[^']*'|(?:javascript|vbscript):[^\s>]+)`)
+// active scheme (javascript:, vbscript:, data:text/html). Same boundary anchor
+// as svgOnHandlerRE so a glued `"x"xlink:href="javascript:..."` is caught.
+var svgActiveHrefRE = regexp.MustCompile(`(?i)(^|[\s"'/])(?:xlink:)?href\s*=\s*("(?:javascript|vbscript|data:text/html)[^"]*"|'(?:javascript|vbscript|data:text/html)[^']*'|(?:javascript|vbscript):[^\s>]+)`)
 
 // stripBetween removes every span starting with open and ending with
 // close (inclusive). Case-insensitive on the open tag for robustness.

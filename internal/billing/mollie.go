@@ -140,8 +140,8 @@ func (p *MollieProvider) CancelSubscription(ctx context.Context, providerSubscri
 //
 // Mollie webhook body shape: "id=tr_xxx" (form-encoded), no signature.
 // We rely on:
-//   * Path secret in the URL (validated by the handler before us)
-//   * Echo-verify: POST -> GET /payments/{id} with our API key to
+//   - Path secret in the URL (validated by the handler before us)
+//   - Echo-verify: POST -> GET /payments/{id} with our API key to
 //     confirm the payment actually exists + carries our org metadata.
 func (p *MollieProvider) ParseWebhook(ctx context.Context, raw []byte, headers map[string]string) (*WebhookEvent, error) {
 	// Path-secret check: the handler stripped it from the URL before
@@ -173,11 +173,11 @@ func (p *MollieProvider) ParseWebhook(ctx context.Context, raw []byte, headers m
 			OrgID    string `json:"org_id"`
 			PlanSlug string `json:"plan_slug"`
 		} `json:"metadata"`
-		SubscriptionID    string `json:"subscriptionId"`
-		CustomerID        string `json:"customerId"`
-		PaidAt            string `json:"paidAt"`
-		HostedInvoiceURL  string `json:"hostedInvoiceUrl"`
-		Links             struct {
+		SubscriptionID   string `json:"subscriptionId"`
+		CustomerID       string `json:"customerId"`
+		PaidAt           string `json:"paidAt"`
+		HostedInvoiceURL string `json:"hostedInvoiceUrl"`
+		Links            struct {
 			DocumentationURL struct {
 				Href string `json:"href"`
 			} `json:"documentation"`

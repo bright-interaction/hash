@@ -90,12 +90,12 @@ func (s *Server) handleListVariableBindings(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	rows, err := s.Queries.ListVariableBindings(r.Context(), docID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]bindingDTO, 0, len(rows))
@@ -143,7 +143,7 @@ func (s *Server) handleUpsertVariableBinding(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if doc.Status != "draft" {
@@ -159,7 +159,7 @@ func (s *Server) handleUpsertVariableBinding(w http.ResponseWriter, r *http.Requ
 		Fallback:     in.Fallback,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -201,7 +201,7 @@ func (s *Server) handleDeleteVariableBinding(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if doc.Status != "draft" {
@@ -212,7 +212,7 @@ func (s *Server) handleDeleteVariableBinding(w http.ResponseWriter, r *http.Requ
 		DocumentID:   docID,
 		VariableName: name,
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -248,12 +248,12 @@ func (s *Server) handleResolvePreview(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	resolved, report, err := s.resolveVariables(r.Context(), doc)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

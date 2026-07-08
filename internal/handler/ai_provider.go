@@ -89,7 +89,7 @@ func (s *Server) handleGetOrgAIProvider(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, orgAIProviderResponse{
@@ -149,7 +149,7 @@ func (s *Server) handleSetOrgAIProvider(w http.ResponseWriter, r *http.Request) 
 	if in.APIKey != "" {
 		sealed, err := ai.AESEncrypt(s.AISealKey, []byte(in.APIKey))
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "seal key: "+err.Error())
+			writeInternalErrorMsg(w, "seal key", err)
 			return
 		}
 		ct = sealed
@@ -161,7 +161,7 @@ func (s *Server) handleSetOrgAIProvider(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternalError(w, err)
 			return
 		}
 		ct = existing.ApiKeyCt
@@ -178,7 +178,7 @@ func (s *Server) handleSetOrgAIProvider(w http.ResponseWriter, r *http.Request) 
 		Enabled:  enabled,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -206,7 +206,7 @@ func (s *Server) handleDeleteOrgAIProvider(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.Queries.DeleteOrgAISettings(r.Context(), u.OrgID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{

@@ -59,12 +59,12 @@ func TestCollabOriginPatterns_RejectsForeignOrigin(t *testing.T) {
 
 func TestCollabHost(t *testing.T) {
 	cases := map[string]string{
-		"https://hash.brightinteraction.com":     "hash.brightinteraction.com",
-		"http://localhost:8090":                     "localhost:8090",
-		"http://127.0.0.1":                          "127.0.0.1",
-		"":                                          "",
-		"not-a-url":                                 "",
-		"http://[::1]:8080/sub/path":                "[::1]:8080",
+		"https://hash.brightinteraction.com": "hash.brightinteraction.com",
+		"http://localhost:8090":              "localhost:8090",
+		"http://127.0.0.1":                   "127.0.0.1",
+		"":                                   "",
+		"not-a-url":                          "",
+		"http://[::1]:8080/sub/path":         "[::1]:8080",
 	}
 	for in, want := range cases {
 		if got := collabHost(in); got != want {

@@ -80,7 +80,7 @@ func (s *Server) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 
 	secret, err := mintWebhookSecret()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "secret generation failed: "+err.Error())
+		writeInternalErrorMsg(w, "secret generation failed", err)
 		return
 	}
 	row, err := s.Queries.CreateWebhookEndpoint(r.Context(), generated.CreateWebhookEndpointParams{
@@ -91,7 +91,7 @@ func (s *Server) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		EventsSubscribed: in.Events,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create webhook failed: "+err.Error())
+		writeInternalErrorMsg(w, "create webhook failed", err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -174,7 +174,7 @@ func (s *Server) handleListWebhookDeliveries(w http.ResponseWriter, r *http.Requ
 	// Verify the endpoint is in the caller's org first.
 	endpoints, err := s.Queries.ListWebhookEndpointsByOrg(r.Context(), u.OrgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	found := false

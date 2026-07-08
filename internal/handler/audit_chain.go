@@ -59,7 +59,7 @@ func (s *Server) handleVerifyAuditChain(w http.ResponseWriter, r *http.Request) 
 		Limit: limit,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 

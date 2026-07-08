@@ -1,0 +1,17 @@
+# Never bake secrets or VCS history into build layers (backend stage does
+# `COPY . .`). The final alpine stage only copies the compiled binaries, but
+# intermediate layers/build-cache would otherwise carry these.
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+node_modules
+frontend/node_modules
+frontend/.env*
+frontend/build
+e2e
+bin
+*.md
+!README.md
+test-results

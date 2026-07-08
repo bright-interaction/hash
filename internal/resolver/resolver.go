@@ -9,12 +9,12 @@
 //
 // Resolver chain:
 //
-//   1. agent override          (caller-supplied at the top of every render)
-//   2. document static value   (documents.variables_json, today's behaviour)
-//   3. binding fetch           (live from the configured source)
-//   4. binding fallback        (literal in the binding row)
-//   5. unset                   (the {{var}} placeholder stays in the rendered
-//                                output, which the editor highlights)
+//  1. agent override          (caller-supplied at the top of every render)
+//  2. document static value   (documents.variables_json, today's behaviour)
+//  3. binding fetch           (live from the configured source)
+//  4. binding fallback        (literal in the binding row)
+//  5. unset                   (the {{var}} placeholder stays in the rendered
+//     output, which the editor highlights)
 //
 // On send the snapshot pipeline calls FreezeForSend, which materializes the
 // final resolved values into the document_versions row. From that moment on
@@ -367,5 +367,5 @@ func (r *Resolver) InvalidateForSource(sourceKind, sourceRef string) int {
 // that returns no value (the caller falls through to the static layer).
 type staticSource struct{}
 
-func (staticSource) Kind() SourceKind                          { return SourceStatic }
+func (staticSource) Kind() SourceKind                               { return SourceStatic }
 func (staticSource) Fetch(_ context.Context, _ Ref) (string, error) { return "", nil }

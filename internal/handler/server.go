@@ -6,7 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -102,7 +105,7 @@ func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(trustedClientIP)
 	r.Use(middleware.Logger)
 	r.Use(panicMiddleware)
 	r.Use(middleware.Recoverer)
@@ -525,7 +528,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		err := fn(ctx)
 		dc := depCheck{Name: name, OK: err == nil}
 		if err != nil {
-			dc.Err = err.Error()
+			// /health is unauthenticated; a pgx/minio ping error string leaks
+			// internal hostnames + ports ("dial tcp postgres:5432").
+			// Log it server-side; the anon body carries only {name, ok}.
+			slog.Warn("health check failed", "dep", name, "err", err)
 			overall = false
 		}
 		checks = append(checks, dc)
@@ -555,11 +561,11 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		mode = org.ChangeApprovalMode
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user_id":               u.UserID,
-		"org_id":                u.OrgID,
-		"email":                 u.Email,
-		"role":                  u.Role,
-		"change_approval_mode":  mode,
+		"user_id":              u.UserID,
+		"org_id":               u.OrgID,
+		"email":                u.Email,
+		"role":                 u.Role,
+		"change_approval_mode": mode,
 	})
 }
 
@@ -573,6 +579,25 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeInternalError logs the underlying error server-side and returns a generic
+// 500 body. Raw pgx/SQL error strings (SQLSTATE, column/constraint names) and
+// connection errors ("dial tcp host:port") must never reach the client - any
+// API/MCP/curl caller, proxy log, or browser devtools would otherwise see schema
+// internals + internal hostnames. Use for UNEXPECTED failures; keep the typed
+// 4xx branches (quota/eidas/not-found/permission) exactly as-is.
+func writeInternalError(w http.ResponseWriter, err error) {
+	slog.Error("internal error serving request", "err", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+}
+
+// writeInternalErrorMsg is writeInternalError with a safe, operator-authored
+// public message (e.g. "create document failed"). The raw err is logged
+// server-side only; it never reaches the client body.
+func writeInternalErrorMsg(w http.ResponseWriter, publicMsg string, err error) {
+	slog.Error("internal error serving request", "msg", publicMsg, "err", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": publicMsg})
 }
 
 func decodeJSON(r *http.Request, v any) error {
@@ -618,4 +643,47 @@ func clientIP(r *http.Request) string {
 		}
 	}
 	return addr
+}
+
+// trustedClientIP replaces chi middleware.RealIP, which trusts client-supplied
+// True-Client-IP / X-Real-IP / leftmost X-Forwarded-For (all spoofable, so an
+// attacker could rotate a header per request to defeat per-IP rate limits and
+// forge the signer IP recorded on the eIDAS audit trail). Instead we take the
+// RIGHTMOST PUBLIC entry of X-Forwarded-For: our proxy hops (nginx, caddy) sit
+// on private IPs and are skipped, and any attacker-injected entries are LEFT of
+// the real client (the outermost trusted proxy appended it), so they are never
+// chosen. True-Client-IP / X-Real-IP are ignored entirely. With no XFF (local
+// dev, direct dial) the direct-peer RemoteAddr is left untouched.
+func trustedClientIP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ip := rightmostPublicXFF(r.Header.Get("X-Forwarded-For")); ip != "" {
+			_, port, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				port = "0"
+			}
+			r.RemoteAddr = net.JoinHostPort(ip, port)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// rightmostPublicXFF returns the rightmost X-Forwarded-For entry that parses as
+// a public IP, or "" if there is none.
+func rightmostPublicXFF(xff string) string {
+	if xff == "" {
+		return ""
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := net.ParseIP(strings.TrimSpace(parts[i]))
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			continue
+		}
+		return ip.String()
+	}
+	return ""
 }

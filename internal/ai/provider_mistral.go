@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/brightinteraction/hash/internal/nethard"
 )
 
 // MistralProvider talks to Mistral Large via the OpenRouter EU endpoint.
@@ -30,7 +32,7 @@ type HTTPDoer interface {
 // NewMistralProvider builds a provider. APIKey empty disables it: the
 // runtime can still register the provider (so Status() shows it) but
 // Complete returns an error pointing at the missing key.
-func NewMistralProvider(baseURL, apiKey, model string) *MistralProvider {
+func NewMistralProvider(baseURL, apiKey, model string, allowPrivate bool) *MistralProvider {
 	if baseURL == "" {
 		baseURL = "https://openrouter.ai/api/v1/chat/completions"
 	}
@@ -41,7 +43,9 @@ func NewMistralProvider(baseURL, apiKey, model string) *MistralProvider {
 		BaseURL: baseURL,
 		APIKey:  apiKey,
 		ModelID: model,
-		Client:  &http.Client{Timeout: 30 * time.Second},
+		// SSRF-hardened transport: a rebound tenant BYOAI base_url cannot reach
+		// an internal IP at call time. allowPrivate=true only in local dev.
+		Client: nethard.Client(30*time.Second, func() bool { return allowPrivate }),
 	}
 }
 

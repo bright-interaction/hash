@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/brightinteraction/hash/internal/nethard"
 )
 
 // ValidateWebhookURL guards the webhook delivery path against SSRF. The
@@ -163,6 +165,11 @@ func NewDispatcher(secret SignaturePair) *Dispatcher {
 	d := &Dispatcher{Secret: secret}
 	d.HTTP = &http.Client{
 		Timeout: 10 * time.Second,
+		// Dial-time SSRF guard on the RESOLVED IP closes DNS rebinding: the
+		// LookupIP checks in ValidateWebhookURL are a separate resolution a
+		// short-TTL rebinding resolver can race, but the transport validates the
+		// exact connect address. AllowPrivate is read live (set post-construct).
+		Transport: nethard.Transport(func() bool { return d.AllowPrivate }),
 		// Re-validate every redirect hop so a 3xx can't bounce the request
 		// from an allowed host to an internal address, and cap the chain.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {

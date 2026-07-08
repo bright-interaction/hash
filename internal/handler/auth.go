@@ -36,7 +36,14 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// Find-or-create the user. First try by Zitadel sub (the stable identifier; safe
 	// to trust). A sub match is used regardless of email_verified.
 	user, err := s.Queries.GetUserByZitadelSub(ctx, pgtype.Text{String: sub, Valid: true})
-	if errors.Is(err, pgx.ErrNoRows) || err != nil {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		// A transient DB error (pool exhaustion, timeout) is NOT "no such user".
+		// Treating it as one would fork a duplicate org for a returning user
+		// during a hiccup, orphaning them from their real org + documents. Fail.
+		writeInternalError(w, err)
+		return
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
 		// No stable-sub match. Only ADOPT an existing account by email when the IdP
 		// asserts the email is verified; otherwise an attacker presenting an
 		// unverified email claim equal to a victim owner's address would link straight

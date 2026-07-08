@@ -41,12 +41,12 @@ import (
 // status (REST) or tool error (MCP). Provider errors (eidas.GuardError,
 // billing.ErrQuotaExceeded) are passed through unwrapped for the same reason.
 var (
-	ErrDocumentNotFound = errors.New("document not found")
-	ErrNotDraft         = errors.New("document not in draft state")
-	ErrNoSigners        = errors.New("document needs at least one signer recipient before send")
+	ErrDocumentNotFound     = errors.New("document not found")
+	ErrNotDraft             = errors.New("document not in draft state")
+	ErrNoSigners            = errors.New("document needs at least one signer recipient before send")
 	ErrMissingSignerForRole = errors.New("a signature field has no recipient assigned to its role")
-	ErrAlreadyFinalised = errors.New("document already finalised")
-	ErrNotRemindable    = errors.New("document not in a remindable state")
+	ErrAlreadyFinalised     = errors.New("document already finalised")
+	ErrNotRemindable        = errors.New("document not in a remindable state")
 )
 
 // Actor identifies who is driving a transition. The explicit org + actor (no

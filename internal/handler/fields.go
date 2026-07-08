@@ -125,7 +125,7 @@ func (s *Server) handleAddField(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
@@ -188,7 +188,7 @@ func (s *Server) handleAddField(w http.ResponseWriter, r *http.Request) {
 		OptionsJson: optionsJSON,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create field: "+err.Error())
+		writeInternalErrorMsg(w, "create field", err)
 		return
 	}
 	_, _ = s.Audit.Log(r.Context(), audit.Entry{
@@ -221,12 +221,12 @@ func (s *Server) handleListFields(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	rows, err := s.Queries.ListFieldsByDocument(r.Context(), docID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(rows))
@@ -249,7 +249,7 @@ func (s *Server) handleDeleteField(w http.ResponseWriter, r *http.Request) {
 	if err := s.Queries.DeleteFieldByID(r.Context(), generated.DeleteFieldByIDParams{
 		ID: id, OrgID: sess.OrgID,
 	}); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -270,7 +270,7 @@ func (s *Server) handleSignerListFields(w http.ResponseWriter, r *http.Request) 
 		RecipientID: pgtype.UUID{Bytes: rc.Recipient.ID, Valid: true},
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(rows))
@@ -326,7 +326,7 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 		RecipientID: pgtype.UUID{Bytes: rc.Recipient.ID, Valid: true},
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	allowedSet := map[string]*generated.DocumentField{}
@@ -361,7 +361,7 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternalError(w, err)
 			return
 		}
 		_, _ = s.Audit.Log(r.Context(), audit.Entry{

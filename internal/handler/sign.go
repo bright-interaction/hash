@@ -145,7 +145,7 @@ func (s *Server) handleSignerDocument(w http.ResponseWriter, r *http.Request) {
 	// exactly what the sender approved (variables + conditionals applied).
 	html, err := s.Sign.RenderForSigner(r.Context(), rc)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "render preview: "+err.Error())
+		writeInternalErrorMsg(w, "render preview", err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -158,7 +158,7 @@ func (s *Server) handleSignerView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Sign.MarkViewed(r.Context(), rc, clientIP(r), r.UserAgent()); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "viewed"})
@@ -233,7 +233,7 @@ func (s *Server) handleSignerDecline(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, sign.ErrAlreadySigned):
 			writeError(w, http.StatusConflict, "you have already signed this document")
 		default:
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternalError(w, err)
 		}
 		return
 	}
@@ -322,7 +322,7 @@ func (s *Server) handleSignerFinalPDF(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := s.Storage.Get(r.Context(), rc.Document.FinalPdfKey.String)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/pdf")
@@ -344,7 +344,7 @@ func (s *Server) handleSignerPDF(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := s.Storage.Get(r.Context(), rc.Document.PdfStorageKey.String)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/pdf")
@@ -397,7 +397,7 @@ func (s *Server) handleFinalPDF(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := s.Storage.Get(r.Context(), doc.FinalPdfKey.String)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/pdf")
@@ -426,7 +426,7 @@ func (s *Server) handleAuditCert(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := s.Storage.Get(r.Context(), doc.AuditCertKey.String)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/pdf")

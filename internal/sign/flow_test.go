@@ -12,7 +12,7 @@ import (
 )
 
 func testCtx() context.Context { return context.Background() }
-func testUUID() uuid.UUID       { return uuid.New() }
+func testUUID() uuid.UUID      { return uuid.New() }
 
 func TestVarsFromJSON(t *testing.T) {
 	cases := []struct {

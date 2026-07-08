@@ -129,12 +129,12 @@ func SchemaJSON() map[string]any {
 	}
 	for _, t := range AllTypes() {
 		entry := map[string]any{
-			"type":         string(t),
-			"is_container": t.IsContainer(),
-			"is_field":     t.IsField(),
+			"type":           string(t),
+			"is_container":   t.IsContainer(),
+			"is_field":       t.IsField(),
 			"required_attrs": typeRequiredAttrs(t),
 			"optional_attrs": typeOptionalAttrs(t),
-			"description":  typeDescription(t),
+			"description":    typeDescription(t),
 		}
 		out["types"] = append(out["types"].([]map[string]any), entry)
 	}

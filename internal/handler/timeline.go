@@ -42,13 +42,13 @@ func (s *Server) handleAuditTimeline(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	filter := parseTimelineFilter(r)
 	entries, err := s.fetchDocTimeline(r.Context(), docID, filter)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	if r.URL.Query().Get("group") != "false" {
@@ -79,14 +79,14 @@ func (s *Server) handleAuditTimelineCSV(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusNotFound, "document not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	filter := parseTimelineFilter(r)
 	filter.Limit = maxTimelineLimit
 	entries, err := s.fetchDocTimeline(r.Context(), docID, filter)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	entries, _ = timeline.AttachActorEmails(entries, s.actorEmailLookup(r.Context(), sess.OrgID))
@@ -122,7 +122,7 @@ func (s *Server) handleOrgActivity(w http.ResponseWriter, r *http.Request) {
 		Limit:   filter.LimitOrDefault(defaultTimelineLimit),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	entries := make([]timeline.Entry, 0, len(rows))
@@ -149,7 +149,7 @@ func (s *Server) handleOrgActivityLeaderboard(w http.ResponseWriter, r *http.Req
 		Limit:     int32(limit),
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, err)
 		return
 	}
 	lookupEmails := s.actorEmailLookup(r.Context(), sess.OrgID)
