@@ -175,6 +175,18 @@ func registerFieldTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, errors.New("field_id must be a uuid")
 			}
+			// Confine a doc-scoped agent token: resolve the field's owning doc
+			// (org-scoped) and enforce scope before deleting.
+			ownerDoc, err := d.Queries.GetFieldOwnerDoc(r.Context(), generated.GetFieldOwnerDocParams{ID: id, OrgID: u.OrgID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errors.New("field not found")
+			}
+			if err != nil {
+				return nil, err
+			}
+			if err := auth.EnforceDocScope(r.Context(), ownerDoc); err != nil {
+				return nil, err
+			}
 			if err := d.Queries.DeleteFieldByID(r.Context(), generated.DeleteFieldByIDParams{
 				ID: id, OrgID: u.OrgID,
 			}); err != nil {

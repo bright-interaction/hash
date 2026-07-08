@@ -105,6 +105,27 @@ func (q *Queries) DeleteFieldByID(ctx context.Context, arg DeleteFieldByIDParams
 	return err
 }
 
+const getFieldOwnerDoc = `-- name: GetFieldOwnerDoc :one
+SELECT document_fields.document_id
+FROM document_fields
+JOIN documents ON documents.id = document_fields.document_id
+WHERE document_fields.id = $1 AND documents.org_id = $2
+`
+
+type GetFieldOwnerDocParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+// The owning document of a fillable field, org-scoped. Used to enforce doc-scope
+// on delete_document_field so a doc-scoped token cannot delete a sibling doc's field.
+func (q *Queries) GetFieldOwnerDoc(ctx context.Context, arg GetFieldOwnerDocParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getFieldOwnerDoc, arg.ID, arg.OrgID)
+	var document_id uuid.UUID
+	err := row.Scan(&document_id)
+	return document_id, err
+}
+
 const listFieldsByDocument = `-- name: ListFieldsByDocument :many
 SELECT id, document_id, recipient_id, type, page, x_pct, y_pct, w_pct, h_pct, required, label, options_json, value, completed_at, created_at FROM document_fields
 WHERE document_id = $1

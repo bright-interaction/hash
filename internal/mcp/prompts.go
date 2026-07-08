@@ -50,7 +50,14 @@ Process:
      provider.
   4. Call add_signature_field for each signer (recipient_role="client"
      and "provider").
-  5. Return the document id and a one-line summary of what you placed.
+  5. Call list_document_fields to confirm every signer has a signature
+     field before you hand off.
+  6. Return the document id and a one-line summary of what you placed,
+     then tell the human that calling send_document will email the
+     signers and start the signing ceremony. Do NOT call send_document
+     yourself unless the human explicitly confirms; if they do, call it
+     and report the sign URLs. To fix a mistyped signer before sending,
+     use update_recipient / delete_recipient (draft-only).
 
 Style: clear, plain English; no boilerplate filler. Reference the
 governing-law jurisdiction explicitly.`, args["client_name"], args["provider_name"], args["monthly_fee"], term, law)
@@ -95,7 +102,12 @@ Steps:
   5. add_recipient for every party identified (role="signer").
   6. add_signature_field per signer.
   7. Reply with the document id, your OPEN_QUESTIONS list (if any), and
-     the inferred parameters (term, fees, governing law).`, thread)
+     the inferred parameters (term, fees, governing law).
+  8. Do NOT send yet. Tell the human that send_document will email the
+     signers, and only call it if they confirm (report the sign URLs on
+     success). If a party was extracted with a wrong email, correct it
+     with update_recipient before sending; drop a wrong one with
+     delete_recipient. Both are draft-only.`, thread)
 			return []PromptMessage{{
 				Role: "user",
 				Content: struct {

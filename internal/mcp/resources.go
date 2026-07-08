@@ -117,6 +117,20 @@ func capabilitiesPayload(s *Server) map[string]any {
 			"audit_trail":  "every write fires an event with via=mcp + tool name; readable via hash://events/recent",
 			"draft_only":   "block edits require status=draft; sent or completed documents are immutable to authoring tools",
 			"agent_marker": "documents authored or edited via MCP are tagged in the audit trail so reviewers can filter",
+			"doc_scope":    "a per-document agent token is confined to its bound document; every doc-addressed tool re-checks scope, so a scoped token cannot touch another document even inside its own org",
+		},
+		// lifecycle self-describes the document state machine and the tool
+		// sequence for each transition, so an agent can complete the whole
+		// draft -> send -> sign -> evidence path without trial-and-error.
+		"lifecycle": map[string]any{
+			"states": []string{"draft", "sent", "completed", "declined", "voided", "expired"},
+			"stages": []map[string]any{
+				{"stage": "author (draft)", "tools": "create_document, append_block/update_block/reorder_blocks, add_recipient, update_recipient, delete_recipient, add_signature_field, add_document_field, set_variables, bind_variable; verify with list_recipients + list_document_fields", "note": "only mutable in draft; recipients are editable up to send"},
+				{"stage": "send", "tools": "send_document", "note": "OUTWARD ACTION: emails every recipient a magic-link sign URL and freezes recipients + variables. Confirm with the human first. void_document / send_reminder manage a sent doc"},
+				{"stage": "track", "tools": "get_document, list_recipients, get_document_events, document_brief prompt", "note": "poll recipient status while the ceremony runs"},
+				{"stage": "complete", "tools": "download_final_pdf, download_audit_cert (any plan); export_evidence_package + get_evidence_manifest (paid evidence_bundle)", "note": "available once status=completed; hands off the signed contract + tamper-evidence"},
+			},
+			"gates": "write tools need the write scope AND at least RoleSender (owner-only tools declare MinRole=owner); some declare a MinFeature that fails closed if the plan lacks it",
 		},
 	}
 }

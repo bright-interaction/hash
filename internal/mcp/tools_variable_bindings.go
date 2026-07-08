@@ -72,7 +72,8 @@ func registerVariableBindingTools(s *Server, d Deps) {
 
 	bindHandler := func(name string, kind resolver.SourceKind, refField, pathField string) ToolDef {
 		return ToolDef{
-			Name: name,
+			Name:  name,
+			Write: true, // mutates document bindings: needs the write scope + RoleSender default (parity with bind_variable_to_org_setting / unbind_variable and the REST RequireRoleForWrites gate)
 			Description: fmt.Sprintf(
 				"Bind a {{variable}} to a %s source. The value resolves live at render time on draft docs; on send, the resolved value is frozen into the document version snapshot.",
 				kind),
@@ -223,6 +224,11 @@ func runBind(r *http.Request, d Deps, orgID uuid.UUID, userID *uuid.UUID, args m
 	id, err := uuid.Parse(docIDStr)
 	if err != nil {
 		return nil, errors.New("document_id must be a uuid")
+	}
+	// Honor a doc-scoped agent token's sandbox: it must not write bindings onto a
+	// sibling document in the same org. (No-op for org-wide keys.)
+	if err := auth.EnforceDocScope(r.Context(), id); err != nil {
+		return nil, err
 	}
 	variable, _ := args["variable"].(string)
 	if variable == "" {

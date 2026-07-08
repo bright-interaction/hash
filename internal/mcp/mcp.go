@@ -11,11 +11,34 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/brightinteraction/hash/internal/auth"
 	"github.com/brightinteraction/hash/internal/billing"
 )
+
+// sanitizeToolError keeps a tool's operator-authored validation message
+// (not-found / bad-uuid / permission / quota) but replaces a raw pgx/SQL or
+// connection error with a generic string, logging the real one server-side.
+// The REST surface enforces the same discipline (writeInternalError); without
+// this an agent would see SQLSTATE + column/constraint names or "dial tcp
+// host:port" internal hostnames in result.content on any DB fault.
+func sanitizeToolError(err error) string {
+	var pgErr *pgconn.PgError
+	var connErr *pgconn.ConnectError
+	msg := err.Error()
+	if errors.As(err, &pgErr) || errors.As(err, &connErr) ||
+		strings.Contains(msg, "dial tcp") || strings.Contains(msg, "SQLSTATE") ||
+		strings.Contains(msg, "host=") || strings.Contains(msg, "connection refused") {
+		slog.Error("mcp tool internal error", "err", err)
+		return "internal error"
+	}
+	return msg
+}
 
 // Wire types. We keep envelopes flat, with `result` or `error` populated
 // but never both. ID may be a string, number, or null per JSON-RPC 2.0.
@@ -290,7 +313,7 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req req
 	result, err := tool.Handler(r, p.Arguments)
 	if err != nil {
 		writeRPCResult(w, req.ID, ToolResult{
-			Content: []ToolContent{{Type: "text", Text: err.Error()}},
+			Content: []ToolContent{{Type: "text", Text: sanitizeToolError(err)}},
 			IsError: true,
 		})
 		return

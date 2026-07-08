@@ -33,3 +33,8 @@ UPDATE documents
    SET bilingual_target_lang = $3,
        updated_at = now()
  WHERE id = $1 AND org_id = $2;
+
+-- name: GetProposalOwnerDoc :one
+-- The owning document of a proposal, org-scoped. Used to enforce doc-scope
+-- (a doc-scoped agent token must not touch a sibling document's proposals).
+SELECT document_id FROM document_proposals WHERE id = $1 AND org_id = $2;

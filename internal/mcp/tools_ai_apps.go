@@ -245,6 +245,18 @@ func registerAIAppsTools(s *Server, d Deps) {
 				if err != nil {
 					return nil, errors.New("proposal_id must be a uuid")
 				}
+				// Confine a doc-scoped agent token: it must not flip a proposal on
+				// a sibling document. Resolve the owning doc (org-scoped) first.
+				ownerDoc, err := d.Queries.GetProposalOwnerDoc(r.Context(), generated.GetProposalOwnerDocParams{ID: id, OrgID: u.OrgID})
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, errors.New("proposal not found")
+				}
+				if err != nil {
+					return nil, err
+				}
+				if err := auth.EnforceDocScope(r.Context(), ownerDoc); err != nil {
+					return nil, err
+				}
 				switch p.Status {
 				case "pending", "accepted", "rejected", "superseded":
 				default:

@@ -96,6 +96,10 @@ func (s *Server) handleUpsertOrgBranding(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, field+": "+err.Error())
 		return
 	}
+	if err := branding.ValidateLogoURL(in.LogoURL); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	def := branding.DefaultBranding()
 	merged := mergeBrandingInput(def, in)
 	row, err := s.Queries.UpsertOrgBranding(r.Context(), generated.UpsertOrgBrandingParams{

@@ -18,6 +18,7 @@ import (
 	"github.com/brightinteraction/hash/internal/qes"
 	"github.com/brightinteraction/hash/internal/resolver"
 	"github.com/brightinteraction/hash/internal/send"
+	"github.com/brightinteraction/hash/internal/storage"
 	"github.com/brightinteraction/hash/internal/versions"
 )
 
@@ -25,6 +26,7 @@ import (
 type Deps struct {
 	Pool         *pgxpool.Pool
 	Queries      *generated.Queries
+	Storage      *storage.Client
 	Audit        *audit.Logger
 	Mailer       dispatch.Mailer
 	Versions     *versions.Engine

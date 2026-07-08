@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -151,6 +152,14 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, errors.New("child_id must be a uuid")
 			}
+			// A doc-scoped agent token must not attach/detach documents outside
+			// its sandbox: both the envelope and the child are documents.
+			if err := auth.EnforceDocScope(r.Context(), envID); err != nil {
+				return nil, err
+			}
+			if err := auth.EnforceDocScope(r.Context(), childID); err != nil {
+				return nil, err
+			}
 			row, err := d.Envelopes.Attach(r.Context(), envID, childID, u.OrgID, p.Position)
 			if err != nil {
 				return nil, err
@@ -177,6 +186,9 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			id, err := uuid.Parse(p.ChildID)
 			if err != nil {
 				return nil, errors.New("child_id must be a uuid")
+			}
+			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
+				return nil, err
 			}
 			row, err := d.Envelopes.Detach(r.Context(), id, u.OrgID)
 			if err != nil {
@@ -209,6 +221,9 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			envID, err := uuid.Parse(p.EnvelopeID)
 			if err != nil {
 				return nil, errors.New("envelope_id must be a uuid")
+			}
+			if err := auth.EnforceDocScope(r.Context(), envID); err != nil {
+				return nil, err
 			}
 			ids := make([]uuid.UUID, 0, len(p.ChildIDOrder))
 			for _, raw := range p.ChildIDOrder {
@@ -316,6 +331,15 @@ func envelopeRow(d *generated.Document) map[string]any {
 	}
 	if d.EnvelopePosition.Valid {
 		out["envelope_position"] = d.EnvelopePosition.Int32
+	}
+	// Final-PDF metadata so an agent can tell in one call whether a child is
+	// finished + ready to download (matches the list_envelope_children description).
+	if d.FinalPdfKey.Valid {
+		out["final_pdf_ready"] = true
+		out["final_pdf_sha256"] = fmt.Sprintf("%x", d.FinalPdfSha)
+	}
+	if d.CompletedAt.Valid {
+		out["completed_at"] = d.CompletedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z")
 	}
 	return out
 }

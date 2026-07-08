@@ -88,6 +88,9 @@ func registerBrandingTools(s *Server, d Deps) {
 				}
 				*p.ptr = norm
 			}
+			if err := branding.ValidateLogoURL(in.LogoURL); err != nil {
+				return nil, err
+			}
 			merged := mergeForMCP(loadOrgBranding(r, d, u.OrgID), in.PrimaryHex, in.AccentHex,
 				in.SurfaceHex, in.TextHex, in.MutedHex, in.LogoURL, in.LogoAlt,
 				in.FontHeading, in.FontBody, in.SignatureColor)

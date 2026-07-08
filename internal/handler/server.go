@@ -209,6 +209,10 @@ func (s *Server) Routes() http.Handler {
 	// CSRF or accept-negotiation middleware. API-key auth gates it.
 	if s.MCP != nil && s.APIKeys != nil {
 		r.Route("/mcp", func(r chi.Router) {
+			// Per-IP cap: every other authed/public surface has one, and the AI
+			// tools each fan out to a paid LLM. Generous (agents make many calls)
+			// but bounds cost/DoS amplification from a leaked/over-shared token.
+			r.Use(httprate.LimitByIP(240, time.Minute))
 			r.Use(auth.RequireAPIKey(s.APIKeys))
 			r.Mount("/", s.MCP.Handler())
 		})
@@ -433,15 +437,19 @@ func (s *Server) Routes() http.Handler {
 		})
 
 		// v1.2 field deletion lives outside /documents because the field
-		// id is the addressing key on remove.
-		r.Delete("/fields/{id}", s.handleDeleteField)
+		// id is the addressing key on remove. These three routes address by
+		// their own id so they sit outside the /documents group, but they are
+		// still sender-tier writes: gate them explicitly so a viewer can't
+		// mutate via them (parity with the /documents group + the MCP twins,
+		// whose Write:true defaults to RoleSender).
+		r.With(auth.RequireRole(auth.RoleSender)).Delete("/fields/{id}", s.handleDeleteField)
 
 		// Phase 11.2 proposal status lives outside /documents because
 		// the proposal id is the addressing key on accept/reject.
-		r.Patch("/proposals/{id}/status", s.handleSetProposalStatus)
+		r.With(auth.RequireRole(auth.RoleSender)).Patch("/proposals/{id}/status", s.handleSetProposalStatus)
 
 		// v1.1: per-doc agent token revoke (token id is the addressing key).
-		r.Delete("/agent-tokens/{id}", s.handleRevokeDocAgentToken)
+		r.With(auth.RequireRole(auth.RoleSender)).Delete("/agent-tokens/{id}", s.handleRevokeDocAgentToken)
 
 		// Phase 8.6: envelope-specific operations live under /envelopes
 		// so the URL surface signals envelope-vs-document intent. The

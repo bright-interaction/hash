@@ -41,3 +41,11 @@ WHERE document_id = $1
   AND type IN ('text','date','checkbox','dropdown','initial')
   AND (value IS NULL OR value = '');
 
+
+-- name: GetFieldOwnerDoc :one
+-- The owning document of a fillable field, org-scoped. Used to enforce doc-scope
+-- on delete_document_field so a doc-scoped token cannot delete a sibling doc's field.
+SELECT document_fields.document_id
+FROM document_fields
+JOIN documents ON documents.id = document_fields.document_id
+WHERE document_fields.id = $1 AND documents.org_id = $2;

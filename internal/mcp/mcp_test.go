@@ -6,13 +6,25 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
+	"github.com/brightinteraction/hash/internal/ai"
+	"github.com/brightinteraction/hash/internal/aiapps"
+	"github.com/brightinteraction/hash/internal/audit"
 	"github.com/brightinteraction/hash/internal/auth"
 	"github.com/brightinteraction/hash/internal/compliance"
+	"github.com/brightinteraction/hash/internal/db/generated"
 	"github.com/brightinteraction/hash/internal/eidas"
+	"github.com/brightinteraction/hash/internal/envelopes"
+	"github.com/brightinteraction/hash/internal/evidence"
+	"github.com/brightinteraction/hash/internal/qes"
+	"github.com/brightinteraction/hash/internal/resolver"
+	"github.com/brightinteraction/hash/internal/send"
+	"github.com/brightinteraction/hash/internal/storage"
+	"github.com/brightinteraction/hash/internal/versions"
 )
 
 // withSessionContext attaches a fake session user to the request, the way
@@ -277,6 +289,53 @@ func TestWriteToolsRequireOwnerRoleParity(t *testing.T) {
 		}
 		if tool.MinRole != auth.RoleOwner {
 			t.Errorf("MCP tool %q must be MinRole=owner to match its owner-only REST twin, got %q", name, tool.MinRole)
+		}
+	}
+}
+
+// fullServer builds a server with every register func mounted. Non-nil
+// zero-value deps satisfy the `if d.X == nil { return }` guards so the gated
+// surfaces (bindings, evidence, downloads, AI apps, QES, ...) actually register.
+// Handlers are never invoked here, so the engines never need to be real.
+func fullServer() *Server {
+	return New(Deps{
+		Queries:      &generated.Queries{},
+		Storage:      &storage.Client{},
+		Audit:        &audit.Logger{},
+		Versions:     &versions.Engine{},
+		Resolver:     &resolver.Resolver{},
+		AIRuntime:    &ai.Runtime{},
+		Envelopes:    &envelopes.Engine{},
+		EIDAS:        &eidas.Engine{},
+		Evidence:     &evidence.Builder{},
+		Clarifier:    &aiapps.Clarifier{},
+		Negotiator:   &aiapps.Negotiator{},
+		Bilingual:    &aiapps.Bilingual{},
+		RiskAnalyzer: &aiapps.RiskAnalyzer{},
+		Compliance:   &compliance.Seeder{},
+		QES:          &qes.Engine{},
+		Send:         &send.Engine{},
+	})
+}
+
+// TestMutatingToolsAreWriteFlagged is the regression guard for the class of bug
+// where a state-mutating tool forgets `Write: true`. The zero value bypasses BOTH
+// the write-scope check AND the RoleSender-default gate in handleToolsCall, so a
+// read-only API key could reach it. Any tool whose name starts with a mutation
+// verb MUST carry Write:true. (bind_ was the original offender.)
+func TestMutatingToolsAreWriteFlagged(t *testing.T) {
+	s := fullServer()
+	mutatingPrefixes := []string{
+		"bind_", "unbind_", "create_", "add_", "update_", "delete_", "set_",
+		"send_", "void_", "remind_", "attach_", "detach_", "reorder_", "import_",
+		"append_", "seed_", "promote_", "revise_", "start_", "remove_", "sign_",
+	}
+	for name, tool := range s.tools {
+		for _, pre := range mutatingPrefixes {
+			if strings.HasPrefix(name, pre) && !tool.Write {
+				t.Errorf("MCP tool %q looks mutating (prefix %q) but Write=false; it bypasses the write-scope + RoleSender gate in handleToolsCall", name, pre)
+				break
+			}
 		}
 	}
 }

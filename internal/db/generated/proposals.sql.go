@@ -13,6 +13,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getProposalOwnerDoc = `-- name: GetProposalOwnerDoc :one
+SELECT document_id FROM document_proposals WHERE id = $1 AND org_id = $2
+`
+
+type GetProposalOwnerDocParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+// The owning document of a proposal, org-scoped. Used to enforce doc-scope
+// (a doc-scoped agent token must not touch a sibling document's proposals).
+func (q *Queries) GetProposalOwnerDoc(ctx context.Context, arg GetProposalOwnerDocParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getProposalOwnerDoc, arg.ID, arg.OrgID)
+	var document_id uuid.UUID
+	err := row.Scan(&document_id)
+	return document_id, err
+}
+
 const insertProposal = `-- name: InsertProposal :one
 INSERT INTO document_proposals (
     document_id, org_id, recipient_id, proposed_by, block_id,

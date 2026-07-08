@@ -613,6 +613,152 @@ func registerAuthoringTools(s *Server, d Deps) {
 			return rec, nil
 		},
 	})
+
+	// update_recipient / delete_recipient: let an agent self-correct a mistyped
+	// email or a wrongly-added signer BEFORE send, without a REST/UI fallback.
+	// Draft-only so a link is never already out; only supplied fields change.
+	s.RegisterTool(ToolDef{
+		Name:        "update_recipient",
+		Write:       true,
+		Description: "Update a recipient on a DRAFT document (fix a typo'd email, change name/role/order/locale). Only supplied fields change.",
+		InputSchema: schemaObject(map[string]any{
+			"document_id":  stringSchema("document uuid (must be draft)"),
+			"recipient_id": stringSchema("recipient uuid"),
+			"email":        stringSchema("optional new email"),
+			"name":         stringSchema("optional new name"),
+			"role":         stringSchema("optional new role (signer|viewer|approver|cc)"),
+			"order_index":  intSchema("optional new signing order", 0, 1000, 0),
+			"locale":       stringSchema("optional new signer-ceremony locale"),
+		}, []string{"document_id", "recipient_id"}),
+		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+			u, _ := auth.FromContext(r.Context())
+			var p struct {
+				DocumentID  string `json:"document_id"`
+				RecipientID string `json:"recipient_id"`
+				Email       string `json:"email"`
+				Name        string `json:"name"`
+				Role        string `json:"role"`
+				OrderIndex  *int32 `json:"order_index"`
+				Locale      string `json:"locale"`
+			}
+			if err := MustParseArgs(args, &p); err != nil {
+				return nil, err
+			}
+			docID, err := uuid.Parse(p.DocumentID)
+			if err != nil {
+				return nil, errors.New("document_id must be a uuid")
+			}
+			rid, err := uuid.Parse(p.RecipientID)
+			if err != nil {
+				return nil, errors.New("recipient_id must be a uuid")
+			}
+			if err := auth.EnforceDocScope(r.Context(), docID); err != nil {
+				return nil, err
+			}
+			doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: u.OrgID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errors.New("document not found")
+			}
+			if err != nil {
+				return nil, err
+			}
+			if doc.Status != "draft" {
+				return nil, errors.New("document not in draft state")
+			}
+			existing, err := d.Queries.GetRecipient(r.Context(), generated.GetRecipientParams{ID: rid, OrgID: u.OrgID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errors.New("recipient not found")
+			}
+			if err != nil {
+				return nil, err
+			}
+			if existing.DocumentID != docID {
+				return nil, errors.New("recipient does not belong to this document")
+			}
+			email := existing.Email
+			if p.Email != "" {
+				email = p.Email
+			}
+			name := existing.Name
+			if p.Name != "" {
+				name = p.Name
+			}
+			role := existing.Role
+			if p.Role != "" {
+				role = p.Role
+			}
+			orderIdx := existing.OrderIndex
+			if p.OrderIndex != nil {
+				orderIdx = *p.OrderIndex
+			}
+			locale := existing.Locale
+			if p.Locale != "" {
+				locale = p.Locale
+			}
+			rec, err := d.Queries.UpdateRecipient(r.Context(), generated.UpdateRecipientParams{
+				ID: rid, DocumentID: docID, Email: email, Name: name, Role: role, OrderIndex: orderIdx, Locale: locale,
+			})
+			if err != nil {
+				return nil, err
+			}
+			logMCPEvent(r, d, audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID, RecipientID: &rid,
+				Kind:    audit.KindDocumentUpdated,
+				Payload: map[string]any{"via": "mcp", "tool": "update_recipient"},
+			})
+			return rec, nil
+		},
+	})
+
+	s.RegisterTool(ToolDef{
+		Name:        "delete_recipient",
+		Write:       true,
+		Description: "Remove a recipient from a DRAFT document (e.g. a mistakenly-added signer). Draft-only.",
+		InputSchema: schemaObject(map[string]any{
+			"document_id":  stringSchema("document uuid (must be draft)"),
+			"recipient_id": stringSchema("recipient uuid"),
+		}, []string{"document_id", "recipient_id"}),
+		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+			u, _ := auth.FromContext(r.Context())
+			var p struct {
+				DocumentID  string `json:"document_id"`
+				RecipientID string `json:"recipient_id"`
+			}
+			if err := MustParseArgs(args, &p); err != nil {
+				return nil, err
+			}
+			docID, err := uuid.Parse(p.DocumentID)
+			if err != nil {
+				return nil, errors.New("document_id must be a uuid")
+			}
+			rid, err := uuid.Parse(p.RecipientID)
+			if err != nil {
+				return nil, errors.New("recipient_id must be a uuid")
+			}
+			if err := auth.EnforceDocScope(r.Context(), docID); err != nil {
+				return nil, err
+			}
+			doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: u.OrgID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errors.New("document not found")
+			}
+			if err != nil {
+				return nil, err
+			}
+			if doc.Status != "draft" {
+				return nil, errors.New("document not in draft state")
+			}
+			if err := d.Queries.DeleteRecipient(r.Context(), generated.DeleteRecipientParams{ID: rid, DocumentID: docID}); err != nil {
+				return nil, err
+			}
+			logMCPEvent(r, d, audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID, RecipientID: &rid,
+				Kind:    audit.KindDocumentUpdated,
+				Payload: map[string]any{"via": "mcp", "tool": "delete_recipient"},
+			})
+			return map[string]any{"deleted": rid.String()}, nil
+		},
+	})
 }
 
 // mutateDocumentTree applies fn to the document's block tree under a draft +

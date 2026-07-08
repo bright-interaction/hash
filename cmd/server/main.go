@@ -333,6 +333,7 @@ func run() error {
 	mcpServer := mcp.New(mcp.Deps{
 		Pool:         pool,
 		Queries:      queries,
+		Storage:      store,
 		Audit:        auditLog,
 		Mailer:       mailer,
 		Versions:     versionsEngine,

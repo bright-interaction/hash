@@ -19,6 +19,7 @@ import (
 	_ "image/jpeg" // register JPEG decoder
 	_ "image/png"  // register PNG decoder
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -224,6 +225,36 @@ func ValidateHex(s string) bool {
 }
 
 var reHex = regexp.MustCompile(`^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
+
+// ValidateLogoURL guards the logo_url write boundary (MCP set_org_branding +
+// REST branding upsert). The stored value is later rendered as an <img src> in
+// the branded sign UI / emails, so an attacker-supplied javascript: or data:
+// scheme would be a stored-XSS / scheme-abuse vector. We require an absolute
+// http(s) URL with a host, or a same-origin relative path (the logo-upload
+// endpoint returns "/branding/logo/<org>.png"-style paths). Empty is allowed:
+// it clears the logo. Returns a generic error; the caller logs specifics.
+func ValidateLogoURL(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	// Same-origin relative path (must be root-relative, not scheme-relative
+	// "//host" which would resolve to an external origin).
+	if strings.HasPrefix(s, "/") && !strings.HasPrefix(s, "//") {
+		return nil
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return errors.New("logo_url is not a valid URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("logo_url must be an http(s) URL")
+	}
+	if u.Host == "" {
+		return errors.New("logo_url must include a host")
+	}
+	return nil
+}
 
 // NormaliseHex returns the canonical #RRGGBB form, expanding 3-char
 // shorthand. Returns "" if the input fails ValidateHex.
