@@ -44,6 +44,7 @@ var (
 	ErrDocumentNotFound     = errors.New("document not found")
 	ErrNotDraft             = errors.New("document not in draft state")
 	ErrNoSigners            = errors.New("document needs at least one signer recipient before send")
+	ErrNoRecipients         = errors.New("document needs at least one recipient before send")
 	ErrMissingSignerForRole = errors.New("a signature field has no recipient assigned to its role")
 	ErrAlreadyFinalised     = errors.New("document already finalised")
 	ErrNotRemindable        = errors.New("document not in a remindable state")
@@ -134,8 +135,14 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 			signers++
 		}
 	}
-	if signers == 0 {
-		return SendResult{}, ErrNoSigners
+	if doc.RequiresSignature {
+		if signers == 0 {
+			return SendResult{}, ErrNoSigners
+		}
+	} else if len(recs) == 0 {
+		// Acknowledgement mode: no signer required, but there must be at least
+		// one recipient to send it to.
+		return SendResult{}, ErrNoRecipients
 	}
 
 	// Every role that has a signature field needs a recipient to sign it, so a

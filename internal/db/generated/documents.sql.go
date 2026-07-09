@@ -18,7 +18,7 @@ UPDATE documents
 SET blocks_json = $3,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status = 'changes_requested'
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type ApplyBlocksForChangeParams struct {
@@ -66,8 +66,37 @@ func (q *Queries) ApplyBlocksForChange(ctx context.Context, arg ApplyBlocksForCh
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
+}
+
+const completeAcknowledgedDocument = `-- name: CompleteAcknowledgedDocument :execrows
+UPDATE documents
+SET final_pdf_key = pdf_storage_key,
+    final_pdf_sha = pdf_sha256,
+    completed_at = now(),
+    status = 'completed',
+    updated_at = now()
+WHERE id = $1 AND org_id = $2 AND status = 'in_progress' AND requires_signature = false
+`
+
+type CompleteAcknowledgedDocumentParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+// No-signature completion: an acknowledgement-mode document completes when every
+// acceptor has accepted. The final artifact is the original upload; there is NO
+// ed25519 seal / audit cert (the tamper-evident proof is the event hash chain).
+// Guarded to in_progress + requires_signature = false so it can never flip a
+// signature-required document to completed without real signatures.
+func (q *Queries) CompleteAcknowledgedDocument(ctx context.Context, arg CompleteAcknowledgedDocumentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, completeAcknowledgedDocument, arg.ID, arg.OrgID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const countDocuments = `-- name: CountDocuments :one
@@ -92,7 +121,7 @@ func (q *Queries) CountDocuments(ctx context.Context, arg CountDocumentsParams) 
 const createBlocksDocument = `-- name: CreateBlocksDocument :one
 INSERT INTO documents (org_id, template_id, name, source_kind, blocks_json, variables_json, sender_id, expires_at)
 VALUES ($1, $2, $3, 'blocks', $4, $5, $6, $7)
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type CreateBlocksDocumentParams struct {
@@ -150,6 +179,7 @@ func (q *Queries) CreateBlocksDocument(ctx context.Context, arg CreateBlocksDocu
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
@@ -157,7 +187,7 @@ func (q *Queries) CreateBlocksDocument(ctx context.Context, arg CreateBlocksDocu
 const createPDFDocument = `-- name: CreatePDFDocument :one
 INSERT INTO documents (org_id, template_id, name, source_kind, pdf_storage_key, pdf_sha256, sender_id, expires_at)
 VALUES ($1, $2, $3, 'pdf', $4, $5, $6, $7)
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type CreatePDFDocumentParams struct {
@@ -215,6 +245,7 @@ func (q *Queries) CreatePDFDocument(ctx context.Context, arg CreatePDFDocumentPa
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
@@ -224,7 +255,7 @@ UPDATE documents
 SET status = 'declined',
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status IN ('sent','in_progress')
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type DeclineDocumentIfActiveParams struct {
@@ -273,6 +304,7 @@ func (q *Queries) DeclineDocumentIfActive(ctx context.Context, arg DeclineDocume
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
@@ -297,7 +329,7 @@ func (q *Queries) DeleteDraftDocument(ctx context.Context, arg DeleteDraftDocume
 }
 
 const getDocument = `-- name: GetDocument :one
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale FROM documents WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature FROM documents WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL
 `
 
 type GetDocumentParams struct {
@@ -342,12 +374,13 @@ func (q *Queries) GetDocument(ctx context.Context, arg GetDocumentParams) (*Docu
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
 
 const getDocumentByID = `-- name: GetDocumentByID :one
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale FROM documents WHERE id = $1
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature FROM documents WHERE id = $1
 `
 
 // System-level lookup by id alone (no org scope) for the background worker,
@@ -390,12 +423,13 @@ func (q *Queries) GetDocumentByID(ctx context.Context, id uuid.UUID) (*Document,
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
 
 const getDocumentForUpdate = `-- name: GetDocumentForUpdate :one
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale FROM documents WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR UPDATE
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature FROM documents WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR UPDATE
 `
 
 type GetDocumentForUpdateParams struct {
@@ -442,12 +476,13 @@ func (q *Queries) GetDocumentForUpdate(ctx context.Context, arg GetDocumentForUp
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
 
 const getExpirableDocuments = `-- name: GetExpirableDocuments :many
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale FROM documents
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature FROM documents
 WHERE expires_at IS NOT NULL
   AND deleted_at IS NULL
   AND expires_at <= now()
@@ -498,6 +533,7 @@ func (q *Queries) GetExpirableDocuments(ctx context.Context, limit int32) ([]*Do
 			&i.LawfulBasis,
 			&i.DeletedAt,
 			&i.DefaultLocale,
+			&i.RequiresSignature,
 		); err != nil {
 			return nil, err
 		}
@@ -510,7 +546,7 @@ func (q *Queries) GetExpirableDocuments(ctx context.Context, limit int32) ([]*Do
 }
 
 const getStrandedDocuments = `-- name: GetStrandedDocuments :many
-SELECT d.id, d.org_id, d.template_id, d.name, d.status, d.routing_mode, d.source_kind, d.blocks_json, d.variables_json, d.rendered_pdf_key, d.rendered_pdf_sha, d.pdf_storage_key, d.pdf_sha256, d.final_pdf_key, d.final_pdf_sha, d.audit_cert_key, d.expires_at, d.sent_at, d.completed_at, d.sender_id, d.metadata, d.created_at, d.updated_at, d.parent_envelope_id, d.envelope_position, d.is_envelope, d.metadata_redaction_report, d.routing_tier, d.negotiation_enabled, d.bilingual_target_lang, d.lawful_basis, d.deleted_at, d.default_locale FROM documents d
+SELECT d.id, d.org_id, d.template_id, d.name, d.status, d.routing_mode, d.source_kind, d.blocks_json, d.variables_json, d.rendered_pdf_key, d.rendered_pdf_sha, d.pdf_storage_key, d.pdf_sha256, d.final_pdf_key, d.final_pdf_sha, d.audit_cert_key, d.expires_at, d.sent_at, d.completed_at, d.sender_id, d.metadata, d.created_at, d.updated_at, d.parent_envelope_id, d.envelope_position, d.is_envelope, d.metadata_redaction_report, d.routing_tier, d.negotiation_enabled, d.bilingual_target_lang, d.lawful_basis, d.deleted_at, d.default_locale, d.requires_signature FROM documents d
 WHERE d.status = 'in_progress'
   AND d.final_pdf_key IS NULL
   AND d.deleted_at IS NULL
@@ -574,6 +610,7 @@ func (q *Queries) GetStrandedDocuments(ctx context.Context, limit int32) ([]*Doc
 			&i.LawfulBasis,
 			&i.DeletedAt,
 			&i.DefaultLocale,
+			&i.RequiresSignature,
 		); err != nil {
 			return nil, err
 		}
@@ -586,7 +623,7 @@ func (q *Queries) GetStrandedDocuments(ctx context.Context, limit int32) ([]*Doc
 }
 
 const listDocuments = `-- name: ListDocuments :many
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale FROM documents
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature FROM documents
 WHERE org_id = $1
   AND deleted_at IS NULL
   AND ($2::TEXT[] IS NULL OR status = ANY($2::TEXT[]))
@@ -649,6 +686,7 @@ func (q *Queries) ListDocuments(ctx context.Context, arg ListDocumentsParams) ([
 			&i.LawfulBasis,
 			&i.DeletedAt,
 			&i.DefaultLocale,
+			&i.RequiresSignature,
 		); err != nil {
 			return nil, err
 		}
@@ -680,7 +718,7 @@ SET status = 'draft',
     sent_at = NULL,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status = 'changes_requested'
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type ReopenDocumentToDraftParams struct {
@@ -727,6 +765,7 @@ func (q *Queries) ReopenDocumentToDraft(ctx context.Context, arg ReopenDocumentT
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
@@ -736,7 +775,7 @@ UPDATE documents
 SET status = 'changes_requested',
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status IN ('sent','in_progress','changes_requested')
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type RequestChangesOnDocumentParams struct {
@@ -783,12 +822,13 @@ func (q *Queries) RequestChangesOnDocument(ctx context.Context, arg RequestChang
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
 
 const searchDocumentsByName = `-- name: SearchDocumentsByName :many
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale FROM documents
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature FROM documents
 WHERE org_id = $1 AND deleted_at IS NULL AND name ILIKE '%' || $2 || '%'
 ORDER BY updated_at DESC
 LIMIT $3
@@ -843,6 +883,7 @@ func (q *Queries) SearchDocumentsByName(ctx context.Context, arg SearchDocuments
 			&i.LawfulBasis,
 			&i.DeletedAt,
 			&i.DefaultLocale,
+			&i.RequiresSignature,
 		); err != nil {
 			return nil, err
 		}
@@ -859,7 +900,7 @@ UPDATE documents
 SET default_locale = $3,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status = 'draft'
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type SetDocumentDefaultLocaleParams struct {
@@ -907,6 +948,7 @@ func (q *Queries) SetDocumentDefaultLocale(ctx context.Context, arg SetDocumentD
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
@@ -971,6 +1013,64 @@ func (q *Queries) SetDocumentLawfulBasis(ctx context.Context, arg SetDocumentLaw
 	return err
 }
 
+const setDocumentRequiresSignature = `-- name: SetDocumentRequiresSignature :one
+UPDATE documents
+SET requires_signature = $3,
+    updated_at = now()
+WHERE id = $1 AND org_id = $2 AND status = 'draft'
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
+`
+
+type SetDocumentRequiresSignatureParams struct {
+	ID                uuid.UUID `json:"id"`
+	OrgID             uuid.UUID `json:"org_id"`
+	RequiresSignature bool      `json:"requires_signature"`
+}
+
+// Draft-only toggle between signature-required and acknowledgement (view/accept)
+// mode. Locked once sent so recipients can't have the rules change under them.
+func (q *Queries) SetDocumentRequiresSignature(ctx context.Context, arg SetDocumentRequiresSignatureParams) (*Document, error) {
+	row := q.db.QueryRow(ctx, setDocumentRequiresSignature, arg.ID, arg.OrgID, arg.RequiresSignature)
+	var i Document
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.TemplateID,
+		&i.Name,
+		&i.Status,
+		&i.RoutingMode,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.RenderedPdfKey,
+		&i.RenderedPdfSha,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.FinalPdfKey,
+		&i.FinalPdfSha,
+		&i.AuditCertKey,
+		&i.ExpiresAt,
+		&i.SentAt,
+		&i.CompletedAt,
+		&i.SenderID,
+		&i.Metadata,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ParentEnvelopeID,
+		&i.EnvelopePosition,
+		&i.IsEnvelope,
+		&i.MetadataRedactionReport,
+		&i.RoutingTier,
+		&i.NegotiationEnabled,
+		&i.BilingualTargetLang,
+		&i.LawfulBasis,
+		&i.DeletedAt,
+		&i.DefaultLocale,
+		&i.RequiresSignature,
+	)
+	return &i, err
+}
+
 const setDocumentStatus = `-- name: SetDocumentStatus :one
 UPDATE documents
 SET status = $3,
@@ -978,7 +1078,7 @@ SET status = $3,
     completed_at = CASE WHEN $3 = 'completed' THEN now() ELSE completed_at END,
     updated_at = now()
 WHERE id = $1 AND org_id = $2
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type SetDocumentStatusParams struct {
@@ -1024,6 +1124,7 @@ func (q *Queries) SetDocumentStatus(ctx context.Context, arg SetDocumentStatusPa
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
@@ -1034,7 +1135,7 @@ SET blocks_json = $3,
     variables_json = $4,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status = 'draft' AND source_kind = 'blocks'
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type UpdateDocumentBlocksParams struct {
@@ -1086,6 +1187,7 @@ func (q *Queries) UpdateDocumentBlocks(ctx context.Context, arg UpdateDocumentBl
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
@@ -1097,7 +1199,7 @@ SET name = $3,
     metadata = $5,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status = 'draft'
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type UpdateDocumentMetadataParams struct {
@@ -1151,6 +1253,7 @@ func (q *Queries) UpdateDocumentMetadata(ctx context.Context, arg UpdateDocument
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
@@ -1160,7 +1263,7 @@ UPDATE documents
 SET status = 'voided',
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status NOT IN ('completed', 'voided')
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type VoidDocumentIfActiveParams struct {
@@ -1211,6 +1314,7 @@ func (q *Queries) VoidDocumentIfActive(ctx context.Context, arg VoidDocumentIfAc
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }

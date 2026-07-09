@@ -26,13 +26,14 @@ import (
 //   POST /sign/{token}/decline         → decline with reason
 
 type signerContextResponse struct {
-	DocumentID   uuid.UUID `json:"document_id"`
-	DocumentName string    `json:"document_name"`
-	Status       string    `json:"status"`
-	SourceKind   string    `json:"source_kind"`
-	RoutingTier  string    `json:"routing_tier"`
-	QESProvider  string    `json:"qes_provider,omitempty"`
-	Recipient    struct {
+	DocumentID        uuid.UUID `json:"document_id"`
+	DocumentName      string    `json:"document_name"`
+	Status            string    `json:"status"`
+	SourceKind        string    `json:"source_kind"`
+	RequiresSignature bool      `json:"requires_signature"`
+	RoutingTier       string    `json:"routing_tier"`
+	QESProvider       string    `json:"qes_provider,omitempty"`
+	Recipient         struct {
 		ID     uuid.UUID `json:"id"`
 		Email  string    `json:"email"`
 		Name   string    `json:"name"`
@@ -97,12 +98,13 @@ func (s *Server) handleSignerContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := signerContextResponse{
-		DocumentID:   rc.Document.ID,
-		DocumentName: rc.Document.Name,
-		Status:       rc.Document.Status,
-		SourceKind:   rc.Document.SourceKind,
-		RoutingTier:  rc.Document.RoutingTier,
-		Fonts:        []string{"Caveat", "Dancing Script", "Great Vibes", "Sacramento", "Homemade Apple"},
+		DocumentID:        rc.Document.ID,
+		DocumentName:      rc.Document.Name,
+		Status:            rc.Document.Status,
+		SourceKind:        rc.Document.SourceKind,
+		RequiresSignature: rc.Document.RequiresSignature,
+		RoutingTier:       rc.Document.RoutingTier,
+		Fonts:             []string{"Caveat", "Dancing Script", "Great Vibes", "Sacramento", "Homemade Apple"},
 	}
 	if s.QES != nil && s.QES.Provider != nil && s.QES.Provider.Name() != "noop" {
 		out.QESProvider = s.QES.Provider.Name()
@@ -208,6 +210,36 @@ func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
 	}
 	if res.Completed {
 		// 24-hour presigned download for the final PDF.
+		if u, err := s.Storage.PresignGet(r.Context(), res.FinalPDFKey, 24*time.Hour); err == nil {
+			out.FinalPDFURL = u.String()
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleSignerAccept records a recipient's acknowledgement (accept) of a
+// no-signature document. The audit event is the record; no signature is captured.
+func (s *Server) handleSignerAccept(w http.ResponseWriter, r *http.Request) {
+	rc, ok := s.lookupTokenOrError(w, r)
+	if !ok {
+		return
+	}
+	res, err := s.Sign.Accept(r.Context(), rc, clientIP(r), r.UserAgent())
+	if err != nil {
+		switch {
+		case errors.Is(err, sign.ErrAlreadyAccepted):
+			writeError(w, http.StatusConflict, "you have already accepted this document")
+		case errors.Is(err, sign.ErrNotAcknowledgement):
+			writeError(w, http.StatusBadRequest, "this document requires a signature")
+		case errors.Is(err, sign.ErrDocumentNotSignable):
+			writeError(w, http.StatusConflict, "this document is no longer accepting responses")
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	out := signerSignResponse{Status: res.Status, Completed: res.Completed}
+	if res.Completed && res.FinalPDFKey != "" {
 		if u, err := s.Storage.PresignGet(r.Context(), res.FinalPDFKey, 24*time.Hour); err == nil {
 			out.FinalPDFURL = u.String()
 		}

@@ -203,6 +203,7 @@ type Document struct {
 	LawfulBasis             string             `json:"lawful_basis"`
 	DeletedAt               pgtype.Timestamptz `json:"deleted_at"`
 	DefaultLocale           string             `json:"default_locale"`
+	RequiresSignature       bool               `json:"requires_signature"`
 }
 
 type DocumentAgentToken struct {

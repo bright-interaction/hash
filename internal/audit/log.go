@@ -29,7 +29,8 @@ const (
 	KindDocumentOpened    = "document.opened" // email beacon hit
 	KindDocumentViewed    = "document.viewed" // signer link click
 	KindDocumentFieldFill = "document.field_filled"
-	KindDocumentSigned    = "document.signed" // per-recipient signature captured
+	KindDocumentSigned    = "document.signed"   // per-recipient signature captured
+	KindDocumentAccepted  = "document.accepted" // acknowledgement-mode accept (no signature)
 	KindDocumentCompleted = "document.completed"
 	KindDocumentDeclined  = "document.declined"
 	KindChangesRequested  = "document.changes_requested"

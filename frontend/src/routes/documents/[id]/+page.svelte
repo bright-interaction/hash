@@ -43,6 +43,20 @@
   let comments = $state<DocComment[]>([]);
   let commentBody = $state('');
   let postingComment = $state(false);
+  let savingMode = $state(false);
+
+  async function toggleSignatureMode() {
+    if (!doc) return;
+    savingMode = true;
+    error = null;
+    try {
+      doc = await updateDocument(doc.id, { requires_signature: !doc.requires_signature });
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      savingMode = false;
+    }
+  }
 
   async function loadComments(id: string) {
     try {
@@ -199,6 +213,22 @@
         </div>
       </div>
     </div>
+
+    {#if doc.status === 'draft'}
+      <div class="card p-4 mb-6 flex items-center justify-between gap-4">
+        <div>
+          <p class="text-sm font-medium">Signeringsläge</p>
+          <p class="text-xs text-text-muted">
+            {doc.requires_signature
+              ? 'Kräver signatur: mottagarna signerar dokumentet.'
+              : 'Bara läsa och acceptera: mottagarna öppnar och klickar Acceptera. Ingen signatur.'}
+          </p>
+        </div>
+        <button class="btn btn-secondary whitespace-nowrap" disabled={savingMode} onclick={toggleSignatureMode}>
+          {savingMode ? 'Sparar…' : doc.requires_signature ? 'Byt till acceptera' : 'Kräv signatur'}
+        </button>
+      </div>
+    {/if}
 
     {#if doc.status === 'changes_requested'}
       <div class="card p-5 mb-6 border-l-4 border-warning">

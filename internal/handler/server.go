@@ -170,6 +170,7 @@ func (s *Server) Routes() http.Handler {
 			r.Get("/final-pdf", s.handleSignerFinalPDF)
 			r.Post("/view", s.handleSignerView)
 			r.Post("/sign", s.handleSignerSign)
+			r.Post("/accept", s.handleSignerAccept)
 			r.Post("/decline", s.handleSignerDecline)
 			r.Post("/request-changes", s.handleSignerRequestChanges)
 			r.Get("/comments", s.handleSignerListComments)

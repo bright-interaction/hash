@@ -91,6 +91,29 @@ SET final_pdf_key = $3,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status = 'in_progress';
 
+-- name: SetDocumentRequiresSignature :one
+-- Draft-only toggle between signature-required and acknowledgement (view/accept)
+-- mode. Locked once sent so recipients can't have the rules change under them.
+UPDATE documents
+SET requires_signature = $3,
+    updated_at = now()
+WHERE id = $1 AND org_id = $2 AND status = 'draft'
+RETURNING *;
+
+-- name: CompleteAcknowledgedDocument :execrows
+-- No-signature completion: an acknowledgement-mode document completes when every
+-- acceptor has accepted. The final artifact is the original upload; there is NO
+-- ed25519 seal / audit cert (the tamper-evident proof is the event hash chain).
+-- Guarded to in_progress + requires_signature = false so it can never flip a
+-- signature-required document to completed without real signatures.
+UPDATE documents
+SET final_pdf_key = pdf_storage_key,
+    final_pdf_sha = pdf_sha256,
+    completed_at = now(),
+    status = 'completed',
+    updated_at = now()
+WHERE id = $1 AND org_id = $2 AND status = 'in_progress' AND requires_signature = false;
+
 -- name: DeclineDocumentIfActive :one
 -- Guarded decline transition: only an active (sent/in_progress) document can
 -- move to declined. A completed/voided/declined/expired doc returns no row,

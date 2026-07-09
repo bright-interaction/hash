@@ -19,7 +19,7 @@ UPDATE documents
        updated_at         = now()
  WHERE id = $1 AND org_id = $4
    AND is_envelope = FALSE
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type AttachToEnvelopeParams struct {
@@ -71,6 +71,7 @@ func (q *Queries) AttachToEnvelope(ctx context.Context, arg AttachToEnvelopePara
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
@@ -81,7 +82,7 @@ UPDATE documents
        envelope_position  = NULL,
        updated_at         = now()
  WHERE id = $1 AND org_id = $2
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type DetachFromEnvelopeParams struct {
@@ -126,12 +127,13 @@ func (q *Queries) DetachFromEnvelope(ctx context.Context, arg DetachFromEnvelope
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }
 
 const listEnvelopeChildren = `-- name: ListEnvelopeChildren :many
-SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale FROM documents
+SELECT id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature FROM documents
 WHERE parent_envelope_id = $1 AND org_id = $2
 ORDER BY envelope_position ASC NULLS LAST, created_at ASC
 `
@@ -184,6 +186,7 @@ func (q *Queries) ListEnvelopeChildren(ctx context.Context, arg ListEnvelopeChil
 			&i.LawfulBasis,
 			&i.DeletedAt,
 			&i.DefaultLocale,
+			&i.RequiresSignature,
 		); err != nil {
 			return nil, err
 		}
@@ -202,7 +205,7 @@ UPDATE documents
  WHERE id = $1 AND org_id = $2
    AND parent_envelope_id IS NULL
    AND source_kind = 'blocks'
-RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale
+RETURNING id, org_id, template_id, name, status, routing_mode, source_kind, blocks_json, variables_json, rendered_pdf_key, rendered_pdf_sha, pdf_storage_key, pdf_sha256, final_pdf_key, final_pdf_sha, audit_cert_key, expires_at, sent_at, completed_at, sender_id, metadata, created_at, updated_at, parent_envelope_id, envelope_position, is_envelope, metadata_redaction_report, routing_tier, negotiation_enabled, bilingual_target_lang, lawful_basis, deleted_at, default_locale, requires_signature
 `
 
 type MarkAsEnvelopeParams struct {
@@ -247,6 +250,7 @@ func (q *Queries) MarkAsEnvelope(ctx context.Context, arg MarkAsEnvelopeParams) 
 		&i.LawfulBasis,
 		&i.DeletedAt,
 		&i.DefaultLocale,
+		&i.RequiresSignature,
 	)
 	return &i, err
 }

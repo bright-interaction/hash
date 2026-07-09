@@ -40,6 +40,11 @@ var (
 	// ErrDocumentNotSignable is returned when a sign/decline targets a
 	// document that is no longer in an active (sent/in_progress) state.
 	ErrDocumentNotSignable = errors.New("document is not in a signable state")
+	// ErrNotAcknowledgement is returned when Accept targets a signature-required
+	// document. Accept only applies to acknowledgement (view/accept) documents.
+	ErrNotAcknowledgement = errors.New("document requires a signature, not acceptance")
+	// ErrAlreadyAccepted is returned when a recipient accepts twice.
+	ErrAlreadyAccepted = errors.New("recipient already accepted")
 	// ErrFinalizeInProgress is returned when another worker/request already
 	// holds the per-document finalize lock; the caller should treat the
 	// signature as captured and let the in-flight finalize complete.
@@ -363,6 +368,97 @@ func (e *Engine) Sign(ctx context.Context, rc *RecipientContext, in SignInput) (
 	}
 	if did {
 		e.afterFinalize(ctx, doc, finalKey, certKey)
+	}
+	return &Result{DocumentID: doc.ID, Status: "completed", Completed: true, FinalPDFKey: finalKey}, nil
+}
+
+// Accept records a recipient's acknowledgement of a NO-SIGNATURE document
+// (requires_signature = false). It is the acknowledgement-mode twin of Sign:
+// no signature image, no ed25519 seal, no audit cert. The tamper-evident proof
+// is the event hash chain (the document.accepted + document.completed events).
+// When every acceptor has accepted, the document completes with the original
+// upload as its final PDF. The sealed finalize path is never touched.
+func (e *Engine) Accept(ctx context.Context, rc *RecipientContext, ip, ua string) (*Result, error) {
+	doc := rc.Document
+	rec := rc.Recipient
+
+	tx, err := e.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := e.Queries.WithTx(tx)
+
+	lockedDoc, err := q.GetDocumentForUpdate(ctx, generated.GetDocumentForUpdateParams{ID: doc.ID, OrgID: doc.OrgID})
+	if err != nil {
+		return nil, fmt.Errorf("lock document: %w", err)
+	}
+	if lockedDoc.RequiresSignature {
+		return nil, ErrNotAcknowledgement
+	}
+	if lockedDoc.Status != "sent" && lockedDoc.Status != "in_progress" {
+		return nil, ErrDocumentNotSignable
+	}
+	freshRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: doc.OrgID})
+	if err != nil {
+		return nil, err
+	}
+	if freshRec.Status == "accepted" {
+		return nil, ErrAlreadyAccepted
+	}
+	if freshRec.Status == "declined" {
+		return nil, errors.New("recipient already declined")
+	}
+
+	if err := q.SetRecipientStatus(ctx, generated.SetRecipientStatusParams{
+		ID: rec.ID, DocumentID: doc.ID,
+		Status: "accepted", DeclinedReason: pgtype.Text{},
+	}); err != nil {
+		return nil, fmt.Errorf("set recipient accepted: %w", err)
+	}
+	if lockedDoc.Status == "sent" {
+		if _, err := q.SetDocumentStatus(ctx, generated.SetDocumentStatusParams{
+			ID: doc.ID, OrgID: doc.OrgID, Status: "in_progress",
+		}); err != nil {
+			return nil, fmt.Errorf("transition to in_progress: %w", err)
+		}
+	}
+	remaining, err := q.CountPendingAcceptors(ctx, doc.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit accept: %w", err)
+	}
+
+	_, _ = e.Audit.Log(ctx, audit.Entry{
+		OrgID: doc.OrgID, DocumentID: &doc.ID, RecipientID: &rec.ID,
+		Kind:      audit.KindDocumentAccepted,
+		IP:        ip,
+		UserAgent: ua,
+		Payload:   map[string]any{"recipient_email": rec.Email},
+	})
+
+	if remaining > 0 {
+		return &Result{DocumentID: doc.ID, Status: "in_progress", Completed: false}, nil
+	}
+
+	// Every acceptor has accepted: complete WITHOUT the ed25519 finalize. The
+	// final artifact is the original upload; a failure here just leaves the doc
+	// in_progress (a later accept re-attempts completion).
+	rows, cerr := e.Queries.CompleteAcknowledgedDocument(ctx, generated.CompleteAcknowledgedDocumentParams{ID: doc.ID, OrgID: doc.OrgID})
+	if cerr != nil || rows == 0 {
+		return &Result{DocumentID: doc.ID, Status: "in_progress", Completed: false}, nil
+	}
+	_ = e.Queries.InvalidateRecipientTokens(ctx, doc.ID)
+	_, _ = e.Audit.Log(ctx, audit.Entry{
+		OrgID: doc.OrgID, DocumentID: &doc.ID,
+		Kind:    audit.KindDocumentCompleted,
+		Payload: map[string]any{"mode": "acknowledgement"},
+	})
+	finalKey := ""
+	if lockedDoc.PdfStorageKey.Valid {
+		finalKey = lockedDoc.PdfStorageKey.String
 	}
 	return &Result{DocumentID: doc.ID, Status: "completed", Completed: true, FinalPDFKey: finalKey}, nil
 }

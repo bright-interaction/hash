@@ -62,6 +62,8 @@ func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "document not in draft state")
 	case errors.Is(err, send.ErrNoSigners):
 		writeError(w, http.StatusBadRequest, "document needs at least one signer recipient before send")
+	case errors.Is(err, send.ErrNoRecipients):
+		writeError(w, http.StatusBadRequest, "document needs at least one recipient before send")
 	case errors.Is(err, billing.ErrQuotaExceeded):
 		writeJSON(w, http.StatusPaymentRequired, map[string]any{
 			"error":       err.Error(),

@@ -76,3 +76,12 @@ SELECT COUNT(*) FROM recipients
 WHERE document_id = sqlc.arg(document_id)
   AND role = ANY(sqlc.arg(roles)::text[])
   AND status NOT IN ('signed','declined');
+
+-- name: CountPendingAcceptors :one
+-- Acknowledgement-mode completion: every non-cc recipient must have accepted (or
+-- declined) for the document to complete. cc recipients are informational and
+-- never block completion.
+SELECT COUNT(*) FROM recipients
+WHERE document_id = $1
+  AND role <> 'cc'
+  AND status NOT IN ('accepted','declined');

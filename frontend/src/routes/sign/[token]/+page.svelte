@@ -25,6 +25,7 @@
     document_name: string;
     status: string;
     source_kind: string;
+    requires_signature: boolean;
     routing_tier?: string;
     qes_provider?: string;
     recipient: { id: string; email: string; name: string; role: string; status: string; locale: string };
@@ -42,6 +43,8 @@
   let signing = $state(false);
   let signError = $state<string | null>(null);
   let completed = $state<{ url: string | null } | null>(null);
+  let accepted = $state(false);
+  let accepting = $state(false);
 
   let showDeclineModal = $state(false);
   let declineReason = $state('');
@@ -279,6 +282,31 @@
     showDeclineModal = true;
   }
 
+  async function accept() {
+    accepting = true;
+    signError = null;
+    try {
+      const res = await fetch(`/sign/${$page.params.token}/accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? 'Could not accept the document');
+      }
+      const data = await res.json();
+      if (data.completed) {
+        completed = { url: data.final_pdf_url ?? null };
+      } else {
+        accepted = true;
+      }
+    } catch (e) {
+      signError = (e as Error).message;
+    } finally {
+      accepting = false;
+    }
+  }
+
   async function confirmDecline() {
     if (!ctx) return;
     try {
@@ -416,6 +444,12 @@
         <p>{$t('sign.signed.recorded')}</p>
       {/if}
     </div>
+  {:else if accepted}
+    <div class="state-card">
+      <CheckCircle2 class="size-10 text-success mb-3 mx-auto" />
+      <h2>{$t('sign.accepted.title')}</h2>
+      <p>{$t('sign.accepted.body')}</p>
+    </div>
   {:else if changesRequested}
     <div class="state-card">
       <CheckCircle2 class="size-10 text-info mb-3 mx-auto" />
@@ -441,7 +475,14 @@
       </article>
 
       <aside class="signer-actions">
-        {#if ctx.routing_tier === 'QES'}
+        {#if !ctx.requires_signature}
+          <h3 class="section-eyebrow">{$t('sign.accept.title')}</h3>
+          <p class="text-xs text-text-muted mb-3">{$t('sign.accept.body')}</p>
+          <button class="btn btn-primary w-full" disabled={accepting} onclick={accept}>
+            <CheckCircle2 class="size-4" /> {accepting ? $t('common.loading') : $t('sign.accept.button')}
+          </button>
+          <button class="btn btn-secondary w-full" onclick={decline}>{$t('common.decline')}</button>
+        {:else if ctx.routing_tier === 'QES'}
           <h3 class="section-eyebrow">{$t('sign.qes.title')}</h3>
           <p class="text-xs text-text-muted mb-3">
             {$t('sign.qes.body', { provider: ctx.qes_provider ?? 'Hash QES' })}

@@ -25,6 +25,7 @@ export interface DocumentResponse {
   status: string;
   routing_mode: string;
   source_kind: 'blocks' | 'pdf';
+  requires_signature?: boolean;
   blocks_json?: BlockTree;
   variables_json: Record<string, string>;
   expires_at?: string;
@@ -283,6 +284,7 @@ export async function updateDocument(
     variables_json?: Record<string, string>;
     expires_at?: string;
     default_locale?: string;
+    requires_signature?: boolean;
   }
 ): Promise<DocumentResponse> {
   return request('PATCH', `/api/v1/documents/${id}`, patch);

@@ -142,18 +142,20 @@ func registerAuthoringTools(s *Server, d Deps) {
 			"Supply EITHER pdf_base64 (a base64-encoded PDF) OR html (a designed HTML page rendered to PDF with its own CSS/@page preserved). " +
 			"Returns a draft pdf-source document; then add_recipient + add_document_field (type=signature) + send_document.",
 		InputSchema: schemaObject(map[string]any{
-			"name":       stringSchema("human-readable document name"),
-			"pdf_base64": stringSchema("base64-encoded PDF bytes (mutually exclusive with html)"),
-			"html":       stringSchema("designed HTML to render to PDF (mutually exclusive with pdf_base64)"),
-			"landscape":  map[string]any{"type": "boolean", "default": false, "description": "landscape fallback when the HTML sets no @page size"},
+			"name":               stringSchema("human-readable document name"),
+			"pdf_base64":         stringSchema("base64-encoded PDF bytes (mutually exclusive with html)"),
+			"html":               stringSchema("designed HTML to render to PDF (mutually exclusive with pdf_base64)"),
+			"landscape":          map[string]any{"type": "boolean", "default": false, "description": "landscape fallback when the HTML sets no @page size"},
+			"requires_signature": map[string]any{"type": "boolean", "default": true, "description": "false = acknowledgement mode (recipients view + accept, no signature)"},
 		}, []string{"name"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				Name      string `json:"name"`
-				PDFBase64 string `json:"pdf_base64"`
-				HTML      string `json:"html"`
-				Landscape bool   `json:"landscape"`
+				Name              string `json:"name"`
+				PDFBase64         string `json:"pdf_base64"`
+				HTML              string `json:"html"`
+				Landscape         bool   `json:"landscape"`
+				RequiresSignature *bool  `json:"requires_signature"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -188,6 +190,15 @@ func registerAuthoringTools(s *Server, d Deps) {
 			doc, pageCount, err := docintake.CreatePDFSourceDocument(r.Context(), d.Queries, d.Storage, u.OrgID, u.UserID, p.Name, data)
 			if err != nil {
 				return nil, err
+			}
+			// Acknowledgement mode: opt this draft out of requiring a signature
+			// so recipients view + accept instead of signing.
+			if p.RequiresSignature != nil && !*p.RequiresSignature {
+				if updated, uerr := d.Queries.SetDocumentRequiresSignature(r.Context(), generated.SetDocumentRequiresSignatureParams{
+					ID: doc.ID, OrgID: u.OrgID, RequiresSignature: false,
+				}); uerr == nil {
+					doc = updated
+				}
 			}
 			logMCPEvent(r, d, audit.Entry{
 				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,

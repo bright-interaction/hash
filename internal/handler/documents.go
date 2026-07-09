@@ -19,44 +19,46 @@ import (
 
 // documentResponse is the JSON shape we return.
 type documentResponse struct {
-	ID            uuid.UUID       `json:"id"`
-	OrgID         uuid.UUID       `json:"org_id"`
-	TemplateID    string          `json:"template_id,omitempty"`
-	Name          string          `json:"name"`
-	Status        string          `json:"status"`
-	RoutingMode   string          `json:"routing_mode"`
-	SourceKind    string          `json:"source_kind"`
-	BlocksJSON    json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON json.RawMessage `json:"variables_json"`
-	PDFStorageKey string          `json:"pdf_storage_key,omitempty"`
-	PDFSHA256     string          `json:"pdf_sha256,omitempty"`
-	FinalPDFKey   string          `json:"final_pdf_key,omitempty"`
-	AuditCertKey  string          `json:"audit_cert_key,omitempty"`
-	ExpiresAt     string          `json:"expires_at,omitempty"`
-	SentAt        string          `json:"sent_at,omitempty"`
-	CompletedAt   string          `json:"completed_at,omitempty"`
-	SenderID      uuid.UUID       `json:"sender_id"`
-	Metadata      json.RawMessage `json:"metadata"`
-	DefaultLocale string          `json:"default_locale"`
-	CreatedAt     string          `json:"created_at"`
-	UpdatedAt     string          `json:"updated_at"`
+	ID                uuid.UUID       `json:"id"`
+	OrgID             uuid.UUID       `json:"org_id"`
+	TemplateID        string          `json:"template_id,omitempty"`
+	Name              string          `json:"name"`
+	Status            string          `json:"status"`
+	RoutingMode       string          `json:"routing_mode"`
+	SourceKind        string          `json:"source_kind"`
+	RequiresSignature bool            `json:"requires_signature"`
+	BlocksJSON        json.RawMessage `json:"blocks_json,omitempty"`
+	VariablesJSON     json.RawMessage `json:"variables_json"`
+	PDFStorageKey     string          `json:"pdf_storage_key,omitempty"`
+	PDFSHA256         string          `json:"pdf_sha256,omitempty"`
+	FinalPDFKey       string          `json:"final_pdf_key,omitempty"`
+	AuditCertKey      string          `json:"audit_cert_key,omitempty"`
+	ExpiresAt         string          `json:"expires_at,omitempty"`
+	SentAt            string          `json:"sent_at,omitempty"`
+	CompletedAt       string          `json:"completed_at,omitempty"`
+	SenderID          uuid.UUID       `json:"sender_id"`
+	Metadata          json.RawMessage `json:"metadata"`
+	DefaultLocale     string          `json:"default_locale"`
+	CreatedAt         string          `json:"created_at"`
+	UpdatedAt         string          `json:"updated_at"`
 }
 
 func toDocumentResponse(d *generated.Document) documentResponse {
 	out := documentResponse{
-		ID:            d.ID,
-		OrgID:         d.OrgID,
-		Name:          d.Name,
-		Status:        d.Status,
-		RoutingMode:   d.RoutingMode,
-		SourceKind:    d.SourceKind,
-		BlocksJSON:    d.BlocksJson,
-		VariablesJSON: d.VariablesJson,
-		SenderID:      d.SenderID,
-		Metadata:      d.Metadata,
-		DefaultLocale: d.DefaultLocale,
-		CreatedAt:     d.CreatedAt.Time.Format(time.RFC3339),
-		UpdatedAt:     d.UpdatedAt.Time.Format(time.RFC3339),
+		ID:                d.ID,
+		OrgID:             d.OrgID,
+		Name:              d.Name,
+		Status:            d.Status,
+		RoutingMode:       d.RoutingMode,
+		SourceKind:        d.SourceKind,
+		RequiresSignature: d.RequiresSignature,
+		BlocksJSON:        d.BlocksJson,
+		VariablesJSON:     d.VariablesJson,
+		SenderID:          d.SenderID,
+		Metadata:          d.Metadata,
+		DefaultLocale:     d.DefaultLocale,
+		CreatedAt:         d.CreatedAt.Time.Format(time.RFC3339),
+		UpdatedAt:         d.UpdatedAt.Time.Format(time.RFC3339),
 	}
 	if d.TemplateID.Valid {
 		out.TemplateID = uuidFromBytes(d.TemplateID.Bytes).String()
@@ -334,11 +336,12 @@ func (s *Server) handleGetDocumentPDF(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateDocumentInput struct {
-	Name          string          `json:"name,omitempty"`
-	BlocksJSON    json.RawMessage `json:"blocks_json,omitempty"`
-	VariablesJSON json.RawMessage `json:"variables_json,omitempty"`
-	ExpiresAt     string          `json:"expires_at,omitempty"`
-	DefaultLocale string          `json:"default_locale,omitempty"`
+	Name              string          `json:"name,omitempty"`
+	BlocksJSON        json.RawMessage `json:"blocks_json,omitempty"`
+	VariablesJSON     json.RawMessage `json:"variables_json,omitempty"`
+	ExpiresAt         string          `json:"expires_at,omitempty"`
+	DefaultLocale     string          `json:"default_locale,omitempty"`
+	RequiresSignature *bool           `json:"requires_signature,omitempty"`
 }
 
 func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +431,20 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "update default language failed")
+			return
+		}
+	}
+
+	// Signature mode: draft-only toggle between signature-required and
+	// acknowledgement (view/accept). Locked once sent.
+	if in.RequiresSignature != nil && *in.RequiresSignature != d.RequiresSignature {
+		d, err = s.Queries.SetDocumentRequiresSignature(r.Context(), generated.SetDocumentRequiresSignatureParams{
+			ID:                id,
+			OrgID:             u.OrgID,
+			RequiresSignature: *in.RequiresSignature,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "update signature mode failed")
 			return
 		}
 	}

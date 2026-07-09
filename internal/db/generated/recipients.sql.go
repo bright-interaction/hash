@@ -12,6 +12,23 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countPendingAcceptors = `-- name: CountPendingAcceptors :one
+SELECT COUNT(*) FROM recipients
+WHERE document_id = $1
+  AND role <> 'cc'
+  AND status NOT IN ('accepted','declined')
+`
+
+// Acknowledgement-mode completion: every non-cc recipient must have accepted (or
+// declined) for the document to complete. cc recipients are informational and
+// never block completion.
+func (q *Queries) CountPendingAcceptors(ctx context.Context, documentID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countPendingAcceptors, documentID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countUnsignedSigners = `-- name: CountUnsignedSigners :one
 SELECT COUNT(*) FROM recipients
 WHERE document_id = $1
