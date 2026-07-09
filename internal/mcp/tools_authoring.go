@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,9 @@ import (
 	"github.com/brightinteraction/hash/internal/auth"
 	"github.com/brightinteraction/hash/internal/blocks"
 	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/brightinteraction/hash/internal/docintake"
 	"github.com/brightinteraction/hash/internal/magictoken"
+	"github.com/brightinteraction/hash/internal/render"
 )
 
 // pgtypeUUID lifts a uuid.UUID into pgx's nullable form.
@@ -129,6 +132,69 @@ func registerAuthoringTools(s *Server, d Deps) {
 				return doc, nil
 			}
 			return nil, errors.New("unreachable")
+		},
+	})
+
+	s.RegisterTool(ToolDef{
+		Name:  "create_pdf_document",
+		Write: true,
+		Description: "Create a signable pdf-source document in ONE step from a designed proposal, skipping the template detour. " +
+			"Supply EITHER pdf_base64 (a base64-encoded PDF) OR html (a designed HTML page rendered to PDF with its own CSS/@page preserved). " +
+			"Returns a draft pdf-source document; then add_recipient + add_document_field (type=signature) + send_document.",
+		InputSchema: schemaObject(map[string]any{
+			"name":       stringSchema("human-readable document name"),
+			"pdf_base64": stringSchema("base64-encoded PDF bytes (mutually exclusive with html)"),
+			"html":       stringSchema("designed HTML to render to PDF (mutually exclusive with pdf_base64)"),
+			"landscape":  map[string]any{"type": "boolean", "default": false, "description": "landscape fallback when the HTML sets no @page size"},
+		}, []string{"name"}),
+		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
+			u, _ := auth.FromContext(r.Context())
+			var p struct {
+				Name      string `json:"name"`
+				PDFBase64 string `json:"pdf_base64"`
+				HTML      string `json:"html"`
+				Landscape bool   `json:"landscape"`
+			}
+			if err := MustParseArgs(args, &p); err != nil {
+				return nil, err
+			}
+			if p.Name == "" {
+				return nil, errors.New("name required")
+			}
+			if (p.PDFBase64 == "") == (p.HTML == "") {
+				return nil, errors.New("supply exactly one of pdf_base64 or html")
+			}
+			var data []byte
+			if p.PDFBase64 != "" {
+				raw, derr := base64.StdEncoding.DecodeString(p.PDFBase64)
+				if derr != nil {
+					return nil, errors.New("pdf_base64 is not valid base64")
+				}
+				data = raw
+			} else {
+				if d.PDF == nil {
+					return nil, errors.New("pdf renderer unavailable")
+				}
+				opts := render.PDFOptions{PreferCSSPageSize: true, WaitDelay: "1000ms"}
+				if p.Landscape {
+					opts.PaperWidth, opts.PaperHeight = 11.69, 8.27
+				}
+				rendered, rerr := d.PDF.HTMLToPDF(r.Context(), render.SanitizeForRender(p.HTML), opts)
+				if rerr != nil {
+					return nil, fmt.Errorf("render html to pdf: %w", rerr)
+				}
+				data = rendered
+			}
+			doc, pageCount, err := docintake.CreatePDFSourceDocument(r.Context(), d.Queries, d.Storage, u.OrgID, u.UserID, p.Name, data)
+			if err != nil {
+				return nil, err
+			}
+			logMCPEvent(r, d, audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
+				Kind:    audit.KindDocumentCreated,
+				Payload: map[string]any{"name": p.Name, "source_kind": "pdf", "via": "mcp", "tool": "create_pdf_document"},
+			})
+			return map[string]any{"document": doc, "page_count": pageCount}, nil
 		},
 	})
 

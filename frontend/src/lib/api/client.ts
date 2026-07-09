@@ -167,6 +167,38 @@ export async function createDocumentFromTemplate(
   });
 }
 
+export interface ImportResult {
+  document: DocumentResponse;
+  page_count: number;
+}
+
+// importProposalPDF creates a signable pdf-source document straight from an
+// uploaded PDF (no template detour). Lands the document in the field designer.
+export async function importProposalPDF(name: string, file: File): Promise<ImportResult> {
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('pdf', file);
+  const res = await fetch('/api/v1/documents/import', {
+    method: 'POST',
+    credentials: 'include',
+    body: fd,
+  });
+  if (!res.ok) {
+    throw new Error(await friendlyError(res));
+  }
+  return res.json();
+}
+
+// importProposalHTML renders a designed HTML page to a PDF (its own CSS/@page
+// preserved) and creates a signable pdf-source document from it.
+export async function importProposalHTML(
+  name: string,
+  html: string,
+  landscape = false,
+): Promise<ImportResult> {
+  return request('POST', '/api/v1/documents/import', { name, html, landscape });
+}
+
 export async function getDocument(id: string): Promise<DocumentResponse> {
   return request('GET', `/api/v1/documents/${id}`);
 }

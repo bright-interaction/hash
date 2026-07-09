@@ -328,6 +328,10 @@ func (s *Server) Routes() http.Handler {
 			r.Use(auth.RequireRoleForWrites(auth.RoleSender))
 			r.Get("/", s.handleListDocuments)
 			r.Post("/", s.handleCreateDocument)
+			// One-step signable-proposal intake: multipart PDF upload OR a
+			// designed HTML body rendered to PDF, both landing as a pdf-source
+			// document straight into the field designer (no template detour).
+			r.Post("/import", s.handleImportDocument)
 			r.Get("/{id}", s.handleGetDocument)
 			r.Patch("/{id}", s.handleUpdateDocument)
 			r.Delete("/{id}", s.handleDeleteDocument)

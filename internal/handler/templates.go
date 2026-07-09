@@ -250,12 +250,18 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 
+	// Real page count via pdfcpu (over the sanitized bytes). A parse failure
+	// falls back to 0 rather than blocking the upload; the field designer
+	// derives page count client-side regardless, but a correct value here
+	// lets headless/MCP callers target pages without fetching the PDF.
+	pageCount, _ := sanitize.PageCount(cleaned.Bytes)
+
 	t, err := s.Queries.CreatePDFTemplate(r.Context(), generated.CreatePDFTemplateParams{
 		OrgID:         orgID,
 		Name:          name,
 		PdfStorageKey: pgtype.Text{String: key, Valid: true},
 		PdfSha256:     sha[:],
-		PageCount:     pgtype.Int4{Int32: 0, Valid: true}, // pdfcpu page count is week 2; placeholder for now
+		PageCount:     pgtype.Int4{Int32: int32(pageCount), Valid: true},
 		FieldsJson:    json.RawMessage(`[]`),
 		CreatedBy:     userID,
 	})

@@ -24,8 +24,8 @@ func registerFieldTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:  "add_document_field",
 		Write: true,
-		Description: "Add a fillable field overlay to a document. Type must be one of text|date|checkbox|dropdown|initial. " +
-			"Coordinates are 0..100 percent of the rendered page. recipient_id is optional; nil = any recipient may fill.",
+		Description: "Add a field overlay to a document. Type is one of text|date|checkbox|dropdown|initial, or 'signature' on a pdf-source document (signature requires recipient_id). " +
+			"Coordinates are 0..100 percent of the rendered page. recipient_id is optional for fillable fields; nil = any recipient may fill.",
 		InputSchema: schemaObject(map[string]any{
 			"document_id":  stringSchema("document uuid"),
 			"recipient_id": stringSchema("optional recipient uuid; empty = any signer"),
@@ -62,7 +62,8 @@ func registerFieldTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), docID); err != nil {
 				return nil, err
 			}
-			if _, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: u.OrgID}); err != nil {
+			doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: u.OrgID})
+			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return nil, errors.New("document not found")
 				}
@@ -70,8 +71,18 @@ func registerFieldTools(s *Server, d Deps) {
 			}
 			switch p.Type {
 			case "text", "date", "checkbox", "dropdown", "initial":
+			case "signature":
+				// PDF-source docs place signature fields visually (no block tree
+				// to carry them), mirroring the REST handleAddField so an agent
+				// can drop "sign here" boxes on an imported proposal.
+				if doc.SourceKind != "pdf" {
+					return nil, errors.New("signature fields come from the block tree for block-source documents")
+				}
+				if p.RecipientID == "" {
+					return nil, errors.New("signature fields must be assigned to a recipient")
+				}
 			default:
-				return nil, errors.New("type must be text|date|checkbox|dropdown|initial")
+				return nil, errors.New("type must be text|date|checkbox|dropdown|initial|signature")
 			}
 			recipientID := pgtype.UUID{}
 			if p.RecipientID != "" {

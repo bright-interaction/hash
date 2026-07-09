@@ -16,6 +16,7 @@ import (
 	"github.com/brightinteraction/hash/internal/envelopes"
 	"github.com/brightinteraction/hash/internal/evidence"
 	"github.com/brightinteraction/hash/internal/qes"
+	"github.com/brightinteraction/hash/internal/render"
 	"github.com/brightinteraction/hash/internal/resolver"
 	"github.com/brightinteraction/hash/internal/send"
 	"github.com/brightinteraction/hash/internal/storage"
@@ -24,9 +25,11 @@ import (
 
 // Deps gathers the runtime dependencies the tool + resource handlers need.
 type Deps struct {
-	Pool         *pgxpool.Pool
-	Queries      *generated.Queries
-	Storage      *storage.Client
+	Pool    *pgxpool.Pool
+	Queries *generated.Queries
+	Storage *storage.Client
+	// PDF renders designed HTML proposals to a signable PDF (create_pdf_document).
+	PDF          *render.Gotenberg
 	Audit        *audit.Logger
 	Mailer       dispatch.Mailer
 	Versions     *versions.Engine

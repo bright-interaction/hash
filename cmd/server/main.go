@@ -334,6 +334,7 @@ func run() error {
 		Pool:         pool,
 		Queries:      queries,
 		Storage:      store,
+		PDF:          pdfClient,
 		Audit:        auditLog,
 		Mailer:       mailer,
 		Versions:     versionsEngine,

@@ -97,10 +97,12 @@ func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions)
 	if opts.PaperHeight == 0 {
 		opts.PaperHeight = 11.69
 	}
-	if opts.Margins == [4]float32{} {
+	if opts.Margins == [4]float32{} && !opts.PreferCSSPageSize {
 		// Google-Docs default page geometry: A4 (set above) with 1 inch margins
 		// on all sides. Combined with the in-body centered .hash-doc column
-		// this gives the familiar comfortable document measure.
+		// this gives the familiar comfortable document measure. Skipped when the
+		// caller wants the document's own @page CSS to drive geometry (designed
+		// proposals), so we don't force 1-inch margins onto a full-bleed layout.
 		opts.Margins = [4]float32{1.0, 1.0, 1.0, 1.0}
 	}
 	_ = mw.WriteField("paperWidth", fmt.Sprintf("%.2f", opts.PaperWidth))
@@ -110,6 +112,12 @@ func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions)
 	_ = mw.WriteField("marginBottom", fmt.Sprintf("%.2f", opts.Margins[2]))
 	_ = mw.WriteField("marginLeft", fmt.Sprintf("%.2f", opts.Margins[3]))
 	_ = mw.WriteField("printBackground", "true")
+	if opts.PreferCSSPageSize {
+		// Honour the document's own `@page { size: ... }` rule so a designed
+		// proposal (e.g. a landscape deck) renders at its intended geometry
+		// instead of being squeezed into the paperWidth/Height fallback.
+		_ = mw.WriteField("preferCssPageSize", "true")
+	}
 	if opts.WaitForExpression != "" {
 		_ = mw.WriteField("waitForExpression", opts.WaitForExpression)
 	}
@@ -172,6 +180,10 @@ type PDFOptions struct {
 	WaitForExpression string      // e.g. window.fontsLoaded === true
 	WaitDelay         string      // e.g. "1s"; gives Chromium time to settle
 	Assets            []FontAsset // optional; nil falls back to FontAssets()
+	// PreferCSSPageSize makes Gotenberg honour the document's own
+	// `@page { size: ... }` and suppresses the default 1-inch margins, so an
+	// author-designed proposal renders at its intended page geometry.
+	PreferCSSPageSize bool
 }
 
 func writeFormFile(mw *multipart.Writer, fieldName, filename, mime string, contents []byte) error {
