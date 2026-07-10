@@ -40,7 +40,7 @@
   </header>
 
   <main class="flex-1 flex flex-col items-center justify-center px-6 text-center max-w-3xl mx-auto py-20">
-    <p class="page-eyebrow mb-4">Hash · Roman god of contracts</p>
+    <p class="page-eyebrow mb-4">Hash · Every signature, hash-chained</p>
     <h1 class="page-title mb-6">Agent-native e-signing.<br />Self-hosted. EU-sovereign.</h1>
     <p class="text-text-secondary text-lg max-w-xl mb-10 leading-relaxed">
       Document creation + e-signing with PandaDoc-style typed signatures, an open MCP for
