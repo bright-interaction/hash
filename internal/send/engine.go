@@ -431,7 +431,7 @@ func (e *Engine) sendEmail(kind, toEmail, toName, docName, senderEmail, signURL,
 			To: toEmail, Subject: subj, HTML: html, Text: text,
 			ReplyTo: senderEmail, FromName: e.OrgName,
 		}); err != nil {
-			slog.Warn("send: email send failed", "to", toEmail, "kind", kind, "err", err)
+			slog.Warn("send: email send failed", "to", dispatch.MaskEmail(toEmail), "kind", kind, "err", dispatch.ScrubEmails(err.Error()))
 		}
 	}()
 }

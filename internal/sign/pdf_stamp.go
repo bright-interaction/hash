@@ -3,6 +3,8 @@ package sign
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -116,7 +118,22 @@ func (e *Engine) loadSourcePDF(ctx context.Context, doc *generated.Document) ([]
 	if !doc.PdfStorageKey.Valid || doc.PdfStorageKey.String == "" {
 		return nil, errors.New("pdf-source document has no stored pdf")
 	}
-	return e.Storage.Get(ctx, doc.PdfStorageKey.String)
+	body, err := e.Storage.Get(ctx, doc.PdfStorageKey.String)
+	if err != nil {
+		return nil, err
+	}
+	// Tripwire: the intake recorded pdf_sha256 of these bytes. Refuse to stamp +
+	// ed25519-seal content that has drifted from the recorded digest (a
+	// storage-layer source swap between intake and finalize). Zero cost, and it
+	// also hardens the pre-existing template flow. Legacy/blocks docs with no
+	// stored digest (len != 32) are unaffected.
+	if len(doc.PdfSha256) == 32 {
+		sum := sha256.Sum256(body)
+		if subtle.ConstantTimeCompare(sum[:], doc.PdfSha256) != 1 {
+			return nil, errors.New("source pdf digest mismatch: stored bytes differ from the recorded intake hash")
+		}
+	}
+	return body, nil
 }
 
 // stampFieldsAndSignatures renders the field/signature overlays for every page

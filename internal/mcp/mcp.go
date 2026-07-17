@@ -270,6 +270,20 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req req
 		writeRPCError(w, req.ID, codeUnauthorized, "no session in context", nil)
 		return
 	}
+	// Per-document agent tokens (v1.1) are confined to their bound document: they
+	// may only call tools in docScopeSafeTools (the doc-addressed tools that
+	// EnforceDocScope + the self-confining list/search). Every org-level tool is
+	// refused here fail-closed, so a doc token handed to a counterparty cannot
+	// rewrite org branding, downgrade the org eIDAS signature tier, register an
+	// org webhook, or enumerate sibling documents. Org-wide keys + sessions are
+	// unaffected (no DocumentScopeKey in context).
+	if !docTokenAllows(r.Context(), p.Name) {
+		writeRPCResult(w, req.ID, ToolResult{
+			Content: []ToolContent{{Type: "text", Text: "this token is scoped to a single document and cannot call the org-level '" + p.Name + "' tool"}},
+			IsError: true,
+		})
+		return
+	}
 	// Write tools require the "write" scope. A read-only API token (or a
 	// scoped token without write) can call read tools but is refused here.
 	if tool.Write && !auth.HasWriteScope(r.Context()) {

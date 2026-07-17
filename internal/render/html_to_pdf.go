@@ -12,9 +12,17 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"runtime"
 	"strings"
 	"time"
 )
+
+// maxRenderedPDF caps the bytes we accept back from Gotenberg. A small HTML
+// input can amplify into an arbitrarily large PDF (thousands of forced page
+// breaks, huge repeated data: images); without this cap the render path would
+// buffer that ~5x through the downstream pdfcpu sanitize passes and OOM the
+// shared multi-tenant process. 60 MB is well above any legitimate signable doc.
+const maxRenderedPDF = 60 << 20
 
 // Gotenberg wraps the HTTP client we use to talk to a Gotenberg instance.
 // Default endpoint matches the docker-compose wiring; production uses the
@@ -22,14 +30,27 @@ import (
 type Gotenberg struct {
 	BaseURL string
 	HTTP    *http.Client
+	// sem bounds concurrent renders so an authenticated caller cannot fan out
+	// unbounded Chromium conversions (each holding a large PDF + working set)
+	// and exhaust process memory. middleware.Timeout cannot stop the ctx-less
+	// pdfcpu passes downstream, so bounding fan-in here is the real backstop.
+	sem chan struct{}
 }
 
-// NewGotenberg builds a client with sensible defaults (60-second timeout).
-// Pass a custom http.Client if you need TLS/transport overrides.
+// NewGotenberg builds a client with sensible defaults (60-second timeout) and a
+// render-concurrency gate sized to the host.
 func NewGotenberg(baseURL string) *Gotenberg {
+	conc := runtime.NumCPU()
+	if conc < 2 {
+		conc = 2
+	}
+	if conc > 8 {
+		conc = 8
+	}
 	return &Gotenberg{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		HTTP:    &http.Client{Timeout: 60 * time.Second},
+		sem:     make(chan struct{}, conc),
 	}
 }
 
@@ -63,6 +84,16 @@ func (g *Gotenberg) Ping(ctx context.Context) error {
 func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions) ([]byte, error) {
 	if g.BaseURL == "" {
 		return nil, fmt.Errorf("gotenberg base url not configured")
+	}
+	// Bound concurrent renders; wait our turn or give up if the caller's context
+	// is already done (its 60s deadline still applies while we hold the slot).
+	if g.sem != nil {
+		select {
+		case g.sem <- struct{}{}:
+			defer func() { <-g.sem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	body := &bytes.Buffer{}
 	mw := multipart.NewWriter(body)
@@ -158,7 +189,14 @@ func (g *Gotenberg) HTMLToPDF(ctx context.Context, html string, opts PDFOptions)
 		}
 		if resp.StatusCode == http.StatusOK {
 			defer resp.Body.Close()
-			return io.ReadAll(resp.Body)
+			out, err := io.ReadAll(io.LimitReader(resp.Body, maxRenderedPDF+1))
+			if err != nil {
+				return nil, err
+			}
+			if len(out) > maxRenderedPDF {
+				return nil, fmt.Errorf("gotenberg render exceeded the %d-byte limit", maxRenderedPDF)
+			}
+			return out, nil
 		}
 		out, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()

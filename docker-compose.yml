@@ -57,10 +57,15 @@ services:
       - "gotenberg"
       - "--api-port=3000"
       - "--api-timeout=60s"
-      # Default Chromium URL policy: allow all (so file:// works for the
-      # uploaded index.html, https://fonts.googleapis.com works for fonts).
-      # Production should add a chromium-deny-list to block internal IPs;
-      # local dev runs with the defaults.
+      # SSRF defense-in-depth (matches prod): block Chromium from fetching
+      # internal targets (private ranges, cloud metadata, localhost, single-label
+      # Docker hostnames) during HTML->PDF render. hash inlines its own
+      # fonts/assets so it needs no remote fetch; the app-layer proposal_html
+      # sanitizer strips remote URLs and is the load-bearing control, this is the
+      # network backstop so staging is not wide open. NB a DOTTED public hostname
+      # that resolves to a private IP still slips this URL-regex (Gotenberg has no
+      # resolution-based blocking) - the parser fix is what actually stops it.
+      - '--chromium-deny-list=^(file://|https?://(10\.|127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|0\.0\.0\.0|localhost|\[?::1\]?|[a-zA-Z0-9_-]+(:[0-9]+)?(/|$))).*'
     ports:
       - "127.0.0.1:${HASH_GOTENBERG_PORT:-3010}:3000"
 

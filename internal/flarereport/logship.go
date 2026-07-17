@@ -91,6 +91,18 @@ var sensitiveLogKeyParts = []string{
 	"private_key", "privatekey", "vault_key", "new_value", "jwt", "session_id", "dsn",
 }
 
+// piiLogKeyParts are substrings whose values are signer/recipient PII. Shipping
+// them to the shared multi-tenant Flare logs store is a GDPR data egress, so
+// they are redacted the same way secrets are. Unambiguous substrings only.
+var piiLogKeyParts = []string{
+	"email", "recipient", "personnummer", "user_agent", "useragent",
+	"signer_ip", "signer_ua", "phone",
+}
+
+// piiLogKeyExact are short, ambiguous keys matched only exactly (substring would
+// false-hit "total"/"sector" for "to", "recipient" already covered, etc.).
+var piiLogKeyExact = map[string]bool{"to": true, "ip": true}
+
 func isSensitiveLogKey(key string) bool {
 	k := strings.ToLower(key)
 	for _, s := range sensitiveLogKeyParts {
@@ -98,7 +110,12 @@ func isSensitiveLogKey(key string) bool {
 			return true
 		}
 	}
-	return false
+	for _, s := range piiLogKeyParts {
+		if strings.Contains(k, s) {
+			return true
+		}
+	}
+	return piiLogKeyExact[k]
 }
 
 func logShipLevel() slog.Level {

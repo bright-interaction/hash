@@ -34,6 +34,36 @@ func TestSanitizeForRender(t *testing.T) {
 			mustDrop: []string{"evil.example"},
 		},
 		{
+			// Regression: the old quote-anchored regex missed an UNQUOTED value.
+			name:     "strips unquoted remote src (regex bypass)",
+			in:       `<img src=http://metadata.evil.com/latest/meta-data/>`,
+			mustDrop: []string{"metadata.evil.com", "meta-data"},
+		},
+		{
+			// Regression: a quoted value with LEADING WHITESPACE that Chromium
+			// trims and fetches, but the old regex failed to match.
+			name:     "strips remote src with leading whitespace (regex bypass)",
+			in:       `<img src=" http://169.254.169.254/latest/">`,
+			mustDrop: []string{"169.254.169.254"},
+		},
+		{
+			// Regression: an ENTITY-ENCODED scheme the parser decodes but a raw
+			// regex never sees.
+			name:     "strips entity-encoded remote scheme (regex bypass)",
+			in:       `<img src="&#104;ttp://evil.example/x">`,
+			mustDrop: []string{"evil.example"},
+		},
+		{
+			name:     "strips protocol-relative with leading whitespace",
+			in:       `<img src=" //evil.example/z">`,
+			mustDrop: []string{"evil.example"},
+		},
+		{
+			name:     "keeps unquoted relative src",
+			in:       `<img src=/fonts/logo.png alt=logo>`,
+			mustKeep: []string{"logo.png"},
+		},
+		{
 			name:     "keeps relative path",
 			in:       `<img src="/fonts/logo.png">`,
 			mustKeep: []string{`src="/fonts/logo.png"`},

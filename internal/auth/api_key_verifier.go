@@ -53,9 +53,11 @@ func (v *PgVerifier) LookupByPrefix(ctx context.Context, prefix string) (uuid.UU
 	if doc.MaxUses > 0 && doc.UsedCount >= doc.MaxUses {
 		return uuid.Nil, uuid.Nil, uuid.Nil, "", "", nil, uuid.Nil, nil, errors.New("token usage cap exceeded")
 	}
-	// Best-effort use counter bump. Done inline so the next call sees
-	// the updated used_count.
-	_ = v.Queries.TouchDocAgentToken(ctx, doc.ID)
+	// NB: the use-counter bump happens in Touch (post-secret-verify), NOT here.
+	// LookupByPrefix runs before the constant-time hash check, so incrementing
+	// used_count here let a prefix-only attacker (the prefix is non-secret)
+	// exhaust a max_uses-capped token and forge last_used_at with garbage
+	// secrets. Touch is called by the middleware only after ConstantTimeCompare.
 
 	userID := uuid.Nil
 	role := "doc-token"
@@ -71,9 +73,15 @@ func (v *PgVerifier) LookupByPrefix(ctx context.Context, prefix string) (uuid.UU
 }
 
 func (v *PgVerifier) Touch(ctx context.Context, id uuid.UUID) error {
-	// api_keys is the hot path; on a miss try the doc-token touch.
-	if err := v.Queries.TouchAPIKey(ctx, id); err == nil {
-		return nil
+	// The id belongs to exactly one of the two token tables. Touch both: the
+	// non-matching UPDATE affects zero rows and is a no-op. We cannot short-
+	// circuit on the api_keys touch succeeding, because TouchAPIKey is :exec and
+	// returns nil even when it matched zero rows (a doc-token id), which would
+	// leave document_agent_tokens.used_count / last_used_at never updated.
+	errA := v.Queries.TouchAPIKey(ctx, id)
+	errB := v.Queries.TouchDocAgentToken(ctx, id)
+	if errA != nil {
+		return errA
 	}
-	return v.Queries.TouchDocAgentToken(ctx, id)
+	return errB
 }

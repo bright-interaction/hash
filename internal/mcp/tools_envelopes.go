@@ -266,6 +266,12 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, errors.New("envelope_id must be a uuid")
 			}
+			// Confine a per-document agent token to its bound envelope (the sibling
+			// write tools already do this; these two reads skipped it and leaked
+			// child metadata + final-PDF hashes for any envelope in the org).
+			if err := auth.EnforceDocScope(r.Context(), envID); err != nil {
+				return nil, err
+			}
 			kids, err := d.Envelopes.Children(r.Context(), envID, u.OrgID)
 			if err != nil {
 				return nil, err
@@ -295,6 +301,11 @@ func registerEnvelopeTools(s *Server, d Deps) {
 			envID, err := uuid.Parse(p.EnvelopeID)
 			if err != nil {
 				return nil, errors.New("envelope_id must be a uuid")
+			}
+			// Confine a per-document agent token to its bound envelope before
+			// returning the manifest (child final-PDF SHA-256s + manifest hash).
+			if err := auth.EnforceDocScope(r.Context(), envID); err != nil {
+				return nil, err
 			}
 			env, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: envID, OrgID: u.OrgID})
 			if errors.Is(err, pgx.ErrNoRows) {

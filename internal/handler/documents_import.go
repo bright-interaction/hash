@@ -125,6 +125,10 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 			writeError(w, http.StatusBadRequest, "sanitize PDF: "+err.Error())
 			return
 		}
+		if errors.Is(err, docintake.ErrTooManyPages) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeInternalErrorMsg(w, "create document failed", err)
 		return
 	}

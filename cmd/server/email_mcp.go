@@ -38,7 +38,7 @@ func renderEmailForMCP(orgName string) func(m dispatch.Mailer, kind, toEmail, to
 		if err := m.Send(ctx, dispatch.Message{
 			To: toEmail, Subject: subj, HTML: html, Text: text,
 		}); err != nil {
-			slog.Warn("mcp email send failed", "kind", kind, "to", toEmail, "err", err)
+			slog.Warn("mcp email send failed", "kind", kind, "to", dispatch.MaskEmail(toEmail), "err", dispatch.ScrubEmails(err.Error()))
 		}
 	}
 }

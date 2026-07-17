@@ -22,6 +22,17 @@ import (
 // callers can map it to a 400 (bad upload) rather than a 500.
 var ErrSanitizePDF = errors.New("docintake: pdf sanitize failed")
 
+// ErrTooManyPages marks an intake whose page count exceeds maxIntakePages, so
+// callers map it to a 400. Guards the HTML->PDF amplification vector (a tiny
+// input can render into thousands of pages) whose direct-upload 50 MB cap the
+// render path bypasses.
+var ErrTooManyPages = errors.New("docintake: document exceeds the page limit")
+
+// maxIntakePages bounds a one-step intake document. Legitimate proposals and
+// contracts are far under this; the cap exists to reject amplification bombs
+// before they reach the (in-memory, ctx-less) pdfcpu rewrite passes.
+const maxIntakePages = 500
+
 // CreatePDFSourceDocument sanitizes the PDF bytes (strips /Info, XMP, JS,
 // AcroForm, attachments, annotations), stores the cleaned copy, and creates a
 // template-less pdf-source document ready for the field designer. Returns the
@@ -33,12 +44,17 @@ func CreatePDFSourceDocument(ctx context.Context, q *generated.Queries, st *stor
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %v", ErrSanitizePDF, err)
 	}
+	// Reject an amplification bomb BEFORE storing it or handing it to the
+	// downstream pdfcpu passes.
+	pageCount, _ := sanitize.PageCount(cleaned.Bytes)
+	if pageCount > maxIntakePages {
+		return nil, 0, fmt.Errorf("%w: %d pages exceeds the %d-page limit", ErrTooManyPages, pageCount, maxIntakePages)
+	}
 	key := path.Join("org", orgID.String(), "documents", uuid.NewString()+".pdf")
 	sha, err := st.Put(ctx, key, "application/pdf", cleaned.Bytes)
 	if err != nil {
 		return nil, 0, err
 	}
-	pageCount, _ := sanitize.PageCount(cleaned.Bytes)
 	d, err := q.CreatePDFDocument(ctx, generated.CreatePDFDocumentParams{
 		OrgID:         orgID,
 		TemplateID:    pgtype.UUID{}, // template-less one-shot intake

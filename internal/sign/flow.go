@@ -451,15 +451,24 @@ func (e *Engine) Accept(ctx context.Context, rc *RecipientContext, ip, ua string
 		return &Result{DocumentID: doc.ID, Status: "in_progress", Completed: false}, nil
 	}
 	_ = e.Queries.InvalidateRecipientTokens(ctx, doc.ID)
-	_, _ = e.Audit.Log(ctx, audit.Entry{
-		OrgID: doc.OrgID, DocumentID: &doc.ID,
-		Kind:    audit.KindDocumentCompleted,
-		Payload: map[string]any{"mode": "acknowledgement"},
-	})
 	finalKey := ""
 	if lockedDoc.PdfStorageKey.Valid {
 		finalKey = lockedDoc.PdfStorageKey.String
 	}
+	// Bind the acknowledged document's content digest into the append-only audit
+	// chain, mirroring afterFinalize on the signed path. Without it the chain
+	// attests only {"mode":"acknowledgement"} and an object-store swap of the
+	// final artifact goes undetected; the digest lets the evidence bundle's
+	// recomputed FinalPDFSHA256 be checked against the immutable chain.
+	completePayload := map[string]any{"mode": "acknowledgement", "final_pdf_key": finalKey}
+	if len(lockedDoc.PdfSha256) == 32 {
+		completePayload["final_pdf_sha256"] = fmt.Sprintf("%x", lockedDoc.PdfSha256)
+	}
+	_, _ = e.Audit.Log(ctx, audit.Entry{
+		OrgID: doc.OrgID, DocumentID: &doc.ID,
+		Kind:    audit.KindDocumentCompleted,
+		Payload: completePayload,
+	})
 	return &Result{DocumentID: doc.ID, Status: "completed", Completed: true, FinalPDFKey: finalKey}, nil
 }
 
