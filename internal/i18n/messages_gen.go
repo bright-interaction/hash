@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Code generated from the i18n translation workflow. DO NOT EDIT.
 package i18n
 

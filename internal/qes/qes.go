@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package qes implements v1.1 Qualified Electronic Signature routing.
 //
 // When a document's routing_tier is QES (Phase 9 eIDAS escalation), the

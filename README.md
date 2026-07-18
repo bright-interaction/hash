@@ -1,8 +1,9 @@
 # Hash
 
-EU-sovereign self-hosted document creation + e-signing platform. Agent-native authoring via MCP. Replaces the retired Documenso. The name comes from the Roman/Indo-Iranian deity of contracts and oaths ,  "Mithra" literally means *covenant*.
-
-See [PLAN.md](./PLAN.md) for the six-week build plan and architectural decisions.
+EU-sovereign self-hosted document creation + e-signing platform. Agent-native
+authoring via MCP. The name comes from the product's spine: every signing event
+lands in a hash-chained audit timeline, and every completed envelope exports an
+evidence bundle you can verify offline against the instance's published key.
 
 ## Stack
 
@@ -32,9 +33,10 @@ make docker-up
 - **[DEPLOY.md](./DEPLOY.md)**: generic, CI- and host-neutral deployment
   (Docker / Compose / Kubernetes; GitHub Actions, GitLab CI, or any pipeline).
 - **[.env.example](./.env.example)**: every config var, annotated.
-- **[PRODUCTION-CUTOVER.md](./PRODUCTION-CUTOVER.md)**: the Bright Interaction
-  internal runbook (CI + the shared cluster).
 
-## Status
+## License
 
-Week 1 of v1 ,  foundations. See `PLAN.md` for what's shipped and what's next.
+Hash is fair-code, licensed under the Hash Sustainable Use License: self-host
+free, use it commercially for your own business and your own clients, have
+anyone sign on your instance; you may not resell it as a hosted e-sign service.
+See [LICENSE](./LICENSE) and [LICENSING.md](./LICENSING.md).

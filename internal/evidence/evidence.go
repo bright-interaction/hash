@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package evidence implements Phase 10.2: court-ready evidence bundle.
 //
 // Builds a single PDF containing:

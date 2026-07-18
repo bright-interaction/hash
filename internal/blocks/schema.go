@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package blocks defines the canonical document block tree, validators,
 // renderers, and parsers. The block tree is the source of truth for any
 // block-authored Hash document. The TipTap editor in the frontend

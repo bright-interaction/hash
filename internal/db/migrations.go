@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package db wires the embedded goose migrations and exposes a runner.
 package db
 

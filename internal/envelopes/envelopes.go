@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package envelopes implements Phase 8.6: PandaDoc-style multi-document
 // bundles. An envelope is a special document (`is_envelope=true`) that
 // contains other documents (`parent_envelope_id` pointing back). One

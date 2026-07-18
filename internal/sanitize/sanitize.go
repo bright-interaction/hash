@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package sanitize implements Phase 8.7: a GDPR-safe upload pipeline.
 //
 // Every blob users upload (PDF templates, branding logos, embedded images)

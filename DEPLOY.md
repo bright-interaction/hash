@@ -5,8 +5,8 @@ built from one container image**, plus a few standard backing services. There
 is no dependency on any particular CI system or host: anything that can build a
 container and run it (Docker Compose, Kubernetes, a plain VM) works.
 
-> Bright Interaction's own instance is deployed with CI (see
-> `PRODUCTION-CUTOVER.md` for that internal runbook). Nothing below requires it.
+> Bright Interaction's own instance is deployed with its in-house CI. Nothing
+> below requires it.
 > GitHub Actions, GitLab CI, Jenkins, Drone, or a manual `docker build` are all
 > equally fine.
 
@@ -41,10 +41,11 @@ openssl genpkey -algorithm ed25519 -outform DER | tail -c 32 | base64   # AUDIT_
 ```
 
 Outside local dev (any non-loopback `HASH_PUBLIC_URL`), the app **fail-closes
-on boot** unless the production guards hold: a stable `HASH_AUDIT_PRIVATE_KEY`,
-a real (non-`mock`) QES + billing provider with their keys, and -- if any AI
-provider key is set -- a 64-hex `HASH_AI_SHIELD_KEY` with an EU provider host.
-See the "Production boot guards" list in `.env.example` / `PRODUCTION-CUTOVER.md`.
+on boot** unless the production guards hold: a stable `HASH_AUDIT_PRIVATE_KEY`;
+QES + billing providers either left unset (SES-only, unmetered) or real and
+fully keyed, never the dev-only `mock` providers; and -- if any AI provider key
+is set -- a 64-hex `HASH_AI_SHIELD_KEY` with an EU provider host.
+See the "Production boot guards" list in `.env.example`.
 
 ## 2. Build the image
 

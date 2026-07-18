@@ -33,13 +33,12 @@ services:
     ports:
       - "127.0.0.1:${HASH_MINIO_API_PORT:-9000}:9000"
       - "127.0.0.1:${HASH_MINIO_CONSOLE_PORT:-9001}:9001"
-    # Unique alias on the project network. Without this, the bare name
-    # `minio` collides with the production MinIO container (restic
-    # backup store) once hash-app joins web-proxy: docker DNS
-    # resolves `minio` to the production container, hash hits it
-    # with minioadmin/minioadmin (the staging defaults), and crashes
-    # with "The Access Key Id you provided does not exist". Force the
-    # staging app to talk to the staging minio explicitly.
+    # Unique alias on the project network. The bare name `minio` can
+    # collide with another MinIO container when this app later joins a
+    # shared proxy network: docker DNS then resolves `minio` to the
+    # wrong container and the app fails with "The Access Key Id you
+    # provided does not exist". Force the app to talk to this compose
+    # file's minio explicitly.
     networks:
       default:
         aliases:

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package billing implements v1.1 subscription management for Hash
 // orgs. The Provider interface abstracts away the payment processor
 // (Mollie in production, mock for dev/e2e). The Engine wraps the

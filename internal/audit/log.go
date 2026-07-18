@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package audit emits canonical event rows. Every state-changing action in
 // Hash must call Log so the document timeline, audit certificate, and
 // outbound webhooks all see the same source of truth.

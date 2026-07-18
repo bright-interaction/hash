@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package magictoken centralises the recipient magic-link TTL policy so the
 // REST handlers, the MCP workflow tools, and the reminder worker all mint
 // tokens with the same expiry. The TTL fix was previously applied per-surface

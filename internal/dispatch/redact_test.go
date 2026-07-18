@@ -1,15 +1,18 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 package dispatch
 
 import "testing"
 
 func TestMaskEmail(t *testing.T) {
 	cases := map[string]string{
-		"signer@example.com":     "s***@example.com",
-		"a@b.co":                 "a***@b.co",
-		"  jane.doe@firm.se  ":   "j***@firm.se",
-		"":                       "[redacted]",
-		"not-an-email":           "***",
-		"trailing@":              "***",
+		"signer@example.com":   "s***@example.com",
+		"a@b.co":               "a***@b.co",
+		"  jane.doe@firm.se  ": "j***@firm.se",
+		"":                     "[redacted]",
+		"not-an-email":         "***",
+		"trailing@":            "***",
 	}
 	for in, want := range cases {
 		if got := MaskEmail(in); got != want {

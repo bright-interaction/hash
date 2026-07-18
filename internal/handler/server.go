@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package handler wires the HTTP API. The Server holds the dependencies
 // every handler needs; methods on Server bind chi routes.
 package handler

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package resolver implements Phase 8.2: pluggable variable resolution.
 //
 // The block tree references template variables as `{{name}}` placeholders.

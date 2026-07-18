@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package main runs background workers: webhook re-drives, reminder fires,
 // expiration sweeps. Three independent loops on different cadences. Each
 // loop logs but never panics; transient errors trigger a retry on the next

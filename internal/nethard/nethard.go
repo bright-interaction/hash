@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package nethard provides an SSRF-hardened HTTP transport for outbound calls
 // to tenant-controlled URLs (webhooks, BYOAI endpoints). The guard runs at DIAL
 // time, on the exact IP the kernel is about to connect to, so it closes SSRF via

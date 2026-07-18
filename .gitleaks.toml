@@ -1,0 +1,23 @@
+# gitleaks config for Hash (used by the public-mirror publish gate and any local
+# scan). Extends the default ruleset, then allowlists documentation/config-example
+# PLACEHOLDERS: .env.example uses obvious change-me markers, never real secrets. A
+# real leaked credential would not carry these markers, so it is still caught.
+title = "hash"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Config placeholders use obvious markers, not real secrets"
+regexes = [
+  '''changeme''',
+  '''change[_-]?me''',
+  '''your_[a-z0-9_]*''',
+  '''example\.com''',
+  '''molliepathsecret16''',
+  '''mollie-test-key''',
+  '''EXAMPLE''',
+  # config_test.go audit-key fixture, in mirror history pre-split. It is
+  # base64("fake-ed25519-seed-for-tests"), not a credential.
+  '''ZmFrZS1lZDI1NTE5LXNlZWQtZm9yLXRlc3Rz''',
+]

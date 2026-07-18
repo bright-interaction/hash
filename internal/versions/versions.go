@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package versions implements document snapshotting, history, diffing, and
 // restore for Hash. It is the foundation Phase 8.1 ships first because
 // negotiation copilot (#3), court-ready evidence (#10), and the timeline UI

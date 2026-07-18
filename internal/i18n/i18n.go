@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package i18n provides backend localization for signer-facing strings: the
 // GDPR Article 13 privacy notice, signer-document chrome, and the recipient
 // lifecycle emails. Translations live in messages_gen.go (generated from the

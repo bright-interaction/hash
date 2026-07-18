@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package mcp speaks the Model Context Protocol over Streamable HTTP.
 // JSON-RPC 2.0 envelope, single endpoint at `/mcp`, behind API-key auth.
 //

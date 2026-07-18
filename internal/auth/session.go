@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package auth provides sender-session and signer-token helpers.
 //
 // Senders authenticate via Zitadel OIDC; the resulting session is a signed

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package sign owns the document signing state machine and the orchestration
 // that turns a recipient's "I sign with this name in this font" click into
 // a stamped, hashed final PDF.

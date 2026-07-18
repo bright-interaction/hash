@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package aiapps wraps the Phase 8.4 ai.Runtime into three thin
 // application-level helpers Phase 11 needs: the signer clarifier, the
 // negotiation counter-suggester, and the bilingual equivalence

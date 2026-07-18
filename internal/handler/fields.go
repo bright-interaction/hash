@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package handler ,  fields.go ships v1.2 fillable-field support beyond
 // signatures. The document_fields schema (00004) already supports text,
 // date, checkbox, dropdown, initial. This file adds:

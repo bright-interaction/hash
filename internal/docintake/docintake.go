@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package docintake holds the one-step "designed proposal -> signable
 // pdf-source document" intake shared by the REST import handler and the MCP
 // ingest tool, so both take exactly the same GDPR-safe clean + store + attest

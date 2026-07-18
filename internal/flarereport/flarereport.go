@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 package flarereport
 
 import (
@@ -30,7 +33,7 @@ func scrubSensitive(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 
 // InitFlare wires error reporting to the house Flare instance (Sentry-wire
 // protocol) when FLARE_DSN is set in the environment. The DSN is injected by
-// the CI flare-provision deploy step; without it this is a no-op so
+// the deploy pipeline's flare-provision step; without it this is a no-op so
 // dev runs and self-hosts boot unchanged.
 func InitFlare(service, release string) bool {
 	dsn := os.Getenv("FLARE_DSN")

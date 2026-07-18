@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package actiontoken mints and verifies stateless, HMAC-signed, expiring tokens
 // that authorize a single action from an email link (e.g. approve a change
 // request) without a login. The signing key is derived from the instance signer

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package agreement holds Hash's built-in starter document templates. The
 // trees are authored once here (single source of truth) so the same content
 // powers the demo artifacts, the "starter template" a tenant can seed from the

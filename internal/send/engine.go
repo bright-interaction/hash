@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package send owns the document lifecycle transitions that move a draft out
 // into the world and follow it up: send, void, remind. It exists because that
 // logic was previously duplicated between the REST handlers and the MCP

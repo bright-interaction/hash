@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package eidas implements Phase 9.2 (#4): smart eIDAS tier escalation.
 //
 // Each org configures rules (predicate + required_tier). On send, the

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package config loads Hash runtime configuration from environment
 // variables. It refuses to start if required values are missing ,  never
 // silently default a secret.
@@ -304,7 +307,7 @@ func validateAIEUConfig(c *Config) error {
 // IsEUEndpoint reports whether the host is on the EU allow-list. Built-in
 // matches: api.mistral.ai, *.mistral.ai, eu.anthropic.com, eu.openrouter.ai,
 // any hostname containing a ".eu." or ".eu/" segment. Extra strings from
-// HASH_AI_EU_HOSTS_ALLOWLIST are matched as suffixes (so "llm.example.com"
+// HASH_AI_EU_HOSTS_ALLOWLIST are matched as suffixes (so "llm.example.eu"
 // matches the FQDN; "brightinteraction.com" matches any subdomain).
 func IsEUEndpoint(host string, extra []string) bool {
 	h := strings.ToLower(host)

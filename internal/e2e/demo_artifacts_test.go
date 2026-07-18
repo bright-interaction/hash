@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 //go:build demo
 
 package e2e
@@ -187,7 +190,7 @@ func biBranding(orgID uuid.UUID) generated.UpsertOrgBrandingParams {
 
 // demoContract returns the built-in Swedish services agreement starter (the same
 // reusable template a tenant seeds from the Templates page), flavoured with the
-// demobolaget pilot data so the demo artifacts and the live signer ceremony
+// demo pilot data so the demo artifacts and the live signer ceremony
 // show the real, table-rich document. Single source of truth lives in the
 // internal/agreement package.
 func demoContract() (blocksJSON, varsJSON []byte) {

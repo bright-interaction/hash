@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package trustlist validates QES signer certificate chains against an
 // operator-curated allow-list of qualified trust service provider (QTSP)
 // root certificates.

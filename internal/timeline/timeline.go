@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package timeline implements Phase 8.8: audit-event timeline + per-org
 // activity feed read surface. The events table from week 1 already
 // captures every state-changing action (sends, opens, views, signs,

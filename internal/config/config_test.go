@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 package config
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -150,11 +154,11 @@ func TestIsEUEndpoint(t *testing.T) {
 }
 
 func TestIsEUEndpoint_ExtraAllowlist(t *testing.T) {
-	extra := []string{"llm.example.com", "llama.tailscale.local"}
-	if !IsEUEndpoint("llm.example.com", extra) {
+	extra := []string{"llm.example.eu", "llama.tailscale.local"}
+	if !IsEUEndpoint("llm.example.eu", extra) {
 		t.Error("FQDN allowlist match failed")
 	}
-	if !IsEUEndpoint("v2.llm.example.com", extra) {
+	if !IsEUEndpoint("v2.llm.example.eu", extra) {
 		t.Error("subdomain of allowlist match failed")
 	}
 	if IsEUEndpoint("evil.example", extra) {
@@ -229,7 +233,7 @@ func TestLoad_AIAcceptsAllowlistOverrideInProd(t *testing.T) {
 	t.Setenv("HASH_PUBLIC_URL", "https://hash.brightinteraction.com")
 	t.Setenv("HASH_AI_SHIELD_KEY", long)
 	t.Setenv("HASH_MISTRAL_API_KEY", "sk-mistral")
-	t.Setenv("HASH_MISTRAL_BASE_URL", "https://llm.example.com/v1/chat/completions")
+	t.Setenv("HASH_MISTRAL_BASE_URL", "https://llm.example.eu/v1/chat/completions")
 	t.Setenv("HASH_AI_EU_HOSTS_ALLOWLIST", "brightinteraction.com")
 	if _, err := Load(); err != nil {
 		t.Fatalf("allowlist override should pass, got %v", err)
@@ -287,7 +291,11 @@ func setAllRequired(t *testing.T) {
 	t.Setenv("HASH_BILLING_PROVIDER", "mollie")
 	t.Setenv("HASH_MOLLIE_API_KEY", "mollie-test-key")
 	t.Setenv("HASH_MOLLIE_WEBHOOK_PATH_SECRET", "molliepathsecret16")
-	t.Setenv("HASH_AUDIT_PRIVATE_KEY", "ZmFrZS1lZDI1NTE5LXNlZWQtZm9yLXRlc3Rz")
+	// Computed, not a literal: a base64 string in source reads as a leaked
+	// credential to secret scanners (see .gitleaks.toml allowlist for the
+	// historical literal form).
+	t.Setenv("HASH_AUDIT_PRIVATE_KEY",
+		base64.StdEncoding.EncodeToString([]byte("fake-ed25519-seed-for-tests")))
 }
 
 func TestLoad_RejectsAllZeroKeys(t *testing.T) {

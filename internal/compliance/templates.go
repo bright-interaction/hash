@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package compliance implements Phase 12 (#8): Compliance-as-a-Service.
 //
 // 12.1 ships a Seeder that, on org onboarding, drops in a baseline

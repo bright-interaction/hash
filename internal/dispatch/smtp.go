@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package dispatch fans Hash events out to email + webhook destinations.
 //
 // SMTP is intentionally implemented against the stdlib's net/smtp to keep

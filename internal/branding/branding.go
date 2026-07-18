@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package branding implements Phase 8.5: org-level theming with optional
 // per-document overrides. The block tree stays brand-agnostic; themes
 // apply purely at the rendering layer via CSS custom properties.

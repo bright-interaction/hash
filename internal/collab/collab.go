@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package collab implements v1.1 Yjs collaborative editing for the
 // block editor. The server is a relay: clients hold the CRDT state,
 // the server only:

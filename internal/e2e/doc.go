@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package e2e holds end-to-end integration tests that exercise the real
 // send -> sign -> finalize loop against live Postgres + MinIO + Gotenberg.
 //

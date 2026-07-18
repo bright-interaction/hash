@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package render builds final-PDF and signature artefacts for Hash
 // documents. The HTML→PDF path uses Gotenberg's Chromium converter; the
 // signature image path uses freetype for cases where we have to stamp

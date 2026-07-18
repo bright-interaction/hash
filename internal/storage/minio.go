@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package storage wraps MinIO/S3 access. The Bright Interaction MinIO at
 // s3.example.com is the default backend.
 package storage

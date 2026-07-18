@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
+// Copyright (c) Bright Interaction
+
 // Package ai is the Phase 8.4 foundation: a single layer in front of every
 // LLM call Hash makes. Building per-feature LLM clients would mean
 // wiring Shield three times, three retry policies, three prompt registries.
