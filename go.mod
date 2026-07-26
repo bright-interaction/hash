@@ -2,6 +2,13 @@ module github.com/brightinteraction/hash
 
 go 1.26.3
 
+// Pinned to the toolchain the container image already builds with. Without this,
+// go.mod permits an older Go and govulncheck reports the standard-library
+// vulnerabilities fixed in 1.26.5 (crypto/tls Encrypted Client Hello leak,
+// net/textproto, crypto/x509, net/http/httputil) as reachable. The pin makes the
+// version that keeps this safe a guarantee rather than a property of the base image.
+toolchain go1.26.5
+
 require (
 	github.com/coreos/go-oidc/v3 v3.11.0
 	github.com/getsentry/sentry-go v0.47.0
