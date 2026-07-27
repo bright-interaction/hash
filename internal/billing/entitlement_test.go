@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 func sub(status string, endOffset time.Duration, now time.Time) *generated.OrgSubscription {

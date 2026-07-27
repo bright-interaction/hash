@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/billing"
-	"github.com/brightinteraction/hash/internal/eidas"
-	"github.com/brightinteraction/hash/internal/send"
+	"github.com/bright-interaction/hash/internal/billing"
+	"github.com/bright-interaction/hash/internal/eidas"
+	"github.com/bright-interaction/hash/internal/send"
 )
 
 // Document lifecycle handlers. All the actual work (quota gate, variable

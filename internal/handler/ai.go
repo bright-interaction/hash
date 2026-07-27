@@ -6,7 +6,7 @@ package handler
 import (
 	"net/http"
 
-	"github.com/brightinteraction/hash/internal/ai"
+	"github.com/bright-interaction/hash/internal/ai"
 )
 
 // GET /api/v1/ai/status

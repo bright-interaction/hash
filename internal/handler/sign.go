@@ -14,9 +14,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/i18n"
-	"github.com/brightinteraction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/i18n"
+	"github.com/bright-interaction/hash/internal/sign"
 )
 
 // Magic-link signer handlers. No session auth; the URL token IS the auth.

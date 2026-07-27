@@ -16,13 +16,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/brightinteraction/hash/internal/actiontoken"
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/auth"
-	mdb "github.com/brightinteraction/hash/internal/db"
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/dispatch"
-	"github.com/brightinteraction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/actiontoken"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
+	mdb "github.com/bright-interaction/hash/internal/db"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/sign"
 )
 
 // TestCommentThread verifies the shared comment thread: both the signer and the

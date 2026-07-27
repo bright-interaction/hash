@@ -11,8 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // registerEngagementTools mounts the Phase 8.3 read surface for agents.

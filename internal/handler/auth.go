@@ -12,8 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // handleAuthLogin redirects the browser to Zitadel.

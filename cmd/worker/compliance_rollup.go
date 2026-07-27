@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/brightinteraction/hash/internal/compliance"
+	"github.com/bright-interaction/hash/internal/compliance"
 )
 
 // Phase 12.2 compliance flag rollup. Nightly tick: fetch new EDPB feed

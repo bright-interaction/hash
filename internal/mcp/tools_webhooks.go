@@ -12,11 +12,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/config"
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/config"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/dispatch"
 )
 
 // mintWebhookSecret matches the handler-side helper. Duplicated here

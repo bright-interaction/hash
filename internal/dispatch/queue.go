@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // PublicEventKinds is the set of audit kinds that fan out to outbound

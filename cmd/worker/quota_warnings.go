@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/dispatch"
 )
 
 // loopQuotaWarnings emails an org at most once per billing period when

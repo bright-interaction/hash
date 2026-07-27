@@ -14,8 +14,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // registerReadTools mounts the safe, read-only tools. These are the same

@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/config"
-	"github.com/brightinteraction/hash/internal/resolver"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/config"
+	"github.com/bright-interaction/hash/internal/resolver"
 )
 
 // Phase 9.1: BrightCRM webhook receiver.

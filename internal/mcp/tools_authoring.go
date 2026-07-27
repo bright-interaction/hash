@@ -15,13 +15,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/blocks"
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/docintake"
-	"github.com/brightinteraction/hash/internal/magictoken"
-	"github.com/brightinteraction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/docintake"
+	"github.com/bright-interaction/hash/internal/magictoken"
+	"github.com/bright-interaction/hash/internal/render"
 )
 
 // pgtypeUUID lifts a uuid.UUID into pgx's nullable form.

@@ -13,11 +13,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/brightinteraction/hash/internal/ai"
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/config"
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/ai"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/config"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/dispatch"
 )
 
 // byoaiDefaultHost is the host a blank per-org base_url resolves to for each

@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/actiontoken"
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/actiontoken"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // One-click email actions. A signed, expiring token authorizes a single action

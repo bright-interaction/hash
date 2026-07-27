@@ -16,9 +16,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/sanitize"
-	"github.com/brightinteraction/hash/internal/storage"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/sanitize"
+	"github.com/bright-interaction/hash/internal/storage"
 )
 
 // ErrSanitizePDF marks a failure to sanitize the input bytes as a PDF, so

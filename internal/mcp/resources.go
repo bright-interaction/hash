@@ -6,9 +6,9 @@ package mcp
 import (
 	"net/http"
 
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/blocks"
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 func registerResources(s *Server, d Deps) {

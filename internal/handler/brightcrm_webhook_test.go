@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/resolver"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/resolver"
 )
 
 // newNilAuditLogger returns an audit.Logger that short-circuits any Log

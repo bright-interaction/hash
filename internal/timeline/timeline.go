@@ -32,7 +32,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // Entry is one logical event in the timeline. Multiple raw events from

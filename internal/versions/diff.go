@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/brightinteraction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/blocks"
 )
 
 // ChangeKind is one of added, removed, modified, moved. Block-level diff is

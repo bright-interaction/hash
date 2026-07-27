@@ -22,8 +22,8 @@ import (
 	pdfmodel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	pdftypes "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/render"
 )
 
 // PDF-source finalization. A pdf-source document is the uploaded PDF itself;

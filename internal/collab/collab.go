@@ -41,7 +41,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // Message types per y-protocols/sync + y-protocols/awareness wire spec.

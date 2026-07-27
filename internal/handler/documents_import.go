@@ -11,9 +11,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/docintake"
-	"github.com/brightinteraction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/docintake"
+	"github.com/bright-interaction/hash/internal/render"
 )
 
 // maxProposalHTML caps the JSON body for the HTML intake path. A designed

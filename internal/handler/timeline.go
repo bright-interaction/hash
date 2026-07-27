@@ -17,9 +17,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/timeline"
-	"github.com/brightinteraction/hash/internal/versions"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/timeline"
+	"github.com/bright-interaction/hash/internal/versions"
 )
 
 // Phase 8.8 timeline surface. The audit-event timeline lives at

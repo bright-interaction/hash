@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/blocks"
 )
 
 func testCtx() context.Context { return context.Background() }

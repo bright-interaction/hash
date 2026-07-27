@@ -52,7 +52,7 @@
       {:else}
         <a class="btn btn-primary" href="/auth/login">Sign in</a>
       {/if}
-      <a class="btn btn-secondary" href="https://github.com/brightinteraction/hash" rel="noreferrer" target="_blank">
+      <a class="btn btn-secondary" href="https://github.com/bright-interaction/hash" rel="noreferrer" target="_blank">
         Source
       </a>
     </div>

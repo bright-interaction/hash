@@ -15,8 +15,11 @@ hostnames from history (`scripts/split-public-repo.sh`).
 Distribution is the container image, not `go install`: the server embeds the
 built SvelteKit frontend, so a bare `go install` produces a binary without a
 UI. Self-hosters build with the repo `Dockerfile` or run `docker compose up`.
-The Go module path stays `github.com/brightinteraction/hash` (same choice as
-Reactor); it is an application module, nothing imports it.
+The Go module path is `github.com/bright-interaction/hash` (same choice as
+Reactor), and it must stay byte-identical to the public mirror URL. Go resolves
+a module by fetching the repo its path names, so an unhyphenated
+`brightinteraction` path makes the published module unresolvable even though
+Hash ships as an image and nothing imports it.
 
 Publishing is an outward, hard-to-reverse step (it exposes the source
 publicly), so it is a deliberate operator action, not part of `git psync`. It

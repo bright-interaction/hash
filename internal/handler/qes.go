@@ -14,9 +14,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/qes"
-	"github.com/brightinteraction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/qes"
+	"github.com/bright-interaction/hash/internal/sign"
 )
 
 // handleQESStart kicks off a QES challenge for a recipient on a

@@ -21,16 +21,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/blocks"
-	mdb "github.com/brightinteraction/hash/internal/db"
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/dispatch"
-	"github.com/brightinteraction/hash/internal/render"
-	"github.com/brightinteraction/hash/internal/send"
-	"github.com/brightinteraction/hash/internal/sign"
-	"github.com/brightinteraction/hash/internal/storage"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/blocks"
+	mdb "github.com/bright-interaction/hash/internal/db"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/send"
+	"github.com/bright-interaction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/storage"
 )
 
 // TestSendSignStampE2E drives the real send -> sign -> finalize loop against a

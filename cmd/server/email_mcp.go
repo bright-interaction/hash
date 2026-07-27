@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/brightinteraction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/dispatch"
 )
 
 // renderEmailForMCP returns the closure the MCP workflow tools call to ship

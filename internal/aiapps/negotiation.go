@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/ai"
+	"github.com/bright-interaction/hash/internal/ai"
 )
 
 // Negotiator drafts counter-clauses for a contract under negotiation.

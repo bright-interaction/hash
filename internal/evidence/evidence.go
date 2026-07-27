@@ -43,10 +43,10 @@ import (
 	pdfapi "github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/storage"
-	"github.com/brightinteraction/hash/internal/timeline"
-	"github.com/brightinteraction/hash/internal/versions"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/storage"
+	"github.com/bright-interaction/hash/internal/timeline"
+	"github.com/bright-interaction/hash/internal/versions"
 )
 
 // Builder produces evidence bundles. Hold one process-wide.

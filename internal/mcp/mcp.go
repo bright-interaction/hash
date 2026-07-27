@@ -20,8 +20,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/billing"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/billing"
 )
 
 // sanitizeToolError keeps a tool's operator-authored validation message

@@ -6,7 +6,7 @@ package handler
 import (
 	"net/http"
 
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // Phase 10.1: aggregate org-wide insights. Composes the existing

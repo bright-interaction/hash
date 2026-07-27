@@ -11,7 +11,7 @@ package agreement
 import (
 	"encoding/json"
 
-	"github.com/brightinteraction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/blocks"
 )
 
 // Starter identifies a built-in starter by a stable key used in the API.

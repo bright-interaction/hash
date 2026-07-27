@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/brightinteraction/hash/internal/nethard"
+	"github.com/bright-interaction/hash/internal/nethard"
 )
 
 // AnthropicProvider talks to api.anthropic.com via the Messages API.

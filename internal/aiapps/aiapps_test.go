@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/ai"
-	"github.com/brightinteraction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/ai"
+	"github.com/bright-interaction/hash/internal/blocks"
 )
 
 // blocksBlockSlice + blocksBlock are aliases used in this file to keep

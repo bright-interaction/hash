@@ -9,15 +9,15 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/aiapps"
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/eidas"
-	"github.com/brightinteraction/hash/internal/envelopes"
-	"github.com/brightinteraction/hash/internal/evidence"
-	"github.com/brightinteraction/hash/internal/qes"
-	"github.com/brightinteraction/hash/internal/resolver"
-	"github.com/brightinteraction/hash/internal/storage"
-	"github.com/brightinteraction/hash/internal/versions"
+	"github.com/bright-interaction/hash/internal/aiapps"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/eidas"
+	"github.com/bright-interaction/hash/internal/envelopes"
+	"github.com/bright-interaction/hash/internal/evidence"
+	"github.com/bright-interaction/hash/internal/qes"
+	"github.com/bright-interaction/hash/internal/resolver"
+	"github.com/bright-interaction/hash/internal/storage"
+	"github.com/bright-interaction/hash/internal/versions"
 )
 
 // TestDocScopeSafeToolsMembership locks the allow-list: every doc-addressed tool

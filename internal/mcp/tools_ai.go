@@ -8,8 +8,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/brightinteraction/hash/internal/ai"
-	"github.com/brightinteraction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/ai"
+	"github.com/bright-interaction/hash/internal/auth"
 )
 
 // registerAITools mounts the Phase 8.4 AI runtime read surface for agents.

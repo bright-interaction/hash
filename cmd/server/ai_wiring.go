@@ -10,10 +10,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/ai"
-	"github.com/brightinteraction/hash/internal/config"
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/ai"
+	"github.com/bright-interaction/hash/internal/config"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/sign"
 )
 
 // signerPEM returns the ed25519 public key in PEM form for the evidence

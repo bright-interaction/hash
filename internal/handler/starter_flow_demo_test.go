@@ -19,10 +19,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/auth"
-	mdb "github.com/brightinteraction/hash/internal/db"
-	"github.com/brightinteraction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
+	mdb "github.com/bright-interaction/hash/internal/db"
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 // TestStarterAndDocFromTemplate exercises the non-developer path over real HTTP

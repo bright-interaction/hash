@@ -23,7 +23,7 @@ import (
 	pdfmodel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	pdftypes "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 
-	"github.com/brightinteraction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/sign"
 )
 
 // buildTestBundle assembles a synthetic Hash evidence bundle: a blank

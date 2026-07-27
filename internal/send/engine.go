@@ -28,16 +28,16 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/auth"
-	"github.com/brightinteraction/hash/internal/billing"
-	"github.com/brightinteraction/hash/internal/blocks"
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/dispatch"
-	"github.com/brightinteraction/hash/internal/eidas"
-	"github.com/brightinteraction/hash/internal/envelopes"
-	"github.com/brightinteraction/hash/internal/magictoken"
-	"github.com/brightinteraction/hash/internal/resolver"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/billing"
+	"github.com/bright-interaction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/eidas"
+	"github.com/bright-interaction/hash/internal/envelopes"
+	"github.com/bright-interaction/hash/internal/magictoken"
+	"github.com/bright-interaction/hash/internal/resolver"
 )
 
 // Sentinel errors so callers can map lifecycle conflicts to the right HTTP

@@ -1,4 +1,4 @@
-module github.com/brightinteraction/hash
+module github.com/bright-interaction/hash
 
 go 1.26.3
 

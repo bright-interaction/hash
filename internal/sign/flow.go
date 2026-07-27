@@ -24,14 +24,14 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/brightinteraction/hash/internal/actiontoken"
-	"github.com/brightinteraction/hash/internal/audit"
-	"github.com/brightinteraction/hash/internal/blocks"
-	"github.com/brightinteraction/hash/internal/db/generated"
-	"github.com/brightinteraction/hash/internal/dispatch"
-	"github.com/brightinteraction/hash/internal/i18n"
-	"github.com/brightinteraction/hash/internal/render"
-	"github.com/brightinteraction/hash/internal/storage"
+	"github.com/bright-interaction/hash/internal/actiontoken"
+	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/i18n"
+	"github.com/bright-interaction/hash/internal/render"
+	"github.com/bright-interaction/hash/internal/storage"
 )
 
 // Sentinel errors so handlers can map signing-flow conflicts to the right

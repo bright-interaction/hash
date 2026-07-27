@@ -13,8 +13,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/ai"
-	"github.com/brightinteraction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/ai"
+	"github.com/bright-interaction/hash/internal/blocks"
 )
 
 // RiskAnalyzer reads a contract draft block-by-block and flags clauses

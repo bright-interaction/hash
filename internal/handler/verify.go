@@ -20,7 +20,7 @@ import (
 	pdfapi "github.com/pdfcpu/pdfcpu/pkg/api"
 	pdfmodel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 
-	"github.com/brightinteraction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/sign"
 )
 
 // handleVerifyKey returns the org's audit-cert public key in base64. Used

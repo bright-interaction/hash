@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brightinteraction/hash/internal/ai"
+	"github.com/bright-interaction/hash/internal/ai"
 )
 
 // Bilingual runs Phase 11.3 semantic-equivalence checks across two

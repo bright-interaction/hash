@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"html/template"
 
-	"github.com/brightinteraction/hash/internal/i18n"
+	"github.com/bright-interaction/hash/internal/i18n"
 )
 
 // Template kinds Hash can send. Values match `events.kind` so the same
