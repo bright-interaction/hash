@@ -262,6 +262,17 @@ type DocumentEngagementSummary struct {
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
+type DocumentEngagementSummaryH1Backup struct {
+	DocumentID   uuid.UUID          `json:"document_id"`
+	BlockID      string             `json:"block_id"`
+	TotalViews   int32              `json:"total_views"`
+	TotalDwellMs int64              `json:"total_dwell_ms"`
+	AvgDwellMs   int32              `json:"avg_dwell_ms"`
+	LastEventAt  pgtype.Timestamptz `json:"last_event_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	BackedUpAt   interface{}        `json:"backed_up_at"`
+}
+
 type DocumentField struct {
 	ID          uuid.UUID          `json:"id"`
 	DocumentID  uuid.UUID          `json:"document_id"`
@@ -499,6 +510,7 @@ type TelemetryEvent struct {
 	IpGeo       string             `json:"ip_geo"`
 	UaClass     string             `json:"ua_class"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	RolledUpAt  pgtype.Timestamptz `json:"rolled_up_at"`
 }
 
 type Template struct {

@@ -21,6 +21,20 @@ var embeddedMigrations embed.FS
 // the `-- +goose Up` directive ,  the dockyard outage on 2026-05-09 was caused
 // by a migration that omitted it.
 func RunMigrations(db *sql.DB) error {
+	return migrate(db, 0)
+}
+
+// RunMigrationsUpTo applies pending migrations only as far as `version`
+// (inclusive). It exists so a test can stand up the schema as it was BEFORE a
+// data-repair migration, seed the corrupted rows that migration is meant to
+// repair, and then let the real migration run over them. Production callers
+// want RunMigrations.
+func RunMigrationsUpTo(db *sql.DB, version int64) error {
+	return migrate(db, version)
+}
+
+// migrate runs goose Up, or UpTo when version > 0.
+func migrate(db *sql.DB, version int64) error {
 	goose.SetBaseFS(embeddedMigrations)
 
 	if err := goose.SetDialect("postgres"); err != nil {
@@ -38,6 +52,14 @@ func RunMigrations(db *sql.DB) error {
 		return fmt.Errorf("acquire migration advisory lock: %w", err)
 	}
 	defer func() { _, _ = db.Exec("SELECT pg_advisory_unlock($1)", migrateLockKey) }() //nolint:rawsql
+
+	if version > 0 {
+		if err := goose.UpTo(db, "migrations", version); err != nil {
+			return fmt.Errorf("run goose migrations up to %d: %w", version, err)
+		}
+		slog.Info("migrations applied", "up_to", version)
+		return nil
+	}
 
 	if err := goose.Up(db, "migrations"); err != nil {
 		return fmt.Errorf("run goose migrations: %w", err)

@@ -4,9 +4,16 @@
 --
 -- Signer-side instrumentation (IntersectionObserver + scroll + click +
 -- session) POSTs to /sign/{token}/telemetry. This table stores the raw
--- events for 90 days; the worker rolls them up into engagement_summary
--- and then deletes the raw rows. Heatmaps (Phase 10.1) and court-ready
--- evidence (Phase 10.2) both read from these tables.
+-- events for 90 days; the worker folds each block.viewed row into
+-- document_engagement_summary exactly once and deletes the raw rows only at
+-- the 90-day retention edge, NOT per rollup. Heatmaps (Phase 10.1) and
+-- court-ready evidence (Phase 10.2) both read from these tables.
+--
+-- Corrected 2026-07-28 (audit H1): this header used to claim the worker
+-- "deletes the raw rows" right after each rollup. That delete was never
+-- implemented, and the rollup's additive upsert was written as if it had
+-- been, which is what made engagement totals inflate every hour. Migration
+-- 00041 makes the claim-once behaviour real instead of aspirational.
 --
 -- GDPR posture:
 --   - ip_geo is a 2-letter country code, never a full IP or city.
@@ -35,7 +42,12 @@ CREATE INDEX idx_tel_prune    ON telemetry_events(created_at);
 
 -- Per-document, per-block dwell aggregates. The worker rolls up
 -- block.viewed events here so heatmaps load fast and the raw rows can be
--- pruned at 90 days without losing the aggregate view.
+-- pruned at 90 days without losing the aggregate view. That last property
+-- depends entirely on the rollup ACCUMULATING claimed rows rather than
+-- recomputing from surviving ones: see migration 00041. A recompute-and-
+-- replace rollup sitting next to the 90-day prune would turn these lifetime
+-- counters into decaying 90-day counters and destroy the only remaining copy
+-- of the older engagement evidence.
 CREATE TABLE document_engagement_summary (
     document_id     UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     block_id        TEXT NOT NULL,
