@@ -17,7 +17,20 @@ import (
 )
 
 // handleAuthLogin redirects the browser to Zitadel.
+//
+// s.OIDC is nil whenever auth.NewOIDC failed at boot, which main.go treats as a
+// SUPPORTED state ("in local dev without a working IdP we still want the server
+// to come up, just without /auth/login working"). It came up without the second
+// half: an unauthenticated GET to this route dereferenced the nil OIDC inside
+// Login and panicked, which the recovery middleware turned into a 500 plus a
+// FATAL Flare event. Production hash runs with no OIDC_* variables set at all,
+// so every hit on these two public routes, including from a bot sweeping common
+// auth paths, paged us with a crash report. Answer honestly instead.
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if s.OIDC == nil {
+		writeError(w, http.StatusServiceUnavailable, "single sign-on is not configured on this instance")
+		return
+	}
 	s.OIDC.Login(w, r)
 }
 
@@ -25,6 +38,12 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 // record in our DB, and mints the session cookie.
 func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// Same nil-OIDC exposure as handleAuthLogin above; this route is public too.
+	if s.OIDC == nil {
+		writeError(w, http.StatusServiceUnavailable, "single sign-on is not configured on this instance")
+		return
+	}
 
 	sub, email, name, emailVerified, err := s.OIDC.Callback(ctx, r)
 	if err != nil {
