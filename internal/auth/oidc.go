@@ -9,7 +9,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -17,11 +19,62 @@ import (
 )
 
 // OIDC wraps a Zitadel-issued OpenID Connect provider for sender login.
+//
+// Discovery is resolved LAZILY and retried, not resolved once at boot.
+// oidc.NewProvider performs a network fetch of
+// <issuer>/.well-known/openid-configuration, and this used to run exactly once
+// in NewOIDC. If the IdP was unreachable at that instant, main.go logged a
+// warning, set the pointer to nil, and single sign-on was dead for the entire
+// process lifetime with a container restart as the only recovery. That is not
+// theoretical: prod hash booted 2026-07-29 02:02 into that state with a fully
+// populated /opt/hash/.env and served nothing but failures on /auth/login until
+// it was redeployed the next day.
+//
+// A momentary IdP blip during our startup must not be a permanent outage, so
+// the endpoints resolve on first use and every subsequent attempt retries until
+// one succeeds. Callers get a clean 503 in the meantime.
 type OIDC struct {
-	provider *oidc.Provider
+	cfg     OIDCConfig
+	cookies *SignedCookie
+
+	// mu guards the resolved-once endpoints below. Held across the discovery
+	// fetch so concurrent first logins do not stampede the IdP; after success
+	// it is only ever taken for a pointer read.
+	mu       sync.Mutex
 	verifier *oidc.IDTokenVerifier
 	oauth2   *oauth2.Config
-	cookies  *SignedCookie
+}
+
+// resolve returns the discovered endpoints, performing discovery on first use
+// and retrying on each call until it succeeds. The result is cached forever
+// once obtained.
+func (o *OIDC) resolve(ctx context.Context) (*oauth2.Config, *oidc.IDTokenVerifier, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.oauth2 != nil {
+		return o.oauth2, o.verifier, nil
+	}
+	provider, err := oidc.NewProvider(ctx, o.cfg.IssuerURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("oidc discovery: %w", err)
+	}
+	o.verifier = provider.Verifier(&oidc.Config{ClientID: o.cfg.ClientID})
+	o.oauth2 = &oauth2.Config{
+		ClientID:     o.cfg.ClientID,
+		ClientSecret: o.cfg.ClientSecret,
+		RedirectURL:  o.cfg.RedirectURL,
+		Endpoint:     provider.Endpoint(),
+		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
+	}
+	return o.oauth2, o.verifier, nil
+}
+
+// unavailable answers a request that arrived while discovery has still never
+// succeeded. Distinct from the handler's "not configured" 503 in server-side
+// logs only; to a browser both are "SSO is not available right now".
+func (o *OIDC) unavailable(w http.ResponseWriter, err error) {
+	slog.Warn("oidc: discovery has not succeeded yet; SSO unavailable", "issuer", o.cfg.IssuerURL, "err", err)
+	http.Error(w, "single sign-on is temporarily unavailable", http.StatusServiceUnavailable)
 }
 
 type OIDCConfig struct {
@@ -32,23 +85,23 @@ type OIDCConfig struct {
 	Cookies      *SignedCookie
 }
 
+// NewOIDC returns an OIDC for cfg. It attempts discovery immediately so a
+// genuinely broken issuer is loud in the boot log, but a discovery FAILURE
+// still yields a usable *OIDC (returned alongside the error) which retries on
+// demand. Callers must keep that value rather than discarding it on error;
+// dropping it is what turned a transient blip into a permanent SSO outage.
+//
+// A missing issuer is the one case that yields nil: SSO is genuinely not
+// configured, there is nothing to retry, and the handlers answer 503.
 func NewOIDC(ctx context.Context, cfg OIDCConfig) (*OIDC, error) {
-	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
-	if err != nil {
-		return nil, fmt.Errorf("oidc discovery: %w", err)
+	if cfg.IssuerURL == "" {
+		return nil, errors.New("oidc: no issuer configured")
 	}
-	return &OIDC{
-		provider: provider,
-		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
-		oauth2: &oauth2.Config{
-			ClientID:     cfg.ClientID,
-			ClientSecret: cfg.ClientSecret,
-			RedirectURL:  cfg.RedirectURL,
-			Endpoint:     provider.Endpoint(),
-			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
-		},
-		cookies: cfg.Cookies,
-	}, nil
+	o := &OIDC{cfg: cfg, cookies: cfg.Cookies}
+	if _, _, err := o.resolve(ctx); err != nil {
+		return o, err
+	}
+	return o, nil
 }
 
 // Login redirects the browser to the IdP authorize endpoint with a
@@ -57,6 +110,11 @@ func NewOIDC(ctx context.Context, cfg OIDCConfig) (*OIDC, error) {
 // client secret). The estate's Zitadel apps are public PKCE clients, so PKCE is
 // required, not optional.
 func (o *OIDC) Login(w http.ResponseWriter, r *http.Request) {
+	conf, _, err := o.resolve(r.Context())
+	if err != nil {
+		o.unavailable(w, err)
+		return
+	}
 	state, err := randomString(24)
 	if err != nil {
 		http.Error(w, "state generation failed", http.StatusInternalServerError)
@@ -71,7 +129,7 @@ func (o *OIDC) Login(w http.ResponseWriter, r *http.Request) {
 	setLoginCookie(w, "hash_oauth_state", state)
 	setLoginCookie(w, "hash_oauth_nonce", nonce)
 	setLoginCookie(w, "hash_oauth_verifier", verifier)
-	url := o.oauth2.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))
+	url := conf.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))
 	http.Redirect(w, r, url, http.StatusFound)
 }
 
@@ -92,6 +150,10 @@ func setLoginCookie(w http.ResponseWriter, name, value string) {
 // Callback exchanges the authorization code for an ID token and returns the
 // claims subject + email if everything checks out.
 func (o *OIDC) Callback(ctx context.Context, r *http.Request) (sub, email, name string, emailVerified bool, err error) {
+	conf, idVerifier, err := o.resolve(ctx)
+	if err != nil {
+		return "", "", "", false, fmt.Errorf("oidc unavailable: %w", err)
+	}
 	stateCookie, err := r.Cookie("hash_oauth_state")
 	if err != nil {
 		return "", "", "", false, errors.New("missing state cookie")
@@ -111,7 +173,7 @@ func (o *OIDC) Callback(ctx context.Context, r *http.Request) (sub, email, name 
 	if code == "" {
 		return "", "", "", false, errors.New("missing code")
 	}
-	tok, err := o.oauth2.Exchange(ctx, code, oauth2.VerifierOption(verifierCookie.Value))
+	tok, err := conf.Exchange(ctx, code, oauth2.VerifierOption(verifierCookie.Value))
 	if err != nil {
 		return "", "", "", false, fmt.Errorf("token exchange: %w", err)
 	}
@@ -119,7 +181,7 @@ func (o *OIDC) Callback(ctx context.Context, r *http.Request) (sub, email, name 
 	if !ok {
 		return "", "", "", false, errors.New("no id_token in response")
 	}
-	idTok, err := o.verifier.Verify(ctx, rawID)
+	idTok, err := idVerifier.Verify(ctx, rawID)
 	if err != nil {
 		return "", "", "", false, fmt.Errorf("verify id_token: %w", err)
 	}

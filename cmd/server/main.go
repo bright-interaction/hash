@@ -114,10 +114,18 @@ func run() error {
 		Cookies:      cookies,
 	})
 	if err != nil {
-		// In local dev without a working IdP we still want the server to come
-		// up (just without /auth/login working). Log loudly and continue.
-		slog.Warn("OIDC init failed; /auth/login will not work", "err", err)
-		oidc = nil
+		// Come up anyway: an IdP that is down must not stop hash from booting.
+		//
+		// KEEP the returned value. It used to be discarded (`oidc = nil`), which
+		// meant a momentary discovery failure during our startup disabled SSO for
+		// the whole process lifetime, recoverable only by a restart. Prod hash sat
+		// exactly like that from 2026-07-29 02:02 until it was redeployed a day
+		// later, with a fully populated /opt/hash/.env the entire time.
+		//
+		// NewOIDC returns a non-nil, retrying OIDC whenever an issuer is
+		// configured, so login self-heals the moment the IdP answers. It returns
+		// nil only when no issuer is set at all, and the handlers answer 503.
+		slog.Warn("OIDC discovery failed at boot; /auth/login will retry on demand", "err", err)
 	}
 
 	auditLog := audit.New(queries, pool)
