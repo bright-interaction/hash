@@ -47,6 +47,10 @@ func InitFlare(service, release string) bool {
 		EnableTracing:    true,
 		TracesSampleRate: tracesSampleRate(),
 		BeforeSend:       scrubSensitive,
+		// Transaction envelopes route through a SEPARATE hook. Registering only
+		// BeforeSend left every traced request unscrubbed, which is the
+		// higher-volume half of the traffic on an HTTP service.
+		BeforeSendTransaction: scrubSensitive,
 	})
 	if err != nil {
 		slog.Warn("flare: error reporting disabled (sentry init failed)", "error", err)
