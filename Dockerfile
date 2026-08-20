@@ -10,7 +10,7 @@ COPY frontend/ .
 RUN bun run build
 
 # Stage 2: build the Go server.
-FROM golang:1.26.5-alpine AS backend
+FROM golang:1.26.6-alpine AS backend
 WORKDIR /app
 RUN apk add --no-cache ca-certificates git
 COPY go.mod go.sum ./
