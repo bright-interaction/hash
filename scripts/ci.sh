@@ -215,7 +215,23 @@ secret_scan() {
 
 step "build"                                   go build ./...
 step "vet"                                     vet_all
-step "tests (executed, not merely compiled)"   go test ./... -count=1
+# -race, and 120s, because THIS SCRIPT IS NOT THE GATE THAT DECIDES. Hash is not in
+# ci-go's matrix (see ciGoExempt in ci/userworkflows/ci_go.go): it is gated
+# inline, before cutover, by deploy-hash / deploy-hash-prod at
+# ci/userworkflows/deploy_hash.go, which runs
+#
+#     CGO_ENABLED=1 go test -race -count=1 -timeout=120s ./...
+#
+# For as long as this script ran `go test` with no -race, every "ci.sh is green"
+# statement -- including the one GitHub prints on a public pull request -- was made
+# against a strictly weaker gate than the one that can actually refuse the deploy,
+# and a race-detector failure was structurally invisible until after the push. The
+# timeout matches deploy-hash's 120s for the same reason in the opposite direction:
+# a looser local timeout could pass a suite the deploy gate would fail.
+#
+# -race needs cgo. If CGO_ENABLED=0 is set in the environment, go fails loudly here
+# rather than silently dropping the detector.
+step "tests (executed, not merely compiled)"   go test -race ./... -count=1 -timeout=120s
 step "gofmt"                                   gofmt_check
 step "sqlc generated code up to date"          sqlc_fresh
 step "license headers"                         license_headers
