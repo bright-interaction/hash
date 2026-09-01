@@ -31,7 +31,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Stage 3: runtime image. Distroless-static would be tighter but alpine
 # stays consistent with brightcrm and gives us a shell for emergency debug.
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
-RUN apk add --no-cache ca-certificates tzdata && \
+# The current official 3.24 base contains OpenSSL 3.5.7-r0. Keep the base
+# immutable, but fail closed unless Alpine can install the CVE-2026-14456 fix.
+RUN apk add --no-cache \
+        'libcrypto3>=3.5.8-r0' \
+        'libssl3>=3.5.8-r0' \
+        ca-certificates \
+        tzdata && \
     addgroup -S hash && adduser -S -G hash hash
 COPY --from=backend /out/server /usr/local/bin/hash-server
 COPY --from=backend /out/worker /usr/local/bin/hash-worker
