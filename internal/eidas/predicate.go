@@ -11,6 +11,118 @@ import (
 	"strings"
 )
 
+// ValidateRule checks the full persisted rule shape without depending on a
+// particular evaluation input. Send-time matching cannot be used as schema
+// validation because a missing variable short-circuits before an invalid
+// operator/value is examined. Every write surface calls this, and Evaluate
+// calls it again for defense against legacy or directly inserted corrupt rows.
+func ValidateRule(raw json.RawMessage, requiredTier Tier) error {
+	if !requiredTier.Valid() {
+		return fmt.Errorf("required_tier must be SES, AES, or QES (got %q)", requiredTier)
+	}
+	if err := validatePredicateShape(raw, "predicate"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePredicateShape(raw json.RawMessage, path string) error {
+	if len(raw) == 0 {
+		return fmt.Errorf("%s is empty", path)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return fmt.Errorf("%s must be a JSON object: %w", path, err)
+	}
+	if object == nil {
+		return fmt.Errorf("%s must be a JSON object", path)
+	}
+	allRaw, hasAll := object["all"]
+	anyRaw, hasAny := object["any"]
+	if hasAll || hasAny {
+		if hasAll && hasAny {
+			return fmt.Errorf("%s cannot contain both all and any", path)
+		}
+		if len(object) != 1 {
+			return fmt.Errorf("%s composite cannot mix all/any with leaf or unknown fields", path)
+		}
+		kind, childrenRaw := "all", allRaw
+		if hasAny {
+			kind, childrenRaw = "any", anyRaw
+		}
+		var children []json.RawMessage
+		if err := json.Unmarshal(childrenRaw, &children); err != nil || len(children) == 0 {
+			return fmt.Errorf("%s.%s must be a non-empty predicate array", path, kind)
+		}
+		for i, child := range children {
+			if err := validatePredicateShape(child, fmt.Sprintf("%s.%s[%d]", path, kind, i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	for key := range object {
+		switch key {
+		case "field", "op", "value":
+		default:
+			return fmt.Errorf("%s contains unknown field %q", path, key)
+		}
+	}
+	if len(object) != 3 {
+		return fmt.Errorf("%s leaf requires exactly field, op, and value", path)
+	}
+	var field, op string
+	if err := json.Unmarshal(object["field"], &field); err != nil || field == "" {
+		return fmt.Errorf("%s.field must be a non-empty string", path)
+	}
+	if err := json.Unmarshal(object["op"], &op); err != nil || op == "" {
+		return fmt.Errorf("%s.op must be a non-empty string", path)
+	}
+	if field != "amount" && field != "country" && field != "document_type" &&
+		!(strings.HasPrefix(field, "variables.") && len(strings.TrimPrefix(field, "variables.")) > 0) {
+		return fmt.Errorf("%s.field %q is not supported", path, field)
+	}
+	value := object["value"]
+	switch op {
+	case "in":
+		var values []json.RawMessage
+		if err := json.Unmarshal(value, &values); err != nil || len(values) == 0 {
+			return fmt.Errorf("%s.value must be a non-empty array for op in", path)
+		}
+		for i, candidate := range values {
+			if err := validateComparableScalar(candidate); err != nil {
+				return fmt.Errorf("%s.value[%d]: %w", path, i, err)
+			}
+		}
+	case "==", "!=":
+		if err := validateComparableScalar(value); err != nil {
+			return fmt.Errorf("%s.value: %w", path, err)
+		}
+	case ">", ">=", "<", "<=":
+		var number float64
+		if err := json.Unmarshal(value, &number); err != nil {
+			return fmt.Errorf("%s.value must be a number for op %s", path, op)
+		}
+	default:
+		return fmt.Errorf("%s.op %q is not supported", path, op)
+	}
+	return nil
+}
+
+func validateComparableScalar(raw json.RawMessage) error {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return errors.New("must be a string or number")
+	}
+	switch value.(type) {
+	case string, float64:
+		return nil
+	default:
+		return errors.New("must be a string or number")
+	}
+}
+
 // matchPredicate is the dispatch root. Supports leaf predicates +
 // "all"/"any" composites. Designed so a rule author can build complex
 // logic in JSON without us ever evaluating arbitrary user-supplied

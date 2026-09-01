@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -81,6 +82,58 @@ func TestSubscribe_StoresHooks(t *testing.T) {
 	l.Subscribe(func(_ context.Context, _ uuid.UUID, _ Entry) {})
 	if len(l.hooks) != 2 {
 		t.Errorf("expected 2 hooks, got %d", len(l.hooks))
+	}
+}
+
+func TestPublish_ReleasesDeferredHooks(t *testing.T) {
+	l := New(nil, nil)
+	called := make(chan PendingEvent, 1)
+	l.Subscribe(func(_ context.Context, id uuid.UUID, e Entry) {
+		called <- PendingEvent{ID: id, Entry: e}
+	})
+	pending := PendingEvent{ID: uuid.New(), Entry: Entry{OrgID: uuid.New(), Kind: KindDocumentSigned}}
+	l.Publish(pending)
+	select {
+	case got := <-called:
+		if got.ID != pending.ID || got.Entry.Kind != pending.Entry.Kind {
+			t.Fatalf("published hook = %+v, want %+v", got, pending)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("deferred hook was not published")
+	}
+}
+
+func TestPrepareEntry_ValidatesBeforeDatabaseWork(t *testing.T) {
+	if _, err := prepareEntry(Entry{Kind: "x"}); err == nil {
+		t.Fatal("missing org must fail")
+	}
+	if _, err := prepareEntry(Entry{OrgID: uuid.New()}); err == nil {
+		t.Fatal("missing kind must fail")
+	}
+	p, err := prepareEntry(Entry{OrgID: uuid.New(), Kind: "x", IP: "2001:0db8::1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ipString != "2001:db8::1" || len(p.raw) == 0 || p.createdAt.IsZero() {
+		t.Fatalf("prepared entry not canonical: %+v", p)
+	}
+}
+
+func TestNextAuditTimestamp_IsStrictlyMonotonic(t *testing.T) {
+	previous := time.Date(2026, 8, 30, 12, 0, 0, int(500*time.Microsecond), time.UTC)
+	for _, candidate := range []time.Time{
+		previous.Add(-time.Second),
+		previous,
+		previous.Add(500 * time.Nanosecond), // same persisted microsecond
+	} {
+		got := nextAuditTimestamp(candidate, previous)
+		if !got.After(previous) || got.Sub(previous) != time.Microsecond {
+			t.Fatalf("nextAuditTimestamp(%s, %s) = %s", candidate, previous, got)
+		}
+	}
+	future := previous.Add(3 * time.Microsecond)
+	if got := nextAuditTimestamp(future, previous); !got.Equal(future) {
+		t.Fatalf("future timestamp changed: %s", got)
 	}
 }
 

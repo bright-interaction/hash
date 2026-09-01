@@ -4,17 +4,25 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/recipients"
 )
+
+var errOIDCSubjectMismatch = errors.New("OIDC subject does not match the account's bound identity")
 
 // handleAuthLogin redirects the browser to Zitadel.
 //
@@ -44,14 +52,16 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "single sign-on is not configured on this instance")
 		return
 	}
+	auth.ClearOIDCLoginCookies(w)
 
 	sub, email, name, emailVerified, err := s.OIDC.Callback(ctx, r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "auth callback failed")
 		return
 	}
-	if email == "" {
-		writeError(w, http.StatusBadRequest, "id_token missing email claim")
+	sub, err = normalizeOIDCSubject(sub)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "auth callback returned an invalid subject")
 		return
 	}
 
@@ -66,37 +76,31 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		// No stable-sub match. Only ADOPT an existing account by email when the IdP
-		// asserts the email is verified; otherwise an attacker presenting an
-		// unverified email claim equal to a victim owner's address would link straight
-		// onto the victim's org + role (cross-tenant account takeover). Unverified ->
-		// provision a fresh user/org, never link to an existing one.
-		if emailVerified {
-			user, err = s.Queries.GetUserByEmail(ctx, email)
-			if errors.Is(err, pgx.ErrNoRows) {
-				user, err = s.bootstrapUser(ctx, email, name, sub)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "user provisioning failed")
-					return
-				}
-			} else if err != nil {
-				writeError(w, http.StatusInternalServerError, "user lookup failed")
-				return
-			}
-		} else {
-			user, err = s.bootstrapUser(ctx, email, name, sub)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "user provisioning failed")
-				return
-			}
+		// A previously unseen OIDC subject may only create/adopt an account with a
+		// provider-verified email. Creating a fresh owner from an unverified claim
+		// still permits spoofed invitations and irreversible account ambiguity.
+		if !emailVerified {
+			writeError(w, http.StatusUnauthorized, "a verified email claim is required for first login")
+			return
+		}
+		email, name, err = normalizeOIDCIdentity(email, name)
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "auth callback returned an invalid identity")
+			return
+		}
+		user, err = s.provisionOrAdoptOIDCUser(ctx, email, name, sub)
+		if errors.Is(err, errOIDCSubjectMismatch) {
+			writeError(w, http.StatusUnauthorized, "account is already bound to a different identity")
+			return
+		}
+		if err != nil {
+			writeInternalErrorMsg(w, "user provisioning failed", err)
+			return
 		}
 	}
 
 	if err := auth.MintSession(w, s.Cookies, SessionCookieName, auth.SessionPayload{
 		UserID: user.ID,
-		OrgID:  user.OrgID,
-		Role:   user.Role,
-		Email:  user.Email,
 	}, 24*time.Hour); err != nil {
 		writeError(w, http.StatusInternalServerError, "session mint failed")
 		return
@@ -105,22 +109,83 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-// bootstrapUser creates a fresh org + first user. Used the first time a
-// brand-new email signs in.
-func (s *Server) bootstrapUser(ctx interface {
-	Done() <-chan struct{}
-	Err() error
-	Value(any) any
-	Deadline() (time.Time, bool)
-}, email, name, sub string) (*generated.User, error) {
-	org, err := s.Queries.CreateOrg(ctx, generated.CreateOrgParams{
+// provisionOrAdoptOIDCUser binds an invited/legacy account by verified email,
+// or atomically creates a fresh org and owner for a genuinely new identity.
+func (s *Server) provisionOrAdoptOIDCUser(ctx context.Context, email, name, sub string) (*generated.User, error) {
+	user, err := s.Queries.GetUserByEmail(ctx, email)
+	if err == nil {
+		return s.bindOIDCSubject(ctx, user, sub)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+
+	user, createErr := s.bootstrapUser(ctx, email, name, sub)
+	if createErr == nil {
+		return user, nil
+	}
+	// Concurrent first-login callbacks can both observe no row. The unique
+	// subject/email constraints choose one winner; recover the winner instead of
+	// leaving the other browser at a spurious 500.
+	if raced, lookupErr := s.Queries.GetUserByZitadelSub(ctx, pgtype.Text{String: sub, Valid: true}); lookupErr == nil {
+		return raced, nil
+	}
+	if raced, lookupErr := s.Queries.GetUserByEmail(ctx, email); lookupErr == nil {
+		return s.bindOIDCSubject(ctx, raced, sub)
+	}
+	return nil, createErr
+}
+
+func (s *Server) bindOIDCSubject(ctx context.Context, user *generated.User, sub string) (*generated.User, error) {
+	if user == nil {
+		return nil, errors.New("cannot bind a nil user")
+	}
+	if user.ZitadelSub.Valid {
+		if user.ZitadelSub.String != sub {
+			return nil, errOIDCSubjectMismatch
+		}
+		return user, nil
+	}
+	bound, err := audit.CommitMutation(ctx, s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.User, error) {
+			return q.BindUserZitadelSub(ctx, generated.BindUserZitadelSubParams{
+				ID: user.ID, ZitadelSub: pgtype.Text{String: sub, Valid: true},
+			})
+		},
+		func(bound *generated.User) audit.Entry {
+			return audit.Entry{
+				OrgID: bound.OrgID, ActorUserID: &bound.ID,
+				Kind: audit.KindMemberIdentityBound,
+				Payload: map[string]any{
+					"member_id": bound.ID.String(), "provider": "oidc",
+				},
+			}
+		},
+	)
+	if errors.Is(err, pgx.ErrNoRows) || isUniqueViolation(err) {
+		return nil, errOIDCSubjectMismatch
+	}
+	return bound, err
+}
+
+func (s *Server) bootstrapUser(ctx context.Context, email, name, sub string) (*generated.User, error) {
+	if s.Pool == nil || s.Audit == nil {
+		return nil, errors.New("atomic account provisioning dependencies unavailable")
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := s.Queries.WithTx(tx)
+	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{
 		Name: nameOrEmail(name, email),
 		Plan: "starter",
 	})
 	if err != nil {
 		return nil, err
 	}
-	user, err := s.Queries.CreateUser(ctx, generated.CreateUserParams{
+	user, err := q.CreateUser(ctx, generated.CreateUserParams{
 		OrgID:      org.ID,
 		Email:      email,
 		Name:       nameOrEmail(name, email),
@@ -130,7 +195,63 @@ func (s *Server) bootstrapUser(ctx interface {
 	if err != nil {
 		return nil, err
 	}
+	pending, err := s.Audit.LogTx(ctx, tx, audit.Entry{
+		OrgID: org.ID, ActorUserID: &user.ID,
+		Kind: audit.KindMemberCreated,
+		Payload: map[string]any{
+			"member_id": user.ID.String(), "role": user.Role, "bootstrap": true, "provider": "oidc",
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	s.Audit.Publish(pending)
 	return user, nil
+}
+
+func normalizeOIDCSubject(sub string) (string, error) {
+	if sub == "" || sub != strings.TrimSpace(sub) || len(sub) > 512 || !utf8.ValidString(sub) {
+		return "", errors.New("invalid OIDC subject")
+	}
+	for _, r := range sub {
+		if unicode.IsControl(r) {
+			return "", errors.New("invalid OIDC subject")
+		}
+	}
+	return sub, nil
+}
+
+func normalizeOIDCIdentity(email, name string) (string, string, error) {
+	// Validate the original byte sequence before case folding. strings.ToLower
+	// replaces malformed UTF-8 with U+FFFD, which would otherwise turn an
+	// invalid provider identity into a different, apparently valid address.
+	email = strings.TrimSpace(email)
+	name = strings.TrimSpace(name)
+	hasProviderName := name != ""
+	name = nameOrEmail(name, email)
+	identity, err := recipients.Normalize(recipients.Values{
+		Email: email, Name: name, Role: "signer", Locale: "en",
+	})
+	if err != nil {
+		return "", "", err
+	}
+	identity.Email = strings.ToLower(identity.Email)
+	if !hasProviderName {
+		identity.Name = identity.Email
+	}
+	identity, err = recipients.Normalize(identity)
+	if err != nil {
+		return "", "", err
+	}
+	return identity.Email, identity.Name, nil
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 func nameOrEmail(name, email string) string {
@@ -145,6 +266,3 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	auth.ClearSession(w, SessionCookieName)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
-
-// guard: use uuid pkg so the import is always referenced
-var _ = uuid.Nil

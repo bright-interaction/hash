@@ -125,13 +125,16 @@ func TestDemoArtifacts(t *testing.T) {
 	provRec := mkRecipient("approver", "avtal@brightinteraction.com", "Tom Isgren", 0)
 	rec := mkRecipient("signer", "anna@demobolaget.example", "Anna Exempel", 1)
 
-	_, err = sendEng.Send(ctx, send.Actor{UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "demo"}, doc.ID)
+	_, err = sendEng.Send(ctx, send.Actor{UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "demo", LawfulBasis: "contract"}, doc.ID)
 	dmust(t, err, "send")
 
 	signOne := func(recID uuid.UUID, who, typed string) *sign.Result {
 		rc, lerr := signEng.LookupByRecipientID(ctx, recID, org.ID)
 		dmust(t, lerr, "lookup "+who)
-		res, serr := signEng.Sign(ctx, rc, sign.SignInput{TypedName: typed, Font: "Caveat", IP: "203.0.113.10", UserAgent: "Mozilla/5.0 (demo signer)"})
+		res, serr := signEng.Sign(ctx, rc, sign.SignInput{
+			TypedName: typed, Font: "Caveat", IP: "203.0.113.10", UserAgent: "Mozilla/5.0 (demo signer)",
+			Notice: testArticle13NoticeEvidence(t, rc),
+		})
 		dmust(t, serr, "sign "+who)
 		return res
 	}
@@ -258,7 +261,7 @@ func TestDemoLiveSigner(t *testing.T) {
 		_, rerr := q.CreateRecipient(ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: rcp.role, Email: rcp.email, Name: rcp.name, OrderIndex: 0, MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(72 * time.Hour), Valid: true}, Locale: "sv"})
 		dmust(t, rerr, "recipient "+rcp.role)
 	}
-	res, err := sendEng.Send(ctx, send.Actor{UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "demo"}, doc.ID)
+	res, err := sendEng.Send(ctx, send.Actor{UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "demo", LawfulBasis: "contract"}, doc.ID)
 	dmust(t, err, "send")
 	clientURL := ""
 	for _, l := range res.Links {

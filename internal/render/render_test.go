@@ -26,7 +26,10 @@ func TestIsValidFont(t *testing.T) {
 }
 
 func TestRenderSignatureSpan(t *testing.T) {
-	out := RenderSignatureSpan("Tom Isgren", "Caveat")
+	out, err := RenderSignatureSpan("Tom Isgren", "Caveat")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{`data-font="Caveat"`, "Tom Isgren", "hash-signature"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q: %s", want, out)
@@ -35,19 +38,50 @@ func TestRenderSignatureSpan(t *testing.T) {
 }
 
 func TestRenderSignatureSpan_FallsBackOnUnknownFont(t *testing.T) {
-	out := RenderSignatureSpan("Tom", "Comic Sans")
+	out, err := RenderSignatureSpan("Tom", "Comic Sans")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(out, `data-font="Caveat"`) {
 		t.Errorf("unknown font should fall back to Caveat: %s", out)
 	}
 }
 
 func TestRenderSignatureSpan_EscapesName(t *testing.T) {
-	out := RenderSignatureSpan(`<script>alert(1)</script>`, "Caveat")
+	out, err := RenderSignatureSpan(`<script>alert(1)</script>`, "Caveat")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(out, "<script>") {
 		t.Errorf("script tag survived escape: %s", out)
 	}
 	if !strings.Contains(out, "&lt;script&gt;") {
 		t.Errorf("expected escaped form: %s", out)
+	}
+}
+
+func TestValidateSignatureNameUnicodeAwareBounds(t *testing.T) {
+	validInternational := strings.Repeat("界", MaxSignatureNameRunes)
+	if err := ValidateSignatureName(validInternational); err != nil {
+		t.Fatalf("valid international name rejected: %v", err)
+	}
+	if _, err := RenderSignatureSpan(validInternational, "Caveat"); err != nil {
+		t.Fatalf("valid international name failed at render boundary: %v", err)
+	}
+
+	if err := ValidateSignatureName(strings.Repeat("界", MaxSignatureNameRunes+1)); err == nil {
+		t.Fatal("overlong rune count accepted")
+	}
+	// A multi-byte name proves UTF-8 byte growth is bounded in addition to the
+	// human-facing character ceiling.
+	if err := ValidateSignatureName(strings.Repeat("\u0800", MaxSignatureNameBytes/3+1)); err == nil {
+		t.Fatal("overlong byte count accepted")
+	}
+	if err := ValidateSignatureName(" \t\n "); err == nil {
+		t.Fatal("whitespace-only name accepted")
+	}
+	if err := ValidateSignatureName(string([]byte{0xff})); err == nil {
+		t.Fatal("invalid UTF-8 name accepted")
 	}
 }
 

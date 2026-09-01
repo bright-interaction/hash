@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+	recipientrules "github.com/bright-interaction/hash/internal/recipients"
 )
 
 // engagementBlockDTO is the wire shape per block in the engagement summary.
@@ -55,20 +56,21 @@ func (s *Server) handleEngagement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Privacy gate: single-recipient docs only expose engagement after the
-	// recipient has signed, so the sender can't watch in real time.
-	allSigned := true
+	// Privacy gate: single-recipient docs only expose legacy engagement after
+	// the recipient completed either the signature or acknowledgement ceremony,
+	// so the sender cannot watch their activity in real time.
+	allResponded := true
 	for _, rc := range recipients {
-		if rc.Status != "signed" && rc.Status != "completed" {
-			allSigned = false
+		if !recipientrules.HasTerminalResponse(rc.Status) {
+			allResponded = false
 			break
 		}
 	}
-	if len(recipients) <= 1 && !allSigned {
+	if len(recipients) <= 1 && !allResponded {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"blocks":        []any{},
 			"privacy_gated": true,
-			"reason":        "single-recipient engagement is hidden until the recipient signs",
+			"reason":        "single-recipient engagement is hidden until the recipient responds",
 		})
 		return
 	}
@@ -124,14 +126,14 @@ func (s *Server) handleTelemetryStream(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	allSigned := true
+	allResponded := true
 	for _, rc := range recipients {
-		if rc.Status != "signed" && rc.Status != "completed" {
-			allSigned = false
+		if !recipientrules.HasTerminalResponse(rc.Status) {
+			allResponded = false
 			break
 		}
 	}
-	if len(recipients) <= 1 && !allSigned {
+	if len(recipients) <= 1 && !allResponded {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"events":        []any{},
 			"privacy_gated": true,

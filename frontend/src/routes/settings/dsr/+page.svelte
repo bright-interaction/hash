@@ -55,7 +55,7 @@
       a.download = `dsr-export-${exportEmail.trim()}-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
       URL.revokeObjectURL(url);
-      exportResult = 'Export downloaded as JSON. Forward to the data subject within the 30-day Art. 12(3) window.';
+      exportResult = 'Recipient metadata inventory downloaded. This is not a complete Article 15/20 response: review scope and attach the referenced documents under the approved procedure.';
     } catch (e) {
       exportResult = (e as Error).message;
     } finally {
@@ -81,8 +81,8 @@
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
     Every request a signer raises from their signing page lands here.
-    You have 30 days from <code class="font-mono">requested_at</code> to
-    respond (GDPR Art. 12(3)). Erasure fulfillment anonymizes the
+    The displayed due date is an operational 30-day target, not a substitute for the applicable
+    GDPR deadline, identity checks, or extension procedure. Erasure fulfillment anonymizes the
     recipient record while preserving the signed PDF for evidentiary
     retention.
   </p>
@@ -93,11 +93,11 @@
 
   <section class="card p-5 mb-6">
     <h2 class="font-display font-extralight text-lg mb-3 flex items-center gap-2">
-      <Download class="size-4" /> Article 15 + 20 data export
+      <Download class="size-4" /> Recipient metadata inventory
     </h2>
     <p class="text-sm text-text-secondary mb-3">
-      Pull every recipient row matching an email across this org. Returns
-      JSON you can forward to the data subject.
+      Pull every recipient row matching an email across this org. The JSON contains metadata and
+      object keys, not attached signed documents, and must not be treated as a complete rights response.
     </p>
     <div class="flex gap-2">
       <input
@@ -159,9 +159,15 @@
                 <button class="btn btn-secondary text-xs" onclick={() => transition(r.id, 'in_progress')}>
                   <Pause class="size-3" /> In progress
                 </button>
-                <button class="btn btn-primary text-xs" onclick={() => transition(r.id, 'fulfilled')}>
-                  <Check class="size-3" /> Fulfill
-                </button>
+                {#if r.kind === 'erasure'}
+                  <button class="btn btn-primary text-xs" onclick={() => transition(r.id, 'fulfilled')}>
+                    <Check class="size-3" /> Run erasure &amp; fulfill
+                  </button>
+                {:else}
+                  <span class="text-xs text-text-muted self-center" title="Complete under the approved external procedure; Hash cannot attest fulfillment.">
+                    Manual procedure required
+                  </span>
+                {/if}
                 <button class="btn btn-secondary text-xs" onclick={() => transition(r.id, 'denied')}>
                   <X class="size-3" /> Deny
                 </button>

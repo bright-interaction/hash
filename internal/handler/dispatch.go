@@ -7,10 +7,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-
-	"github.com/bright-interaction/hash/internal/audit"
-	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/send"
 )
 
@@ -43,29 +39,12 @@ func (s *Server) handleRemindDocument(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reminded": sent})
 }
 
-// handleOpenBeacon serves a 1×1 transparent GIF and logs `document.opened`
-// keyed by the magic-link token in the URL. Idempotent: every email open
-// fires another event so analytics see opens-vs-clicks.
-func (s *Server) handleOpenBeacon(w http.ResponseWriter, r *http.Request) {
-	tok := chi.URLParam(r, "token")
-	if tok != "" && s.Sign != nil {
-		hash := auth.HashMagicToken(tok)
-		if rc, err := s.Sign.LookupByToken(r.Context(), hash); err == nil {
-			docID := rc.Document.ID
-			recID := rc.Recipient.ID
-			_, _ = s.Audit.Log(r.Context(), audit.Entry{
-				OrgID:       rc.Document.OrgID,
-				DocumentID:  &docID,
-				RecipientID: &recID,
-				Kind:        audit.KindDocumentOpened,
-				IP:          clientIP(r),
-				UserAgent:   r.UserAgent(),
-			})
-		}
-	}
+// handleRetiredOpenBeacon is a non-recording compatibility response for old
+// emails. It deliberately does not parse or hash the path token, query a
+// recipient, or create an event. New invite/reminder templates never link it.
+func (s *Server) handleRetiredOpenBeacon(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "image/gif")
-	w.Header().Set("Cache-Control", "no-store, max-age=0")
-	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	_, _ = w.Write(transparentPixelGIF)
 }
 

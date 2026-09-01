@@ -31,6 +31,14 @@ SELECT
     COUNT(*) FILTER (WHERE kind = 'block.viewed' AND rolled_up_at IS NULL)       AS unrolled_views
 FROM pruned;
 
+-- Aggregates remain recipient/document-linked personal data even after the
+-- raw rows are gone. Apply the same 90-day edge to summaries based on their
+-- newest contributing event; otherwise a supposedly short-lived optional
+-- analytics stream leaves permanent per-document reading profiles.
+-- name: PruneEngagementOlderThan :execrows
+DELETE FROM document_engagement_summary
+WHERE last_event_at < $1;
+
 -- Rollup queries. See migration 00041 for why this is claim-and-accumulate
 -- rather than recompute-and-replace. The short version: the worker deletes raw
 -- rows at the 90-day retention edge, so any summary recomputed from surviving
@@ -110,4 +118,3 @@ ON CONFLICT (document_id, block_id) DO UPDATE SET
 SELECT * FROM document_engagement_summary
 WHERE document_id = $1
 ORDER BY total_dwell_ms DESC;
-

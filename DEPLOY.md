@@ -1,6 +1,6 @@
 # Deploying Hash
 
-Hash is self-hostable EU-sovereign e-signing. It runs as **two processes
+Hash is deployment-controlled, self-hostable e-signing. It runs as **two processes
 built from one container image**, plus a few standard backing services. There
 is no dependency on any particular CI system or host: anything that can build a
 container and run it (Docker Compose, Kubernetes, a plain VM) works.
@@ -18,13 +18,39 @@ container and run it (Docker Compose, Kubernetes, a plain VM) works.
 | `hash` worker | background loops: email dispatch, reminders, expirations, webhook redrive, finalize-retry, quota warnings | same image, `hash-worker` entrypoint |
 | PostgreSQL 16+ | primary datastore | migrations run automatically on boot |
 | S3-compatible storage | signed PDFs, audit certs, uploads | MinIO, AWS S3, Cloudflare R2, Scaleway, ... |
-| Gotenberg 8 | HTML -> PDF rendering | `docker run gotenberg/gotenberg:8` |
-| SMTP server | outbound email | optional; unset = no mail sent (queue still records) |
+| Gotenberg 8.36.0 | HTML -> PDF rendering | select an immutable registry digest in production |
+| SMTP server | outbound email | required for the worker; bundled development uses MailHog, non-development uses STARTTLS |
 | OIDC provider | sender login | any OIDC IdP: Zitadel, Keycloak, Auth0, ... |
 
-Optional: an EU-hosted AI provider (Mistral / Anthropic-EU) for the AI features,
-a QTSP for qualified signatures (e.g. Idura) and Mollie for billing. All off by
-default.
+Production supports exactly one `hash` HTTP-server replica. A production server
+holds a database-scoped singleton lease for its full lifetime, so a second
+server fails boot instead of joining the traffic pool. This is a hard topology
+contract, not an availability recommendation: signer rate limits,
+collaboration rooms, and BrightCRM webhook cache invalidation are process-local.
+Do not set a Kubernetes replica count above one or use
+`docker compose --scale hash=...`; move all three facilities to shared backends
+before horizontal server scaling. The separate `hash-worker` process is not an
+HTTP-server replica.
+
+Optional: an EU-hosted AI provider (Mistral / Anthropic-EU) for the AI features
+and Mollie for billing. AES and QES signing are intentionally unavailable in
+this release; `HASH_QES_PROVIDER` must remain unset.
+
+Before production use, implement and drill the coupled PostgreSQL + S3 recovery
+procedure in [`ops/BACKUP-RESTORE.md`](./ops/BACKUP-RESTORE.md). A database-only
+backup cannot recover signed PDFs or audit certificates.
+
+Production object storage is also a boot-time legal-retention dependency. The
+configured bucket must already have S3 Object Lock enabled. Grant the Hash app
+principal `GetObjectLockConfiguration`, `PutObjectRetention`,
+`GetObjectRetention`, `ListBucketVersions`, and `GetObjectVersion` plus its
+normal object permissions. Version listing is a bounded legacy/shadow recovery
+path; committed evidence reads and retention target the exact matching object
+version. Hash applies and reads back seven-calendar-year COMPLIANCE retention on
+legal evidence; it refuses to start or complete evidence writes when Object
+Lock support/permissions are missing. Do not grant governance-bypass,
+bucket-policy, or permanent-version-delete authority. Lifecycle expiration is
+only for explicitly transient objects and does not enforce legal retention.
 
 ## 1. Configure
 
@@ -36,45 +62,113 @@ or `[optional]`.
 Generate the secrets:
 
 ```bash
-openssl rand -hex 32                                   # SIGNER_TOKEN_KEY, SESSION_KEY, AI_SHIELD_KEY
+openssl rand -hex 32                                   # SIGNER_TOKEN_KEY, SESSION_KEY, WEBHOOK_ENCRYPTION_KEY, AI_SHIELD_KEY
 openssl genpkey -algorithm ed25519 -outform DER | tail -c 32 | base64   # AUDIT_PRIVATE_KEY
 ```
 
-Outside local dev (any non-loopback `HASH_PUBLIC_URL`), the app **fail-closes
-on boot** unless the production guards hold: a stable `HASH_AUDIT_PRIVATE_KEY`;
-QES + billing providers either left unset (SES-only, unmetered) or real and
-fully keyed, never the dev-only `mock` providers; and -- if any AI provider key
+An omitted `HASH_ENVIRONMENT` fails closed to `production`. Development-only
+relaxations require both `HASH_ENVIRONMENT=development` and a loopback,
+`*.localhost`, or `*.local` `HASH_PUBLIC_URL`; a local-looking URL alone never
+selects development mode. Outside that explicit local-dev combination, the app
+**fail-closes on boot** unless the production guards hold: a stable
+`HASH_AUDIT_PRIVATE_KEY`;
+an exact lowercase full 40- or 64-hex commit in `HASH_RELEASE` (the image digest
+is selected separately by the orchestrator);
+retain every retired issuer's raw Ed25519 public key in the comma-separated
+`HASH_AUDIT_TRUSTED_PUBLIC_KEYS` rotation set for as long as its certificates
+must verify (the current private key is auto-trusted; malformed historical
+entries fail boot). Those retired keys authenticate historical ceremony
+certificates only; they do not authorize a newly exported evidence manifest,
+which is trusted only under the current signer's public key;
+the factual instance identity `HASH_OPERATOR_NAME`, one plain-email
+`HASH_PRIVACY_CONTACT`, and the deployment's applicable
+`HASH_SUPERVISORY_AUTHORITY`, plus the operator's absolute HTTPS
+`HASH_PRIVACY_POLICY_URL` (these values are rendered to every signer; the
+software does not assume Bright Interaction owns a self-hosted instance or
+link self-hosted signers to Bright Interaction's policy);
+`HASH_QES_PROVIDER` left unset (AES/QES are fail-closed), a real fully keyed
+`HASH_BILLING_PROVIDER=mollie` configuration (unset or `mock` is development-only); and -- if any AI provider key
 is set -- a 64-hex `HASH_AI_SHIELD_KEY` with an EU provider host.
 See the "Production boot guards" list in `.env.example`.
+
+`HASH_WEBHOOK_ENCRYPTION_KEY` is a dedicated AES-256-GCM key and is required
+by both the server and worker. Do not reuse another Hash key. Store the same
+value in both services through the deployment's secret manager; Google Secret
+Manager environment injection is supported, but no Google-specific runtime is
+required. Retain the key with every database backup that may contain webhook
+endpoints.
+
+The first encrypted-secret release is not safe for a mixed-version rolling
+deploy. An old worker treats a new row's intentionally blank plaintext column
+as a legacy global-secret row, while a new server never writes plaintext. For
+that release, drain in-flight webhook work, stop every old server and worker,
+take a coupled backup, set the encryption key on both services, and only then
+start the new server. Startup applies the additive migration and atomically
+encrypts every legacy endpoint before accepting traffic. Start the new worker
+after this query returns zero in both columns:
+
+```sql
+SELECT
+  count(*) FILTER (WHERE secret_ciphertext IS NULL) AS unencrypted,
+  count(*) FILTER (WHERE secret <> '') AS plaintext
+FROM webhook_endpoints;
+```
+
+If a legacy endpoint row has an empty `secret`, temporarily set
+`HASH_WEBHOOK_SECRET` to the receiver's existing verifier secret (at least 32
+non-identical characters) on the backfilling process. A fresh install leaves it
+blank. Authentication, malformed ciphertext, or a dual-written secret mismatch
+fails startup closed; never clear or hand-edit a failed row. After successful
+backfill, remove the legacy global secret and verify one signed delivery per
+endpoint.
+
+Once any endpoint has ciphertext, migration 00064 is intentionally
+non-reversible: its down migration refuses to discard the only durable secret
+copy. Roll forward or restore the coupled pre-migration backup; do not force a
+column drop.
+
+For a later encryption-key rotation, stop/drain both services again, place the
+old key in `HASH_WEBHOOK_ENCRYPTION_KEY_PREVIOUS` and the new key in
+`HASH_WEBHOOK_ENCRYPTION_KEY` on both, restart the server to rewrap, verify the
+query above, then start the worker. Remove the previous key on the next
+coordinated restart. Never overlap a process that knows only the old key with a
+process that can rewrap rows under the new key.
 
 ## 2. Build the image
 
 ```bash
-docker build -t hash:latest .
+# Use an immutable release tag; publish and deploy by registry digest in prod.
+docker build -t registry.example.com/hash:<git-commit-sha> .
+docker push registry.example.com/hash:<git-commit-sha>
 ```
 
-One image, both binaries. The Dockerfile builds the SvelteKit frontend with Bun
-(embedded into the server), then compiles `cmd/server` and `cmd/worker`.
+One image contains both runtime binaries plus the release-administration
+binaries. The Dockerfile builds the SvelteKit frontend with Bun (embedded into
+the server), then compiles `cmd/server`, `cmd/worker`, `cmd/configcheck`,
+`cmd/migrate`, `cmd/auditverify`, and `cmd/rollbackcheck`.
 
 To build binaries without Docker: `cd frontend && bun install && bun run build`,
-copy `frontend/build` to `cmd/server/frontend/build`, then
-`go build ./cmd/server` and `go build ./cmd/worker`.
+copy `frontend/build` to `cmd/server/frontend/build`, then `go build ./...`.
 
 ## 3. Run
 
 Run **two containers from the same image**, sharing the same environment:
 
 ```bash
+export HASH_IMAGE='registry.example.com/hash@sha256:<manifest-digest>'
+
 # server (publishes 8080)
-docker run -d --name hash --env-file .env -p 8080:8080 hash:latest
+docker run -d --name hash --env-file .env -p 8080:8080 "$HASH_IMAGE"
 
 # worker (no port; override the entrypoint)
 docker run -d --name hash-worker --env-file .env \
-  --entrypoint /usr/local/bin/hash-worker hash:latest
+  --entrypoint /usr/local/bin/hash-worker "$HASH_IMAGE"
 ```
 
 Or use the bundled `docker-compose.yml`, which also brings up Postgres, MinIO,
-and Gotenberg for a one-command local stack:
+Gotenberg, and MailHog for a one-command local stack. The worker always creates
+an SMTP client, including in development, so keep MailHog running or configure
+another reachable SMTP endpoint when running the worker:
 
 ```bash
 cp .env.example .env   # edit first
@@ -82,20 +176,78 @@ docker compose up -d
 ```
 
 For production, point the env at your managed Postgres / S3 / SMTP / OIDC rather
-than the bundled dev containers. Database migrations run automatically when
-either binary boots (forward-only goose migrations), so there is no separate
-migrate step; both processes are safe to start together.
+than the bundled dev containers. Server and worker retain an automatic,
+advisory-lock-serialized migration safety net. A controlled production release
+should nevertheless take and verify the coupled backup first, run the exact
+candidate image's `/usr/local/bin/hash-config-check` under `--network none`
+before stopping writers or applying schema
+changes (force the selected `HASH_RELEASE` and `HASH_ENVIRONMENT=production` in
+that one-shot), run it with `--entrypoint /usr/local/bin/hash-migrate`, then run
+that same image with `--entrypoint /usr/local/bin/hash-audit-verify` before moving
+traffic. The verifier must cover every org from one complete snapshot and exit
+zero; it also requires complete lifecycle-root sidecar commitments, exact
+envelope-child inheritance, and (when a completed root exists) hashes/parses one
+real stored payload and verifies its detached signature against the trusted
+certificate-issuer set. Fresh evidence manifests remain separately restricted
+to the current signer. Corruption or legacy-unverifiable rows block the release,
+never trigger a hash repair. Re-run it in the live server after readiness.
+Stop every old server and worker before applying a migration that changes the
+durable ceremony contract, and keep them stopped through the switch or a
+contract-compatible rollback decision. In particular, the explicit lawful-
+basis migration refuses active pre-control ceremonies and deployment automation
+must never manufacture controller confirmation from the historic `contract`
+column default. The SES-only cutover likewise refuses active AES/QES routing
+rules and non-terminal AES/QES documents. Organization owners must deactivate
+or reset those through the authenticated pre-cutover application so the change
+has an audit trail; never silently rewrite assurance choices in SQL.
+The Article 13 epoch cutover additionally requires send sealing to be drained
+and refuses every active sent/in-progress/changes-requested document whose
+latest `document.sent` row lacks a supported schema marker exactly bound to its
+authoritative `sent_at`. After migrations, run the same candidate image's
+`hash-rollback-check --article13-cutover` before starting either writer. Drain
+or explicitly terminate invalid old ceremonies; never fabricate a disclosure
+marker for a notice that was not shown.
+
+The immediately preceding completion/retention migrations also require every
+send-sealing and finalization operation to be drained. They refuse to invent a
+completion instant or Object Lock deadline for an operation started by an older
+writer. After the first durable BrightCRM receipt at schema 62, rollback across
+that migration is intentionally blocked so replay protection cannot be erased.
+Coordinate `HASH_BRIGHTCRM_WEBHOOK_SECRET` rotation with a stopped and drained
+BrightCRM retry queue; receipt correlations are keyed for audit privacy.
+
+Before the first production start, upload a harmless proof object through the
+same application principal, apply COMPLIANCE retention, read the retention back,
+then confirm an attempted permanent version delete by that principal is denied.
+Retain the provider API output and denied-delete result with launch evidence.
 
 ## 4. Reverse proxy, TLS, health
 
-Terminate TLS at any proxy (Caddy, nginx, Traefik, or a cloud load balancer) and
-forward to the server on `:8080`. The app emits its own security headers
+Terminate TLS at a controlled proxy (Caddy, nginx, Traefik, or a cloud load
+balancer) and forward to the server on `:8080`. Production Hash requires the
+proxy to overwrite (not append) exactly one `X-Hash-Proxy-Auth` value matching
+the independent 32-byte `HASH_PROXY_AUTH` secret and exactly one
+`X-Hash-Client-IP` containing the proxy's authenticated, single parsed client
+address. Direct co-tenant calls, duplicate values, generic forwarding chains,
+and missing/wrong proxy authentication are rejected before routing or rate
+limiting. Keep the Hash port private; the exact loopback `/health` probe is the
+only no-header production exception. The app emits its own security headers
 (CSP, HSTS, X-Frame-Options, ...). Set `HASH_PUBLIC_URL` to the externally
 reachable HTTPS URL -- signer magic links and the audit-verify endpoint are built
 from it.
 
-Health check: `GET /health` returns `200`. The published audit verification key
-is served at `/.well-known/hash-public-key` once the server boots.
+Readiness check: `GET /health` returns `200` only when PostgreSQL, object
+storage, and Gotenberg are reachable. Treat `503` as not ready and do not route
+traffic. The response also carries `X-Hash-Release` and
+`X-Hash-Environment`; a production cutover must compare those to the exact
+approved release and `production`, rather than accepting a generic healthy
+response that could have come from the previous proxy target. The published
+audit verification key is served at
+`/.well-known/hash-public-key` once the server boots.
+
+`HASH_EVIDENCE_OTS_ENABLED` is an explicit local-development experiment only.
+The built-in verifier does not validate OpenTimestamps calendar proofs, so
+staging/production reject it and no timestamp-authority claim should rely on it.
 
 ## 5. Continuous deployment (any CI)
 
@@ -139,8 +291,8 @@ with the env from step 1.
 Unit + build suite (no external services):
 
 ```bash
-go build ./... && go vet ./... && go test ./...     # backend
-cd frontend && bun install && bun run build && bun run check   # frontend
+bash scripts/ci.sh
+go test -race -count=1 -timeout=120s ./...
 ```
 
 End-to-end (real send -> sign -> stamped-PDF loop against live Postgres + MinIO +
@@ -149,23 +301,31 @@ unless `HASH_E2E_*` is set, so it never runs in the unit suite. To run it
 locally:
 
 ```bash
-docker run -d -p 5432:5432 -e POSTGRES_USER=hash -e POSTGRES_PASSWORD=e2e -e POSTGRES_DB=hash postgres:16-alpine
-docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio:latest server /data
-docker run -d -p 3000:3000 gotenberg/gotenberg:8
+docker run -d -p 5432:5432 -e POSTGRES_USER=hash -e POSTGRES_PASSWORD=e2e -e POSTGRES_DB=hash postgres:16.15-alpine3.24
+docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+docker run -d -p 3000:3000 \
+  gotenberg/gotenberg@sha256:87c16b9f364279d321bc9772d31fa58aa6abe036423c270698bd636c3a8e9466
 
 HASH_E2E_DB_URL='postgres://hash:e2e@localhost:5432/hash?sslmode=disable' \
 HASH_E2E_S3_ENDPOINT=localhost:9000 \
 HASH_E2E_S3_ACCESS_KEY=minioadmin HASH_E2E_S3_SECRET_KEY=minioadmin \
 HASH_E2E_GOTENBERG_URL=http://localhost:3000 \
-go test -tags e2e ./internal/e2e/...
+go test -tags e2e -count=1 -timeout=180s ./internal/e2e/...
 ```
 
 CI runs all of this; the `e2e` job in `.github/workflows/hash-ci.yml` starts
-the three services and runs the tagged test. A Playwright browser smoke test of
-the signer UI is a planned follow-up.
+the three services and runs the tagged Go test. Its `browser-e2e` job builds a
+live Hash + worker + MailHog stack, verifies worker stability, seeds a public
+non-secret test identity and signed session cookie, and runs the full Playwright
+suite. The signing journey uses the real MCP send result and drives the signer
+SPA through Article 13 acknowledgement, signature adoption, finalisation,
+stable PDF download, and queued invite delivery through the real worker SMTP
+path.
 
 ## 6. Upgrades
 
-Pull the new image and restart both the server and the worker. Migrations apply
-on boot. Keep the server and worker on the same image tag so their embedded
-migration sets match.
+Resolve the new image to a registry digest and restart both the server and the
+worker with that exact reference. Keep the server, worker, pre-cutover migrator,
+and all-org audit verifier on the same digest so their embedded schema and hash
+rules match. Use the backup/migrate/verify ordering above; follow
+`ops/BACKUP-RESTORE.md` for the recoverable coupled snapshot.

@@ -17,16 +17,22 @@
     generated_at: string;
     signature_valid: boolean;
     signature_note?: string;
-    public_key_b64?: string;
+    manifest_signature_valid: boolean;
+    key_trusted: boolean;
+    manifest_key_trusted: boolean;
+    certificate_key_trusted: boolean;
+    manifest_public_key_b64?: string;
+    certificate_public_key_b64?: string;
     checks: VerifyBundleCheck[];
     errors?: string[];
+    warnings?: string[];
   };
 
   let serverPubKey = $state<string>('');
   let pubKey = $state('');
   let payload = $state('');
   let sig = $state('');
-  let result = $state<'idle' | 'valid' | 'invalid' | 'error'>('idle');
+  let result = $state<'idle' | 'valid' | 'untrusted' | 'invalid' | 'error'>('idle');
   let errorMsg = $state<string | null>(null);
 
   let dragging = $state(false);
@@ -67,7 +73,7 @@
         return;
       }
       const body = await res.json();
-      result = body.valid ? 'valid' : 'invalid';
+      result = body.authentic_hash_evidence ? 'valid' : body.valid ? 'untrusted' : 'invalid';
     } catch (e) {
       result = 'error';
       errorMsg = (e as Error).message;
@@ -137,6 +143,15 @@
       and tells you whether they match.
     </p>
 
+    <div class="card p-4 mb-6 border border-warning/40">
+      <p class="text-sm font-medium mb-1">Online, server-assisted verification</p>
+      <p class="text-text-secondary text-xs leading-relaxed">
+        Everything pasted here, and every evidence bundle selected below, is uploaded to and processed
+        by this Hash server. Do not submit a confidential contract unless you are authorised to disclose
+        it to this server operator. Hash does not currently provide an offline browser verifier.
+      </p>
+    </div>
+
     {#if serverPubKey}
       <div class="card p-4 mb-6">
         <div class="flex items-center gap-2 text-text-muted text-xs mb-2">
@@ -151,8 +166,10 @@
       <h2 class="text-base font-medium mb-2">Drop a Hash evidence bundle PDF</h2>
       <p class="text-text-muted text-xs mb-3 max-w-2xl">
         The bundle is the file you download from <code class="font-mono text-[11px]">Export evidence package</code>
-        on any completed document. Every hash inside is checked against the manifest and the ed25519
-        signature is verified offline against the embedded public key.
+        on a completed top-level document or envelope. The exact contract and ceremony events are checked
+        against both signed commitments. A certificate key may match this verifier's current or retained
+        historical Hash keys; the newly exported manifest must match the current export key.
+        Selecting a file uploads the complete bundle, including its contract content, to this server.
       </p>
       <label
         class="block cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors"
@@ -183,14 +200,14 @@
             {#if bundleReport.ok}
               <ShieldCheck class="size-7 text-success shrink-0" />
               <div>
-                <h3 class="text-lg font-medium text-success">Bundle verified</h3>
-                <p class="text-text-muted text-xs">Every artifact hash matches the manifest and the ed25519 signature is valid.</p>
+                <h3 class="text-lg font-medium text-success">Core Hash bundle verified</h3>
+                <p class="text-text-muted text-xs">Artifact hashes, signed identity, ceremony event rows, both signatures, and both issuer keys verified. Optional extension warnings are reported separately.</p>
               </div>
             {:else}
               <ShieldAlert class="size-7 text-danger shrink-0" />
               <div>
                 <h3 class="text-lg font-medium text-danger">Verification failed</h3>
-                <p class="text-text-muted text-xs">At least one artifact diverged from the manifest or the signature is invalid. See details below.</p>
+                <p class="text-text-muted text-xs">An artifact, signed commitment, signature, or trusted-key check failed. See details below.</p>
               </div>
             {/if}
           </div>
@@ -211,18 +228,21 @@
           </dl>
 
           <div>
-            <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">Cryptographic signature</h4>
+            <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">Cryptographic signatures and issuer trust</h4>
             <div class="flex items-center gap-2 text-sm">
-              {#if bundleReport.signature_valid}
+              {#if bundleReport.signature_valid && bundleReport.manifest_signature_valid && bundleReport.key_trusted}
                 <CheckCircle2 class="size-4 text-success" />
-                <span><strong>Valid ed25519 signature</strong> over <code class="font-mono text-[10px]">hash:audit-cert:v1</code> domain</span>
+                <span><strong>Both Ed25519 signatures valid</strong>; the certificate key is current or retained historical, and the export-manifest key is current.</span>
               {:else}
                 <XCircle class="size-4 text-danger" />
-                <span>{bundleReport.signature_note ?? 'signature could not be verified'}</span>
+                <span>{bundleReport.signature_note ?? 'certificate/manifest signature or issuer trust could not be verified'}</span>
               {/if}
             </div>
-            {#if bundleReport.public_key_b64}
-              <p class="text-text-muted text-xs mt-2 break-all font-mono">{bundleReport.public_key_b64}</p>
+            {#if bundleReport.certificate_public_key_b64}
+              <p class="text-text-muted text-xs mt-2 break-all font-mono">Certificate key: {bundleReport.certificate_public_key_b64}</p>
+            {/if}
+            {#if bundleReport.manifest_public_key_b64}
+              <p class="text-text-muted text-xs mt-1 break-all font-mono">Export key: {bundleReport.manifest_public_key_b64}</p>
             {/if}
           </div>
 
@@ -260,6 +280,15 @@
               </ul>
             </div>
           {/if}
+
+          {#if bundleReport.warnings && bundleReport.warnings.length}
+            <div class="card p-3 border border-warning/40">
+              <h4 class="text-xs font-mono uppercase tracking-widest text-text-muted mb-2">Warnings</h4>
+              <ul class="text-xs text-warning space-y-1">
+                {#each bundleReport.warnings as warning}<li>{warning}</li>{/each}
+              </ul>
+            </div>
+          {/if}
         </div>
       {/if}
     </section>
@@ -290,7 +319,12 @@
       {#if result === 'valid'}
         <div class="flex items-center gap-2 text-success p-3 rounded-md bg-bg-elevated">
           <ShieldCheck class="size-5" />
-          <span><strong>Valid.</strong> This signature was produced by the holder of the matching private key.</span>
+          <span><strong>Authentic Hash evidence.</strong> The signature is valid and the public key is trusted by this Hash verifier.</span>
+        </div>
+      {:else if result === 'untrusted'}
+        <div class="flex items-center gap-2 text-danger p-3 rounded-md bg-bg-elevated">
+          <ShieldAlert class="size-5" />
+          <span><strong>Cryptographically valid, but not trusted as Hash-issued.</strong> The supplied key is not in this verifier's current or historical issuer set.</span>
         </div>
       {:else if result === 'invalid'}
         <div class="flex items-center gap-2 text-danger p-3 rounded-md bg-bg-elevated">
@@ -303,8 +337,9 @@
     </form>
 
     <p class="text-text-muted text-xs mt-6">
-      Verifying offline? The same logic runs in any ed25519 library.
-      Algorithm: ed25519. Pre-hash domain separator: <code class="font-mono">hash:audit-cert:v1:</code>
+      Independent offline verification can implement the same primitive in a local Ed25519 library,
+      but this page itself is not offline. Algorithm: ed25519. Pre-hash domain separator:
+      <code class="font-mono">hash:audit-cert:v1:</code>
     </p>
   </main>
 </div>

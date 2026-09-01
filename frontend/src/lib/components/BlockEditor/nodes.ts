@@ -46,13 +46,13 @@ export const SignatureField = Node.create({
 
 // ── dynamic_variable ─────────────────────────────────────────────────────
 //
-// Inline atomic chip rendering as `{{name}}` (or the resolved value when
-// vars context is supplied at preview time). Block-level for v1; an inline
-// version lives behind `dynamicVariableInline` if it ever gets needed.
+// Block atomic chip rendering as `{{name}}`. The canonical v1 schema models a
+// dynamic_variable as a top-level block, so making this an inline atom would
+// place it inside a paragraph and the canonical serializer could not preserve
+// it losslessly.
 export const DynamicVariable = Node.create({
   name: 'dynamicVariable',
-  group: 'inline',
-  inline: true,
+  group: 'block',
   atom: true,
   selectable: true,
 
@@ -80,6 +80,43 @@ export const DynamicVariable = Node.create({
         class: 'hash-var-chip'
       },
       `{{${name}}}`
+    ];
+  }
+});
+
+// ── opaque canonical block ───────────────────────────────────────────────
+//
+// Some API/MCP-authored canonical blocks do not yet have a visual editing UI
+// (notably conditional, callout, and raw_html). Preserve their exact JSON in a
+// selectable block atom instead of converting them to placeholder paragraphs.
+// Users can move/delete the atom; editing its internals remains API/MCP-only.
+export const OpaqueBlock = Node.create({
+  name: 'opaqueBlock',
+  group: 'block',
+  atom: true,
+  selectable: true,
+  draggable: true,
+
+  addAttributes() {
+    return { blockJSON: { default: '' } };
+  },
+
+  parseHTML() {
+    return [{ tag: 'div[data-hash-node="opaque_block"]' }];
+  },
+
+  renderHTML({ node }) {
+    let label = 'preserved block';
+    try {
+      const block = JSON.parse(String(node.attrs.blockJSON || '{}')) as { type?: string };
+      if (block.type) label = `${block.type} block · preserved`;
+    } catch {
+      label = 'invalid preserved block';
+    }
+    return [
+      'div',
+      { 'data-hash-node': 'opaque_block', class: 'hash-opaque-chip' },
+      `◇ ${label}`
     ];
   }
 });
@@ -241,20 +278,23 @@ export const TableBlock = Node.create({
 // codeBlock, horizontalRule) so the canonical-tree round-trip preserves
 // the same id every save. Without this, edits would mint fresh ids on
 // every save and break event-trail correlation.
+export const BLOCK_ID_NODE_TYPES = [
+  'heading',
+  'paragraph',
+  'bulletList',
+  'orderedList',
+  'listItem',
+  'blockquote',
+  'codeBlock',
+  'horizontalRule'
+] as const;
+
 export const BlockIDExtension = Node.create({
   name: 'blockIdExtension',
   addGlobalAttributes() {
     return [
       {
-        types: [
-          'heading',
-          'paragraph',
-          'bulletList',
-          'orderedList',
-          'listItem',
-          'blockquote',
-          'codeBlock'
-        ],
+        types: [...BLOCK_ID_NODE_TYPES],
         attributes: {
           blockId: {
             default: '',

@@ -212,7 +212,23 @@ func registerVersionTools(s *Server, d Deps) {
 			if doc.SourceKind != "blocks" {
 				return nil, errors.New("restore only supported on block-source documents")
 			}
-			target, _, err := d.Versions.Restore(r.Context(), versions.RestoreInput{
+			if d.Pool == nil || d.Audit == nil {
+				return nil, errors.New("atomic audit dependencies unavailable")
+			}
+			tx, err := d.Pool.Begin(r.Context())
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = tx.Rollback(r.Context()) }()
+			q := d.Queries.WithTx(tx)
+			locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
+			if err != nil {
+				return nil, err
+			}
+			if locked.Status != "draft" || locked.SourceKind != "blocks" {
+				return nil, errors.New("document not editable (must be draft + blocks-source)")
+			}
+			target, _, err := versions.New(q).Restore(r.Context(), versions.RestoreInput{
 				DocumentID:    id,
 				TargetVersion: int32(p.TargetVersion),
 				OrgID:         u.OrgID,
@@ -224,7 +240,7 @@ func registerVersionTools(s *Server, d Deps) {
 			if target.SourceKind != "blocks" {
 				return nil, errors.New("target version is not block-source")
 			}
-			updated, err := d.Queries.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
+			updated, err := q.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
 				ID:            id,
 				OrgID:         u.OrgID,
 				BlocksJson:    target.BlockTreeJson,
@@ -233,7 +249,7 @@ func registerVersionTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			_, _ = d.Audit.Log(r.Context(), audit.Entry{
+			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
 				OrgID:       u.OrgID,
 				ActorUserID: &u.UserID,
 				DocumentID:  &id,
@@ -244,6 +260,13 @@ func registerVersionTools(s *Server, d Deps) {
 					"restored_from_v": target.VersionNo,
 				},
 			})
+			if err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return nil, err
+			}
+			d.Audit.Publish(pending)
 			return map[string]any{
 				"document_id":     updated.ID.String(),
 				"name":            updated.Name,

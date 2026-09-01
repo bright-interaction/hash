@@ -18,10 +18,10 @@
 --
 -- Why not "keep the full-history aggregate and make the upsert REPLACE": the
 -- worker prunes raw rows at the 90-day GDPR retention edge in the same tick,
--- so a recompute-from-survivors summary silently DECAYS - a lifetime counter
+-- so a recompute-from-survivors summary silently DECAYS - a bounded counter
 -- that goes down between two API polls, with the pruned events gone forever.
 -- Claim-and-accumulate is the only one of the three options that survives the
--- prune, which is why document_engagement_summary can keep being the durable
+-- prune, which is why document_engagement_summary can keep being the bounded
 -- record after the raw events expire.
 
 ALTER TABLE telemetry_events ADD COLUMN rolled_up_at TIMESTAMPTZ;

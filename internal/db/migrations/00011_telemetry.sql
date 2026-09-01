@@ -5,9 +5,9 @@
 -- Signer-side instrumentation (IntersectionObserver + scroll + click +
 -- session) POSTs to /sign/{token}/telemetry. This table stores the raw
 -- events for 90 days; the worker folds each block.viewed row into
--- document_engagement_summary exactly once and deletes the raw rows only at
--- the 90-day retention edge, NOT per rollup. Heatmaps (Phase 10.1) and
--- court-ready evidence (Phase 10.2) both read from these tables.
+-- document_engagement_summary exactly once and deletes raw rows and expired
+-- summary rows at the 90-day retention edge, NOT per rollup. Heatmaps read
+-- only the surviving 90-day analytics window; telemetry is not legal evidence.
 --
 -- Corrected 2026-07-28 (audit H1): this header used to claim the worker
 -- "deletes the raw rows" right after each rollup. That delete was never
@@ -41,13 +41,12 @@ CREATE INDEX idx_tel_recip    ON telemetry_events(recipient_id);
 CREATE INDEX idx_tel_prune    ON telemetry_events(created_at);
 
 -- Per-document, per-block dwell aggregates. The worker rolls up
--- block.viewed events here so heatmaps load fast and the raw rows can be
--- pruned at 90 days without losing the aggregate view. That last property
+-- block.viewed events here so heatmaps load fast. Aggregates are themselves
+-- deleted when their newest contributing event reaches 90 days. Until then,
 -- depends entirely on the rollup ACCUMULATING claimed rows rather than
 -- recomputing from surviving ones: see migration 00041. A recompute-and-
--- replace rollup sitting next to the 90-day prune would turn these lifetime
--- counters into decaying 90-day counters and destroy the only remaining copy
--- of the older engagement evidence.
+-- replace rollup would partially decay a still-live summary before its single
+-- explicit retention edge.
 CREATE TABLE document_engagement_summary (
     document_id     UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     block_id        TEXT NOT NULL,

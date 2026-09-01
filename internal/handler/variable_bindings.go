@@ -132,6 +132,7 @@ func (s *Server) handleUpsertVariableBinding(w http.ResponseWriter, r *http.Requ
 		SourcePath string `json:"source_path"`
 		Fallback   string `json:"fallback"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
@@ -153,7 +154,23 @@ func (s *Server) handleUpsertVariableBinding(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusConflict, "bindings can only be edited on draft documents")
 		return
 	}
-	row, err := s.Queries.UpsertVariableBinding(r.Context(), generated.UpsertVariableBindingParams{
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := s.Queries.WithTx(tx)
+	locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: sess.OrgID})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if locked.Status != "draft" {
+		writeError(w, http.StatusConflict, "bindings can only be edited on draft documents")
+		return
+	}
+	row, err := q.UpsertVariableBinding(r.Context(), generated.UpsertVariableBindingParams{
 		DocumentID:   docID,
 		VariableName: name,
 		SourceKind:   in.SourceKind,
@@ -165,7 +182,7 @@ func (s *Server) handleUpsertVariableBinding(w http.ResponseWriter, r *http.Requ
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID:       sess.OrgID,
 		ActorUserID: &sess.UserID,
 		DocumentID:  &docID,
@@ -179,6 +196,15 @@ func (s *Server) handleUpsertVariableBinding(w http.ResponseWriter, r *http.Requ
 			"source_kind": in.SourceKind,
 		},
 	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	s.Audit.Publish(pending)
 	writeJSON(w, http.StatusOK, bindingToDTO(row))
 }
 
@@ -211,14 +237,30 @@ func (s *Server) handleDeleteVariableBinding(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusConflict, "bindings can only be edited on draft documents")
 		return
 	}
-	if err := s.Queries.DeleteVariableBinding(r.Context(), generated.DeleteVariableBindingParams{
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := s.Queries.WithTx(tx)
+	locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: sess.OrgID})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if locked.Status != "draft" {
+		writeError(w, http.StatusConflict, "bindings can only be edited on draft documents")
+		return
+	}
+	if err := q.DeleteVariableBinding(r.Context(), generated.DeleteVariableBindingParams{
 		DocumentID:   docID,
 		VariableName: name,
 	}); err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID:       sess.OrgID,
 		ActorUserID: &sess.UserID,
 		DocumentID:  &docID,
@@ -227,6 +269,15 @@ func (s *Server) handleDeleteVariableBinding(w http.ResponseWriter, r *http.Requ
 		UserAgent:   r.UserAgent(),
 		Payload:     map[string]any{"via": "rest", "tool": "delete_variable_binding", "variable": name},
 	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	s.Audit.Publish(pending)
 	w.WriteHeader(http.StatusNoContent)
 }
 

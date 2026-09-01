@@ -135,6 +135,9 @@ func registerVariableBindingTools(s *Server, d Deps) {
 		}, []string{"document_id", "variable"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
+			if d.Pool == nil || d.Audit == nil {
+				return nil, errors.New("atomic audit dependencies unavailable")
+			}
 			var p struct {
 				DocumentID string `json:"document_id"`
 				Variable   string `json:"variable"`
@@ -159,18 +162,38 @@ func registerVariableBindingTools(s *Server, d Deps) {
 			if doc.Status != "draft" {
 				return nil, fmt.Errorf("bindings frozen (status=%s)", doc.Status)
 			}
-			if err := d.Queries.DeleteVariableBinding(r.Context(), generated.DeleteVariableBindingParams{
+			tx, err := d.Pool.Begin(r.Context())
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = tx.Rollback(r.Context()) }()
+			q := d.Queries.WithTx(tx)
+			locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
+			if err != nil {
+				return nil, err
+			}
+			if locked.Status != "draft" {
+				return nil, fmt.Errorf("bindings frozen (status=%s)", locked.Status)
+			}
+			if err := q.DeleteVariableBinding(r.Context(), generated.DeleteVariableBindingParams{
 				DocumentID: id, VariableName: p.Variable,
 			}); err != nil {
 				return nil, err
 			}
-			_, _ = d.Audit.Log(r.Context(), audit.Entry{
+			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
 				OrgID:       u.OrgID,
 				ActorUserID: &u.UserID,
 				DocumentID:  &id,
 				Kind:        audit.KindDocumentUpdated,
 				Payload:     map[string]any{"via": "mcp", "tool": "unbind_variable", "variable": p.Variable},
 			})
+			if err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return nil, err
+			}
+			d.Audit.Publish(pending)
 			return map[string]any{"unbound": p.Variable}, nil
 		},
 	})
@@ -223,6 +246,9 @@ func registerVariableBindingTools(s *Server, d Deps) {
 }
 
 func runBind(r *http.Request, d Deps, orgID uuid.UUID, userID *uuid.UUID, args map[string]any, kind resolver.SourceKind, refField, pathField string) (any, error) {
+	if d.Pool == nil || d.Audit == nil {
+		return nil, errors.New("atomic audit dependencies unavailable")
+	}
 	docIDStr, _ := args["document_id"].(string)
 	id, err := uuid.Parse(docIDStr)
 	if err != nil {
@@ -257,7 +283,20 @@ func runBind(r *http.Request, d Deps, orgID uuid.UUID, userID *uuid.UUID, args m
 	if doc.Status != "draft" {
 		return nil, fmt.Errorf("bindings frozen (status=%s)", doc.Status)
 	}
-	row, err := d.Queries.UpsertVariableBinding(r.Context(), generated.UpsertVariableBindingParams{
+	tx, err := d.Pool.Begin(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := d.Queries.WithTx(tx)
+	locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: orgID})
+	if err != nil {
+		return nil, err
+	}
+	if locked.Status != "draft" {
+		return nil, fmt.Errorf("bindings frozen (status=%s)", locked.Status)
+	}
+	row, err := q.UpsertVariableBinding(r.Context(), generated.UpsertVariableBindingParams{
 		DocumentID:   id,
 		VariableName: variable,
 		SourceKind:   string(kind),
@@ -268,7 +307,7 @@ func runBind(r *http.Request, d Deps, orgID uuid.UUID, userID *uuid.UUID, args m
 	if err != nil {
 		return nil, err
 	}
-	_, _ = d.Audit.Log(r.Context(), audit.Entry{
+	pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID:       orgID,
 		ActorUserID: userID,
 		DocumentID:  &id,
@@ -280,6 +319,13 @@ func runBind(r *http.Request, d Deps, orgID uuid.UUID, userID *uuid.UUID, args m
 			"source_kind": string(kind),
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		return nil, err
+	}
+	d.Audit.Publish(pending)
 	return bindingRow(row), nil
 }
 

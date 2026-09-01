@@ -103,16 +103,16 @@
   </div>
 
   <div class="card p-6 mb-6">
-    <h2 class="font-display font-extralight text-lg mb-1">Start from a ready template</h2>
+    <h2 class="font-display font-extralight text-lg mb-1">Development-only legal draft</h2>
     <p class="text-sm text-text-secondary mb-4 leading-relaxed">
-      Seed a complete, reusable agreement (clauses, a services table and a timeline
-      table, with {'{{placeholders}}'}). You can then edit it in any document and
-      send it for signature.
+      This Swedish starter is not counsel-approved and is unavailable in production.
+      In development you can seed it for layout testing; do not treat it as legal advice
+      or send it for signature without approval of the exact revision.
     </p>
     <div class="flex flex-wrap gap-3">
       <button class="btn btn-primary" disabled={seeding !== null} onclick={seedStarter}>
         <FileSignature class="size-4" />
-        {seeding === 'starter' ? 'Creating…' : 'Tjänsteavtal (svenska)'}
+        {seeding === 'starter' ? 'Creating…' : 'UTKAST — Tjänsteavtal (svenska)'}
       </button>
       <button class="btn btn-secondary" disabled={seeding !== null} onclick={newBlankTemplate}>
         <Sparkles class="size-4" />

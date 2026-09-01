@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine3.24@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     restart: unless-stopped
     environment:
       POSTGRES_DB: hash
@@ -17,7 +17,7 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -50,26 +50,30 @@ services:
       retries: 10
 
   gotenberg:
-    image: gotenberg/gotenberg:8
+    # Staging overrides this with the exact local image ID that it later
+    # promotes to production. Local development still gets an immutable,
+    # registry-verifiable default rather than a mutable patch tag.
+    image: ${HASH_GOTENBERG_IMAGE:-gotenberg/gotenberg@sha256:87c16b9f364279d321bc9772d31fa58aa6abe036423c270698bd636c3a8e9466}
     restart: unless-stopped
     command:
       - "gotenberg"
       - "--api-port=3000"
       - "--api-timeout=60s"
+      - "--chromium-deny-private-ips=true"
       # SSRF defense-in-depth (matches prod): block Chromium from fetching
       # internal targets (private ranges, cloud metadata, localhost, single-label
-      # Docker hostnames) during HTML->PDF render. hash inlines its own
-      # fonts/assets so it needs no remote fetch; the app-layer proposal_html
-      # sanitizer strips remote URLs and is the load-bearing control, this is the
-      # network backstop so staging is not wide open. NB a DOTTED public hostname
-      # that resolves to a private IP still slips this URL-regex (Gotenberg has no
-      # resolution-based blocking) - the parser fix is what actually stops it.
-      - '--chromium-deny-list=^(file://|https?://(10\.|127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|0\.0\.0\.0|localhost|\[?::1\]?|[a-zA-Z0-9_-]+(:[0-9]+)?(/|$))).*'
+      # Docker hostnames) during HTML->PDF render. Gotenberg itself stages the
+      # submitted HTML as file:///tmp/... and must be allowed to load that local
+      # entrypoint. hash inlines its own fonts/assets, and the app-layer
+      # proposal_html sanitizer strips remote URLs. The resolution-based
+      # deny-private-ips flag also closes dotted-host and DNS-rebinding paths
+      # that the URL regex alone cannot identify.
+      - '--chromium-deny-list=^https?://(10\.|127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|0\.0\.0\.0|localhost|\[?::1\]?|[a-zA-Z0-9_-]+(:[0-9]+)?(/|$)).*'
     ports:
       - "127.0.0.1:${HASH_GOTENBERG_PORT:-3010}:3000"
 
   mailhog:
-    image: mailhog/mailhog:latest
+    image: mailhog/mailhog:v1.0.1@sha256:8d76a3d4ffa32a3661311944007a415332c4bb855657f4f6c57996405c009bea
     restart: unless-stopped
     # 1025 = SMTP intake; 8025 = web UI for inspecting captured messages.
     ports:
@@ -79,7 +83,7 @@ services:
   webhook-sink:
     # http-https-echo accepts any method, returns 200, and logs the full
     # request body + headers so we can grep them in e2e.
-    image: mendhak/http-https-echo:31
+    image: mendhak/http-https-echo:31@sha256:0fefe04350131d7bb28355e3bf037062643e45f4a8a32f23679529e1b09d8ce4
     restart: unless-stopped
     environment:
       HTTP_PORT: "8080"
@@ -89,6 +93,7 @@ services:
       - "127.0.0.1:${HASH_WEBHOOK_SINK_PORT:-8084}:8080"
 
   worker:
+    image: ${HASH_IMAGE:-hash-hash:dev}
     build: .
     restart: unless-stopped
     depends_on:
@@ -98,8 +103,18 @@ services:
         condition: service_started
     entrypoint: ["/usr/local/bin/hash-worker"]
     environment:
-      HASH_PORT: "0"
+      # The worker has no listener, but configuration still uses the same
+      # production-safe port contract as the server.
+      HASH_PORT: "8080"
+      HASH_ENVIRONMENT: ${HASH_ENVIRONMENT:-development}
+      HASH_RELEASE: ${HASH_RELEASE:-development}
       HASH_PUBLIC_URL: ${HASH_PUBLIC_URL:-http://localhost:8080}
+      # Explicitly local Article 13 identity. Any non-development deployment
+      # must provide its actual operator/contact/authority instead of these.
+      HASH_OPERATOR_NAME: ${HASH_OPERATOR_NAME:-Hash local development operator}
+      HASH_PRIVACY_CONTACT: ${HASH_PRIVACY_CONTACT:-privacy@localhost.invalid}
+      HASH_SUPERVISORY_AUTHORITY: ${HASH_SUPERVISORY_AUTHORITY:-Local development only; configure before deployment}
+      HASH_PRIVACY_POLICY_URL: ${HASH_PRIVACY_POLICY_URL:-/legal/privacy}
       HASH_LOG_LEVEL: ${HASH_LOG_LEVEL:-info}
       HASH_DB_URL: postgres://hash:${POSTGRES_PASSWORD:-devpass}@postgres:5432/hash?sslmode=disable
       HASH_S3_ENDPOINT: ${HASH_S3_ENDPOINT:-hash-minio:9000}
@@ -112,18 +127,25 @@ services:
       HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
       HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-dev}
       HASH_OIDC_REDIRECT_URL: ${HASH_OIDC_REDIRECT_URL:-http://localhost:8080/auth/callback}
-      # Dev-only placeholders (non-uniform so they pass the weak-key check).
-      # Production MUST override these with 64 hex chars of real entropy; the
-      # boot guard rejects short / all-identical keys.
-      HASH_SIGNER_TOKEN_KEY: ${HASH_SIGNER_TOKEN_KEY:-dev-only-signer-token-key-change-in-prod-0123456789ab}
-      HASH_SESSION_KEY: ${HASH_SESSION_KEY:-dev-only-session-key-change-in-prod-0123456789abcdef01}
+      # Deterministic public test fixtures. They are valid 32-byte hex keys so
+      # local boot exercises the real parsers; production MUST override them.
+      HASH_SIGNER_TOKEN_KEY: ${HASH_SIGNER_TOKEN_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+      HASH_SESSION_KEY: ${HASH_SESSION_KEY:-fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210}
+      HASH_WEBHOOK_ENCRYPTION_KEY: ${HASH_WEBHOOK_ENCRYPTION_KEY:-00112233445566778899aabbccddeeffffeeddccbbaa99887766554433221100}
+      HASH_WEBHOOK_ENCRYPTION_KEY_PREVIOUS: ${HASH_WEBHOOK_ENCRYPTION_KEY_PREVIOUS:-}
+      # Public deterministic 32-byte ed25519 seed. Sharing it across the dev
+      # server/worker makes finalize-retry exercise signed audit certificates.
+      HASH_AUDIT_PRIVATE_KEY: ${HASH_AUDIT_PRIVATE_KEY:-aGFzaC1kZXZlbG9wbWVudC1hdWRpdC1zZWVkLTAwMDE=}
+      HASH_AUDIT_TRUSTED_PUBLIC_KEYS: ${HASH_AUDIT_TRUSTED_PUBLIC_KEYS:-}
       HASH_GOTENBERG_URL: ${HASH_GOTENBERG_URL:-http://gotenberg:3000}
       HASH_SMTP_HOST: ${HASH_SMTP_HOST:-mailhog}
       HASH_SMTP_PORT: ${HASH_SMTP_PORT:-1025}
       HASH_SMTP_FROM: ${HASH_SMTP_FROM:-Hash <esign@brightinteraction.example>}
-      HASH_WEBHOOK_SECRET: ${HASH_WEBHOOK_SECRET:-dev-webhook-secret}
+      # Migration-only fallback for legacy rows; fresh development leaves it off.
+      HASH_WEBHOOK_SECRET: ${HASH_WEBHOOK_SECRET:-}
 
   hash:
+    image: ${HASH_IMAGE:-hash-hash:dev}
     build: .
     restart: unless-stopped
     depends_on:
@@ -133,7 +155,14 @@ services:
         condition: service_started
     environment:
       HASH_PORT: "8080"
+      HASH_ENVIRONMENT: ${HASH_ENVIRONMENT:-development}
+      HASH_RELEASE: ${HASH_RELEASE:-development}
       HASH_PUBLIC_URL: ${HASH_PUBLIC_URL:-http://localhost:8080}
+      # Keep server and worker on the same deployment/operator identity.
+      HASH_OPERATOR_NAME: ${HASH_OPERATOR_NAME:-Hash local development operator}
+      HASH_PRIVACY_CONTACT: ${HASH_PRIVACY_CONTACT:-privacy@localhost.invalid}
+      HASH_SUPERVISORY_AUTHORITY: ${HASH_SUPERVISORY_AUTHORITY:-Local development only; configure before deployment}
+      HASH_PRIVACY_POLICY_URL: ${HASH_PRIVACY_POLICY_URL:-/legal/privacy}
       HASH_LOG_LEVEL: ${HASH_LOG_LEVEL:-info}
       HASH_DB_URL: postgres://hash:${POSTGRES_PASSWORD:-devpass}@postgres:5432/hash?sslmode=disable
       HASH_S3_ENDPOINT: ${HASH_S3_ENDPOINT:-hash-minio:9000}
@@ -146,16 +175,21 @@ services:
       HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
       HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-dev}
       HASH_OIDC_REDIRECT_URL: ${HASH_OIDC_REDIRECT_URL:-http://localhost:8080/auth/callback}
-      # Dev-only placeholders (non-uniform so they pass the weak-key check).
-      # Production MUST override these with 64 hex chars of real entropy; the
-      # boot guard rejects short / all-identical keys.
-      HASH_SIGNER_TOKEN_KEY: ${HASH_SIGNER_TOKEN_KEY:-dev-only-signer-token-key-change-in-prod-0123456789ab}
-      HASH_SESSION_KEY: ${HASH_SESSION_KEY:-dev-only-session-key-change-in-prod-0123456789abcdef01}
+      # Deterministic public test fixtures. They are valid 32-byte hex keys so
+      # local boot exercises the real parsers; production MUST override them.
+      HASH_SIGNER_TOKEN_KEY: ${HASH_SIGNER_TOKEN_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+      HASH_SESSION_KEY: ${HASH_SESSION_KEY:-fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210}
+      HASH_WEBHOOK_ENCRYPTION_KEY: ${HASH_WEBHOOK_ENCRYPTION_KEY:-00112233445566778899aabbccddeeffffeeddccbbaa99887766554433221100}
+      HASH_WEBHOOK_ENCRYPTION_KEY_PREVIOUS: ${HASH_WEBHOOK_ENCRYPTION_KEY_PREVIOUS:-}
+      # Same public fixture as the worker; production never uses this Compose.
+      HASH_AUDIT_PRIVATE_KEY: ${HASH_AUDIT_PRIVATE_KEY:-aGFzaC1kZXZlbG9wbWVudC1hdWRpdC1zZWVkLTAwMDE=}
+      HASH_AUDIT_TRUSTED_PUBLIC_KEYS: ${HASH_AUDIT_TRUSTED_PUBLIC_KEYS:-}
       HASH_GOTENBERG_URL: ${HASH_GOTENBERG_URL:-http://gotenberg:3000}
       HASH_SMTP_HOST: ${HASH_SMTP_HOST:-mailhog}
       HASH_SMTP_PORT: ${HASH_SMTP_PORT:-1025}
       HASH_SMTP_FROM: ${HASH_SMTP_FROM:-Hash <esign@brightinteraction.example>}
-      HASH_WEBHOOK_SECRET: ${HASH_WEBHOOK_SECRET:-dev-webhook-secret}
+      # Migration-only fallback for legacy rows; fresh development leaves it off.
+      HASH_WEBHOOK_SECRET: ${HASH_WEBHOOK_SECRET:-}
       # Flare error reporting; empty default keeps dev/self-host a no-op.
       FLARE_DSN: ${FLARE_DSN:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}

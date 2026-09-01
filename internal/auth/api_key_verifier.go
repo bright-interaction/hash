@@ -24,6 +24,12 @@ type PgVerifier struct {
 }
 
 func (v *PgVerifier) LookupByPrefix(ctx context.Context, prefix string) (uuid.UUID, uuid.UUID, uuid.UUID, string, string, []byte, uuid.UUID, []string, error) {
+	// New credentials carry a table namespace in their high-entropy prefix, so
+	// one credential class cannot shadow the other. Legacy 8-hex prefixes still
+	// use the historical API-key-first fallback until they are rotated.
+	if credentialNamespace(prefix) == documentTokenNamespace {
+		return v.lookupDocumentToken(ctx, prefix)
+	}
 	row, err := v.Queries.GetAPIKeyByPrefix(ctx, prefix)
 	if err == nil {
 		user, uerr := v.Queries.GetUser(ctx, row.UserID)
@@ -36,6 +42,13 @@ func (v *PgVerifier) LookupByPrefix(ctx context.Context, prefix string) (uuid.UU
 		return uuid.Nil, uuid.Nil, uuid.Nil, "", "", nil, uuid.Nil, nil, err
 	}
 
+	if credentialNamespace(prefix) == apiKeyPrefixNamespace {
+		return uuid.Nil, uuid.Nil, uuid.Nil, "", "", nil, uuid.Nil, nil, errors.New("api key not found")
+	}
+	return v.lookupDocumentToken(ctx, prefix)
+}
+
+func (v *PgVerifier) lookupDocumentToken(ctx context.Context, prefix string) (uuid.UUID, uuid.UUID, uuid.UUID, string, string, []byte, uuid.UUID, []string, error) {
 	// v1.1 fallback: doc-scoped agent tokens. Rejected if expired,
 	// revoked, or past max_uses; otherwise the row's creator becomes
 	// the identity (so audit logs attribute the call to a human) and
@@ -56,11 +69,11 @@ func (v *PgVerifier) LookupByPrefix(ctx context.Context, prefix string) (uuid.UU
 	if doc.MaxUses > 0 && doc.UsedCount >= doc.MaxUses {
 		return uuid.Nil, uuid.Nil, uuid.Nil, "", "", nil, uuid.Nil, nil, errors.New("token usage cap exceeded")
 	}
-	// NB: the use-counter bump happens in Touch (post-secret-verify), NOT here.
+	// NB: the use-counter bump happens in Claim (post-secret-verify), NOT here.
 	// LookupByPrefix runs before the constant-time hash check, so incrementing
 	// used_count here let a prefix-only attacker (the prefix is non-secret)
 	// exhaust a max_uses-capped token and forge last_used_at with garbage
-	// secrets. Touch is called by the middleware only after ConstantTimeCompare.
+	// secrets. Claim is called by the middleware only after ConstantTimeCompare.
 
 	userID := uuid.Nil
 	role := "doc-token"
@@ -75,16 +88,19 @@ func (v *PgVerifier) LookupByPrefix(ctx context.Context, prefix string) (uuid.UU
 	return doc.ID, userID, doc.OrgID, role, email, doc.KeyHash, doc.DocumentID, doc.Scopes, nil
 }
 
-func (v *PgVerifier) Touch(ctx context.Context, id uuid.UUID) error {
-	// The id belongs to exactly one of the two token tables. Touch both: the
-	// non-matching UPDATE affects zero rows and is a no-op. We cannot short-
-	// circuit on the api_keys touch succeeding, because TouchAPIKey is :exec and
-	// returns nil even when it matched zero rows (a doc-token id), which would
-	// leave document_agent_tokens.used_count / last_used_at never updated.
-	errA := v.Queries.TouchAPIKey(ctx, id)
-	errB := v.Queries.TouchDocAgentToken(ctx, id)
-	if errA != nil {
-		return errA
+func (v *PgVerifier) Claim(ctx context.Context, id, docScopeID uuid.UUID) error {
+	if docScopeID == uuid.Nil {
+		// Org-wide API keys are not usage-capped. Keep last_used_at synchronous
+		// so request completion has deterministic credential telemetry.
+		_, err := v.Queries.ClaimAPIKeyUse(ctx, id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("api key unavailable")
+		}
+		return err
 	}
-	return errB
+	_, err := v.Queries.ClaimDocAgentTokenUse(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errors.New("document token unavailable")
+	}
+	return err
 }

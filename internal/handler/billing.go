@@ -4,9 +4,11 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -19,7 +21,7 @@ import (
 
 // requireFeature gates a handler on a billing feature flag
 // (qes/aes/branding/evidence_bundle/...). Returns true when the org is entitled;
-// otherwise writes 402/500 and returns false. A nil Billing engine means billing is
+// otherwise writes 402/503 and returns false. A nil Billing engine means billing is
 // not wired at all (dev/e2e/tests) and is the only ungate. When billing IS wired, a
 // read error fails CLOSED (deny): a transient DB blip or a renamed plan row must not
 // silently unlock paid features (qes/branding/evidence) for every org with no signal.
@@ -29,7 +31,7 @@ func (s *Server) requireFeature(w http.ResponseWriter, r *http.Request, orgID uu
 	}
 	ok, err := s.Billing.HasFeature(r.Context(), orgID, key)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "entitlement check unavailable")
+		writeError(w, http.StatusServiceUnavailable, "entitlement check temporarily unavailable")
 		return false
 	}
 	if !ok {
@@ -41,6 +43,25 @@ func (s *Server) requireFeature(w http.ResponseWriter, r *http.Request, orgID uu
 		return false
 	}
 	return true
+}
+
+// writeAuthoringQuotaError maps the typed errors produced by an atomic
+// document/recipient quota mutation. It returns false for unrelated failures so
+// the caller can use its normal internal-error path without exposing details.
+func (s *Server) writeAuthoringQuotaError(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, billing.ErrQuotaExceeded):
+		writeJSON(w, http.StatusPaymentRequired, map[string]any{
+			"error":       err.Error(),
+			"upgrade_url": "/settings/billing",
+		})
+		return true
+	case errors.Is(err, billing.ErrEntitlementUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "billing entitlement check temporarily unavailable")
+		return true
+	default:
+		return false
+	}
 }
 
 func pgTimeOrNil(t pgtype.Timestamptz) any {
@@ -95,6 +116,10 @@ func (s *Server) handleGetBillingSubscription(w http.ResponseWriter, r *http.Req
 	}
 	plan, sub, err := s.Billing.PlanForOrg(r.Context(), u.OrgID)
 	if err != nil {
+		if errors.Is(err, billing.ErrEntitlementUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "entitlement check temporarily unavailable")
+			return
+		}
 		writeInternalError(w, err)
 		return
 	}
@@ -135,6 +160,24 @@ type checkoutInput struct {
 	Interval string `json:"interval"` // monthly | yearly
 }
 
+type billingOrgLoader interface {
+	GetOrg(context.Context, uuid.UUID) (*generated.Org, error)
+}
+
+func billingCustomerOrgName(ctx context.Context, loader billingOrgLoader, orgID uuid.UUID) (string, error) {
+	if loader == nil || orgID == uuid.Nil {
+		return "", errors.New("billing customer organization unavailable")
+	}
+	org, err := loader.GetOrg(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	if org == nil || org.ID != orgID || strings.TrimSpace(org.Name) == "" {
+		return "", errors.New("billing customer organization unavailable")
+	}
+	return strings.TrimSpace(org.Name), nil
+}
+
 // handleStartBillingCheckout creates a checkout session with the
 // provider + returns the hosted URL the user's browser navigates to.
 func (s *Server) handleStartBillingCheckout(w http.ResponseWriter, r *http.Request) {
@@ -154,11 +197,16 @@ func (s *Server) handleStartBillingCheckout(w http.ResponseWriter, r *http.Reque
 	if in.Interval == "" {
 		in.Interval = "monthly"
 	}
+	orgName, err := billingCustomerOrgName(r.Context(), s.Queries, u.OrgID)
+	if err != nil {
+		writeInternalErrorMsg(w, "load billing customer organization failed", err)
+		return
+	}
 	returnURL := s.PublicURL + "/settings/billing?status=success"
-	url, err := s.Billing.StartCheckout(r.Context(), billing.StartCheckoutInput{
+	prepared, err := s.Billing.PrepareCheckout(r.Context(), billing.StartCheckoutInput{
 		OrgID:     u.OrgID,
 		OrgEmail:  u.Email,
-		OrgName:   s.OrgName,
+		OrgName:   orgName,
 		PlanSlug:  in.PlanSlug,
 		Interval:  in.Interval,
 		ReturnURL: returnURL,
@@ -168,15 +216,43 @@ func (s *Server) handleStartBillingCheckout(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusNotFound, "plan not found")
 			return
 		}
+		if errors.Is(err, billing.ErrInvalidCheckout) {
+			writeError(w, http.StatusBadRequest, "invalid checkout request")
+			return
+		}
+		if errors.Is(err, billing.ErrCheckoutInProgress) {
+			writeError(w, http.StatusConflict, "another checkout is already in progress")
+			return
+		}
 		writeError(w, http.StatusBadGateway, "billing: "+err.Error())
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID:       u.OrgID,
-		ActorUserID: &u.UserID,
-		Kind:        audit.KindBillingCheckoutStarted,
-		Payload:     map[string]any{"plan_slug": in.PlanSlug, "interval": in.Interval},
-	})
+	_, err = audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (uuid.UUID, error) {
+			return prepared.ActivationKey, billing.PersistPreparedCheckout(r.Context(), q, prepared)
+		},
+		func(uuid.UUID) audit.Entry {
+			return audit.Entry{
+				OrgID:       u.OrgID,
+				ActorUserID: &u.UserID,
+				Kind:        audit.KindBillingCheckoutStarted,
+				Payload:     map[string]any{"plan_slug": in.PlanSlug, "interval": in.Interval},
+			}
+		},
+	)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "billing: persist audited checkout: "+err.Error())
+		return
+	}
+	url, err := s.Billing.CompletePreparedCheckout(r.Context(), prepared)
+	if err != nil {
+		if errors.Is(err, billing.ErrCheckoutInProgress) {
+			writeError(w, http.StatusConflict, "checkout payment is already being activated")
+			return
+		}
+		writeError(w, http.StatusBadGateway, "billing provider temporarily unavailable")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"checkout_url": url})
 }
 
@@ -191,7 +267,8 @@ func (s *Server) handleCancelBillingSubscription(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusServiceUnavailable, "billing not enabled")
 		return
 	}
-	if err := s.Billing.CancelAtPeriodEnd(r.Context(), u.OrgID); err != nil {
+	params, err := s.Billing.PrepareCancellation(r.Context(), u.OrgID)
+	if err != nil {
 		if errors.Is(err, billing.ErrSubscriptionNone) {
 			writeError(w, http.StatusNotFound, "no subscription to cancel")
 			return
@@ -199,12 +276,24 @@ func (s *Server) handleCancelBillingSubscription(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID:       u.OrgID,
-		ActorUserID: &u.UserID,
-		Kind:        audit.KindBillingSubscriptionCancelled,
-		Payload:     map[string]any{"cancel_at_period_end": true},
-	})
+	_, err = audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (uuid.UUID, error) {
+			_, err := q.SetSubscriptionCancelAtPeriodEnd(r.Context(), params)
+			return u.OrgID, err
+		},
+		func(uuid.UUID) audit.Entry {
+			return audit.Entry{
+				OrgID:       u.OrgID,
+				ActorUserID: &u.UserID,
+				Kind:        audit.KindBillingSubscriptionCancelled,
+				Payload:     map[string]any{"cancel_at_period_end": true},
+			}
+		},
+	)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "billing: persist audited cancellation: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -273,8 +362,18 @@ func (s *Server) handleBillingWebhook(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "invalid webhook signature")
 			return
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, billing.ErrWebhookCorrelation) {
+			// Mollie recommends returning success for an unknown ID to avoid
+			// leaking which provider resources belong to this installation. The
+			// engine made no mutation because strict correlation failed.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Provider/DB failures are retryable. Mollie retries non-2xx
+		// callbacks; classifying these as 400 permanently lost activation.
+		writeError(w, http.StatusServiceUnavailable, "billing webhook processing temporarily unavailable")
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	// Mollie's classic webhook contract explicitly expects 200 OK.
+	w.WriteHeader(http.StatusOK)
 }

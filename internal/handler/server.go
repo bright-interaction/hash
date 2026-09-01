@@ -7,6 +7,9 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -36,16 +39,45 @@ import (
 	"github.com/bright-interaction/hash/internal/evidence"
 	"github.com/bright-interaction/hash/internal/flarereport"
 	"github.com/bright-interaction/hash/internal/mcp"
-	"github.com/bright-interaction/hash/internal/qes"
+	"github.com/bright-interaction/hash/internal/requestmeta"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/bright-interaction/hash/internal/versions"
+	"github.com/bright-interaction/hash/internal/webhooksecret"
 )
 
 const (
 	SessionCookieName = "hash_session"
+	// hashProxyAuthHeader is overwritten by the managed Caddy before it dials
+	// Hash. Network position is not identity: unrelated containers share both
+	// production networks and can otherwise dial Hash directly.
+	hashProxyAuthHeader = "X-Hash-Proxy-Auth"
+	// hashProxyClientIPHeader is also overwritten by Caddy, but with Caddy's
+	// strict trusted-proxy result rather than a forwarded chain. Hash accepts
+	// exactly one literal address from this authenticated channel. Private/VPN
+	// addresses stay private instead of exposing an earlier forged XFF entry.
+	hashProxyClientIPHeader = "X-Hash-Client-IP"
+
+	// Signer limits are deliberately split by credential and risk class. A
+	// single IP can represent an entire customer office, while the magic token
+	// already identifies one ceremony. The generous IP-wide ceiling only bounds
+	// random-token scanning; the tighter token buckets bound leaked-link abuse.
+	signerGlobalIPRequestsPerMinute = 1200
+	automationGlobalIPPerMinute     = 6000
+	automationOrgRequestsPerMinute  = 600
+	signerReadRequestsPerMinute     = 240
+	signerMutationRequestsPerMinute = 60
+	signerDownloadRequestsPerMinute = 30
+	signerClarifyRequestsPerMinute  = 10
+
+	// Resource-heavy endpoints also keep a generous aggregate IP ceiling so an
+	// attacker cannot rotate otherwise-valid tokens to amplify egress, telemetry
+	// allocation, or LLM spend. These buckets are isolated from legal responses.
+	signerDownloadIPRequestsPerMinute  = 240
+	signerTelemetryIPRequestsPerMinute = 240
+	signerClarifyIPRequestsPerMinute   = 60
 )
 
 // Server holds shared deps for HTTP handlers.
@@ -75,13 +107,47 @@ type Server struct {
 	Compliance             *compliance.Seeder
 	ComplianceFlagger      *compliance.Flagger
 	ComplianceFeed         compliance.Feed
-	QES                    *qes.Engine
 	Billing                *billing.Engine
 	Collab                 *collab.Hub
 	BrightCRMWebhookSecret string
-	Frontend               http.Handler // SPA catch-all; nil = disabled (404 for unmatched paths)
-	OrgName                string
-	PublicURL              string
+	// WebhookSecrets encrypts new per-endpoint outbound HMAC keys before any
+	// database write. Production config always wires it; nil test/dev servers
+	// reject endpoint creation instead of falling back to plaintext.
+	WebhookSecrets *webhooksecret.Keyring
+	// The BrightCRM receiver claims replay protection and appends every affected
+	// tenant ledger atomically before mutating the process-local resolver cache.
+	// This private override keeps that boundary unit-testable; production uses
+	// the Server implementation backed by Pool, Queries, and Audit.
+	brightCRMProcessorOverride brightCRMWebhookProcessor
+	// The standalone automation command has a private test seam for its
+	// transaction/send orchestrator. Production always uses the Server-backed
+	// implementation and its durable idempotency table.
+	automationSignatureRequestProcessorOverride automationSignatureRequestProcessor
+	// EvidenceTrustedPublicKeys pins bundle verification to this Hash issuer.
+	// Cryptographically valid bundles signed by arbitrary self-supplied keys
+	// must never receive an issuer-authentic OK result.
+	EvidenceTrustedPublicKeys []string
+	// Historical keys remain valid for certificates issued while they were
+	// active, but must not authorize newly generated export manifests.
+	EvidenceManifestPublicKeys []string
+	Frontend                   http.Handler // SPA catch-all; nil = disabled (404 for unmatched paths)
+	OrgName                    string
+	// Operator disclosure fields are the deployed instance's factual Article
+	// 13 identity. Config requires them outside explicit local development.
+	OperatorName         string
+	PrivacyContact       string
+	SupervisoryAuthority string
+	PrivacyPolicyURL     string
+	PublicURL            string
+	// Release and Environment are public deployment identity, not secrets.
+	// /health publishes them so an external cutover probe can prove that ingress
+	// reached the selected release instead of any older healthy Hash instance.
+	Release     string
+	Environment string
+	// ProxyAuth is never exposed to handlers. The outermost production
+	// middleware compares a fixed-size digest in constant time, strips the
+	// header, and rejects direct shared-network requests before XFF is trusted.
+	ProxyAuth string
 	// AISealKey is the 32-byte key used to encrypt per-org BYOAI provider
 	// keys at rest (same key the AI shield uses). Empty disables BYOAI: the
 	// settings handler refuses to store a key it cannot later decrypt.
@@ -103,18 +169,47 @@ func docGetParams(id, orgID uuid.UUID) generated.GetDocumentParams {
 	return generated.GetDocumentParams{ID: id, OrgID: orgID}
 }
 
+// signerTokenRateLimit keys a limiter by a one-way digest of the magic token.
+// Using the credential rather than only the source IP keeps separate signers
+// behind one NAT from consuming each other's ceremony budget. Never retain the
+// raw bearer token in a limiter map or expose it in diagnostics.
+func signerTokenRateLimit(requestLimit int) func(http.Handler) http.Handler {
+	return httprate.Limit(requestLimit, time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		token := chi.URLParam(r, "token")
+		if token == "" {
+			return "", errors.New("missing signer token")
+		}
+		return hex.EncodeToString(auth.HashMagicToken(token)), nil
+	}))
+}
+
+// automationOrgRateLimit is applied after API-key authentication. A shared
+// Google UrlFetch egress address or corporate NAT therefore cannot make one
+// partner consume another partner's normal command budget; the separate high
+// IP ceiling remains an unauthenticated abuse-control layer.
+func automationOrgRateLimit(requestLimit int) func(http.Handler) http.Handler {
+	return httprate.Limit(requestLimit, time.Minute, httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		user, ok := auth.FromContext(r.Context())
+		if !ok || user.OrgID == uuid.Nil {
+			return "", errors.New("missing authenticated organization")
+		}
+		return user.OrgID.String(), nil
+	}))
+}
+
 // Routes builds the chi router with every Hash endpoint mounted.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 
+	r.Use(s.requireProductionProxyAuth)
 	r.Use(middleware.RequestID)
-	r.Use(trustedClientIP)
-	r.Use(middleware.Logger)
-	r.Use(panicMiddleware)
+	r.Use(safeAccessLogger)
+	// Recovery order is intentional (first registered = outermost): Flare sees
+	// and re-panics first, panicMiddleware records the scrubbed local stack and
+	// re-panics second, and chi's outer Recoverer finally writes the 500. Putting
+	// Recoverer inside either observer swallows the panic before it reaches it.
 	r.Use(middleware.Recoverer)
-	// Innermost of the recovery layers: it recovers first, ships the panic
-	// to Flare, then re-panics so Recoverer still writes the standard 500
-	// and panicMiddleware's stack logging contract is untouched.
+	r.Use(panicMiddleware)
 	r.Use(flarereport.FlareRecoverer)
 	r.Use(middleware.StripSlashes)
 	r.Use(s.securityHeaders)
@@ -127,7 +222,10 @@ func (s *Server) Routes() http.Handler {
 		r.Use(httprate.LimitByIP(20, time.Minute))
 		r.Get("/auth/login", s.handleAuthLogin)
 		r.Get("/auth/callback", s.handleAuthCallback)
-		r.Post("/auth/logout", s.handleAuthLogout)
+		// Logout mutates an ambient cookie. SameSite=Strict does not stop a
+		// sibling subdomain (same-site, different origin) from forcing it, so
+		// apply the same exact-origin browser guard as the authenticated API.
+		r.With(s.requireSameOriginMutation).Post("/auth/logout", s.handleAuthLogout)
 	})
 
 	// Public signature-verification surface (anonymous, CPU-heavy crypto +
@@ -161,52 +259,26 @@ func (s *Server) Routes() http.Handler {
 		})
 	}
 
+	// Explicit tombstone prevents retired provider callbacks from falling
+	// through to the SPA's 200 HTML shell. HTTP 410 cannot be mistaken for an
+	// active or temporarily degraded QES integration.
+	r.Post("/qes/callback/{provider_session_id}", s.handleQESCallback)
+
 	// Signer-side: magic-link auth (URL token IS the credential).
 	if s.Sign != nil {
-		r.Route("/sign/{token}", func(r chi.Router) {
-			// Per-IP cap across the whole magic-link surface (a leaked link is
-			// otherwise an unbounded request + LLM-spend primitive).
-			r.Use(httprate.LimitByIP(60, time.Minute))
-			r.Get("/", s.handleSignerRoot)
-			r.Get("/document", s.handleSignerDocument)
-			r.Get("/pdf", s.handleSignerPDF)
-			r.Get("/final-pdf", s.handleSignerFinalPDF)
-			r.Post("/view", s.handleSignerView)
-			r.Post("/sign", s.handleSignerSign)
-			r.Post("/accept", s.handleSignerAccept)
-			r.Post("/decline", s.handleSignerDecline)
-			r.Post("/request-changes", s.handleSignerRequestChanges)
-			r.Get("/comments", s.handleSignerListComments)
-			r.Post("/comments", s.handleSignerCreateComment)
-			r.Post("/telemetry", s.handleSignerTelemetry)
-			// v1.2 fillable fields beyond signature.
-			r.Get("/fields", s.handleSignerListFields)
-			r.Post("/fields", s.handleSignerSubmitFields)
-			// GDPR Art. 15-22: signer raises a data-subject-rights
-			// request against their own row (access/erasure/etc).
-			r.Post("/dsr", s.handleSignerDSR)
-			if s.Clarifier != nil {
-				r.Post("/clarify", s.handleSignerClarify)
-			}
-			if s.QES != nil {
-				r.Post("/qes/start", s.handleQESStart)
-				r.Get("/qes/status", s.handleQESStatus)
-			}
-		})
-		// Email open-beacon: 1x1 transparent gif keyed by magic token.
-		r.Get("/e/o/{token}", s.handleOpenBeacon)
+		s.mountSignerRoutes(r)
+		// Compatibility response for already-sent legacy email pixels. It never
+		// looks up the token or writes analytics/audit data; new templates emit no
+		// pixel. Rate-limit it like the other public credential-shaped routes.
+		r.With(httprate.LimitByIP(60, time.Minute)).Get("/e/o/{token}", s.handleRetiredOpenBeacon)
 		// One-click email actions (approve/deny a change request). Token-authed;
 		// GET shows a confirm page, POST performs the action.
 		r.With(httprate.LimitByIP(60, time.Minute)).Get("/a/cr", s.handleChangeActionPage)
 		r.With(httprate.LimitByIP(60, time.Minute)).Post("/a/cr", s.handleChangeActionConfirm)
 		r.With(httprate.LimitByIP(60, time.Minute)).Get("/a/comment", s.handleCommentReplyPage)
 		r.With(httprate.LimitByIP(60, time.Minute)).Post("/a/comment", s.handleCommentReplyConfirm)
-		// QTSP callback: public route gated by HMAC inside the handler.
-		// Mounted outside /sign/{token} because the QTSP authenticates
-		// the session via its own ID, not the magic token.
-		if s.QES != nil {
-			r.Post("/qes/callback/{provider_session_id}", s.handleQESCallback)
-		}
+		// AES/QES ceremony operations are represented only by 410 tombstones;
+		// dormant provider code and legacy rows cannot activate a lifecycle.
 	}
 
 	// MCP endpoint mounted outside /api/v1 so JSON-RPC envelopes don't fight
@@ -218,12 +290,52 @@ func (s *Server) Routes() http.Handler {
 			// but bounds cost/DoS amplification from a leaked/over-shared token.
 			r.Use(httprate.LimitByIP(240, time.Minute))
 			r.Use(auth.RequireAPIKey(s.APIKeys))
+			// The whole MCP product is plan-gated, not just selected premium
+			// tools. Recheck on every request so a downgrade immediately disables
+			// previously issued keys; entitlement lookup errors fail closed.
+			r.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					u, ok := auth.FromContext(req.Context())
+					if !ok {
+						writeError(w, http.StatusUnauthorized, "not authenticated")
+						return
+					}
+					if !s.requireFeature(w, req, u.OrgID, "mcp") {
+						return
+					}
+					next.ServeHTTP(w, req)
+				})
+			})
 			r.Mount("/", s.MCP.Handler())
 		})
 	}
 
+	// Standalone machine API. It deliberately lives outside the session-only
+	// /api/v1 tree: an authenticated CRM, Reactor workflow, or Google-hosted
+	// producer can create and send a complete request without browser cookies.
+	// The handler additionally requires both authoring and workflow scopes and
+	// rejects document-scoped agent credentials.
+	if s.APIKeys != nil {
+		r.Route("/api/automation/v1", func(r chi.Router) {
+			r.Use(httprate.LimitByIP(automationGlobalIPPerMinute, time.Minute))
+			r.Use(auth.RequireAPIKey(s.APIKeys))
+			r.Use(automationOrgRateLimit(automationOrgRequestsPerMinute))
+			r.Use(auth.RequireRole(auth.RoleSender))
+			r.Use(requireAutomationSignatureRequestScope)
+			r.Post("/signature-requests", s.handleAutomationSignatureRequest)
+		})
+	}
+
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Use(auth.RequireSession(s.Cookies, SessionCookieName))
+		// SameSite=Strict stops cross-site CSRF, but sibling subdomains are
+		// same-site and can still issue cookie-bearing simple requests. Require
+		// browser mutations to originate from this exact app origin before the
+		// session cookie is accepted.
+		r.Use(s.requireSameOriginMutation)
+		// Revalidate the signed cookie's user against PostgreSQL on every
+		// request. Cookie integrity authenticates the session; the live row is
+		// authoritative for current membership, tenant, and role.
+		r.Use(auth.RequireSession(s.Cookies, SessionCookieName, s.Queries))
 		r.Get("/me", s.handleMe)
 		// Org-wide setting: owner-only, like every other org setting below (a
 		// viewer/sender must not flip how change-request approvals behave for
@@ -268,12 +380,16 @@ func (s *Server) Routes() http.Handler {
 		// Sender raises a DSR (e.g. from a DPO email), lists pending
 		// ones, transitions status, runs an Art. 15+20 export.
 		r.Route("/dsr", func(r chi.Router) {
-			r.Use(auth.RequireRoleForWrites(auth.RoleSender))
+			// DSR rows contain subject emails, names, and free-text notes. They are
+			// a sender/DPO workflow, not ordinary viewer-readable org metadata.
+			r.Use(auth.RequireRole(auth.RoleSender))
 			r.Get("/", s.handleListDSR)
 			r.Post("/", s.handleCreateSenderDSR)
 			r.Patch("/{id}", s.handleTransitionDSR)
 		})
-		r.Get("/data-subject/export", s.handleDSRExport)
+		// Subject exports disclose recipient identity and ceremony metadata.
+		// Treat them as DSR operations, not ordinary viewer document reads.
+		r.With(auth.RequireRole(auth.RoleSender)).Get("/data-subject/export", s.handleDSRExport)
 
 		// Phase 9.2: eIDAS routing rules.
 		if s.EIDAS != nil {
@@ -464,6 +580,10 @@ func (s *Server) Routes() http.Handler {
 		// envelope itself is still a document with is_envelope=true.
 		if s.Envelopes != nil {
 			r.Route("/envelopes", func(r chi.Router) {
+				// Envelope topology is document authoring. Keep child/manifest
+				// reads available to viewers, but require sender privileges for
+				// attach, detach, and reorder mutations.
+				r.Use(auth.RequireRoleForWrites(auth.RoleSender))
 				r.Post("/{id}/attach", s.handleAttachToEnvelope)
 				r.Post("/{id}/detach", s.handleDetachFromEnvelope)
 				r.Post("/{id}/reorder", s.handleReorderEnvelope)
@@ -478,8 +598,8 @@ func (s *Server) Routes() http.Handler {
 			r.Route("/billing", func(r chi.Router) {
 				r.Get("/plans", s.handleListBillingPlans)
 				r.Get("/subscription", s.handleGetBillingSubscription)
-				r.Post("/checkout", s.handleStartBillingCheckout)
-				r.Post("/cancel", s.handleCancelBillingSubscription)
+				r.With(auth.RequireRole(auth.RoleOwner)).Post("/checkout", s.handleStartBillingCheckout)
+				r.With(auth.RequireRole(auth.RoleOwner)).Post("/cancel", s.handleCancelBillingSubscription)
 				r.Get("/invoices", s.handleListBillingInvoices)
 			})
 		}
@@ -493,6 +613,105 @@ func (s *Server) Routes() http.Handler {
 	}
 
 	return r
+}
+
+// mountSignerRoutes registers the magic-link ceremony surface with independent
+// budgets for reads, legal mutations, artifact downloads, and paid AI work.
+// The outer IP ceiling prevents unbounded random-token scans without making a
+// shared customer NAT the primary identity for ordinary ceremony traffic.
+func (s *Server) mountSignerRoutes(r chi.Router) {
+	r.Route("/sign/{token}", func(r chi.Router) {
+		// Defense in depth for forged-token enumeration. At 20 requests/second
+		// this remains well above legitimate shared-office ceremony traffic.
+		r.Use(httprate.LimitByIP(signerGlobalIPRequestsPerMinute, time.Minute))
+
+		r.Group(func(r chi.Router) {
+			r.Use(signerTokenRateLimit(signerReadRequestsPerMinute))
+			r.Get("/", s.handleSignerRoot)
+			r.Get("/document", s.handleSignerDocument)
+			r.Get("/comments", s.handleSignerListComments)
+			r.Get("/fields", s.handleSignerListFields)
+			r.Get("/qes/status", s.handleQESStatus)
+		})
+
+		// PDF routes can move substantially more bytes than bootstrap reads, so
+		// they receive a smaller, independent credential-scoped budget.
+		r.Group(func(r chi.Router) {
+			r.Use(httprate.LimitByIP(signerDownloadIPRequestsPerMinute, time.Minute))
+			r.Use(signerTokenRateLimit(signerDownloadRequestsPerMinute))
+			r.Get("/pdf", s.handleSignerPDF)
+			r.Get("/final-pdf", s.handleSignerFinalPDF)
+		})
+
+		r.Group(func(r chi.Router) {
+			r.Use(signerTokenRateLimit(signerMutationRequestsPerMinute))
+			r.Post("/view", s.handleSignerView)
+			r.Post("/sign", s.handleSignerSign)
+			r.Post("/accept", s.handleSignerAccept)
+			r.Post("/decline", s.handleSignerDecline)
+			r.Post("/request-changes", s.handleSignerRequestChanges)
+			r.Post("/comments", s.handleSignerCreateComment)
+			// v1.2 fillable fields beyond signature.
+			r.Post("/fields", s.handleSignerSubmitFields)
+			// GDPR Art. 15-22: signer raises a data-subject-rights
+			// request against their own row (access/erasure/etc).
+			r.Post("/dsr", s.handleSignerDSR)
+			r.Post("/qes/start", s.handleQESStart)
+		})
+
+		// Compatibility route for pre-release clients. The handler always returns
+		// 410 and writes nothing until consent is persisted and enforced server-side.
+		r.With(httprate.LimitByIP(signerTelemetryIPRequestsPerMinute, time.Minute)).Post("/telemetry", s.handleSignerTelemetry)
+		if s.Clarifier != nil {
+			r.With(
+				httprate.LimitByIP(signerClarifyIPRequestsPerMinute, time.Minute),
+				signerTokenRateLimit(signerClarifyRequestsPerMinute),
+			).Post("/clarify", s.handleSignerClarify)
+		}
+	})
+}
+
+// safeAccessLogger records enough request metadata for operations without ever
+// serializing the raw URL. Hash has several credentials in URLs: signer magic
+// tokens and billing secrets are path segments, while OIDC codes and one-click
+// action tokens are query parameters. chi's stock Logger writes RequestURI and
+// therefore leaked all of them into container/central logs.
+func safeAccessLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		status := ww.Status()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		slog.Info("http request",
+			"request_id", middleware.GetReqID(r.Context()),
+			"method", r.Method,
+			"path", safeAccessPath(r.URL.Path),
+			"status", status,
+			"bytes", ww.BytesWritten(),
+			"duration_ms", time.Since(started).Milliseconds(),
+		)
+	})
+}
+
+func safeAccessPath(path string) string {
+	segments := strings.Split(path, "/")
+	// Leading slash produces segments[0] == "".
+	if len(segments) >= 3 && segments[1] == "sign" {
+		segments[2] = ":token"
+	}
+	if len(segments) >= 4 && segments[1] == "e" && segments[2] == "o" {
+		segments[3] = ":token"
+	}
+	if len(segments) >= 4 && segments[1] == "webhooks" && segments[2] == "billing" {
+		segments[3] = ":secret"
+	}
+	if len(segments) >= 4 && segments[1] == "qes" && segments[2] == "callback" {
+		segments[3] = ":provider_session_id"
+	}
+	return strings.Join(segments, "/")
 }
 
 // securityHeaders adds the baseline OWASP-recommended headers on every
@@ -517,15 +736,33 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		// Signing URLs carry bearer credentials in the path. Never forward even
+		// the origin as referrer metadata when a signer follows an external link;
+		// this also keeps the full token out of same-origin analytics requests.
+		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()")
 		h.Set("Content-Security-Policy", csp)
+		// Magic/action URLs are bearer credentials and their responses contain
+		// contract content or signer identity. Do not let browsers, shared
+		// proxies, or service workers retain a reusable copy.
+		if strings.HasPrefix(r.URL.Path, "/sign/") || strings.HasPrefix(r.URL.Path, "/a/") || strings.HasPrefix(r.URL.Path, "/e/o/") {
+			h.Set("Cache-Control", "no-store")
+			h.Set("Pragma", "no-cache")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// Readiness alone cannot prove a cutover: a stale reverse-proxy target can
+	// be perfectly healthy. Bind the public response to the manifest-selected
+	// release and runtime mode so deployment automation can fail closed on that
+	// routing error. These values contain no credentials.
+	w.Header().Set("X-Hash-Release", s.Release)
+	w.Header().Set("X-Hash-Environment", s.Environment)
+	w.Header().Set("Cache-Control", "no-store")
+
 	// /health used to ping Postgres only. Compose + Caddy treat a 200
 	// here as "ready to receive traffic"; when Gotenberg or MinIO is
 	// down the API technically responds but sign + render flows die
@@ -648,58 +885,77 @@ func requireSessionUser(w http.ResponseWriter, ctx context.Context) (auth.Sessio
 // errNotFound lets handlers report missing rows without a SQL leak.
 var errNotFound = errors.New("not found")
 
-// clientIP returns the request's source IP. chi.middleware.RealIP has
-// already moved any X-Forwarded-For value into r.RemoteAddr. We strip the
-// trailing :port and return the host portion.
+// clientIP returns the request's source IP after the production proxy-auth
+// middleware has selected Caddy's authenticated single-address value.
+// net.SplitHostPort is required: a last-colon split corrupts IPv6.
 func clientIP(r *http.Request) string {
-	addr := r.RemoteAddr
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i]
-		}
-	}
-	return addr
+	return requestmeta.ClientIP(r.RemoteAddr)
 }
 
-// trustedClientIP replaces chi middleware.RealIP, which trusts client-supplied
-// True-Client-IP / X-Real-IP / leftmost X-Forwarded-For (all spoofable, so an
-// attacker could rotate a header per request to defeat per-IP rate limits and
-// forge the signer IP recorded on the eIDAS audit trail). Instead we take the
-// RIGHTMOST PUBLIC entry of X-Forwarded-For: our proxy hops (nginx, caddy) sit
-// on private IPs and are skipped, and any attacker-injected entries are LEFT of
-// the real client (the outermost trusted proxy appended it), so they are never
-// chosen. True-Client-IP / X-Real-IP are ignored entirely. With no XFF (local
-// dev, direct dial) the direct-peer RemoteAddr is left untouched.
-func trustedClientIP(next http.Handler) http.Handler {
+// requireProductionProxyAuth makes the managed reverse proxy an authenticated
+// ingress boundary, not merely another peer in a broad private CIDR. The sole
+// header-free production exception is the exact loopback /health request used
+// by Docker and the in-container deployment probe. Every other request must
+// carry the value Caddy overwrote; even a loopback request to an application
+// route is refused.
+func (s *Server) requireProductionProxyAuth(next http.Handler) http.Handler {
+	wantDigest := sha256.Sum256([]byte(s.ProxyAuth))
+	production := s.Environment == "production"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if ip := rightmostPublicXFF(r.Header.Get("X-Forwarded-For")); ip != "" {
-			_, port, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				port = "0"
-			}
-			r.RemoteAddr = net.JoinHostPort(ip, port)
+		authValues := r.Header.Values(hashProxyAuthHeader)
+		clientIPValues := r.Header.Values(hashProxyClientIPHeader)
+		presented := ""
+		if len(authValues) > 0 {
+			presented = authValues[0]
 		}
+		// Strip before any logger, handler, or downstream integration can see the
+		// authentication channel. Only the resulting RemoteAddr is authoritative.
+		r.Header.Del(hashProxyAuthHeader)
+		r.Header.Del(hashProxyClientIPHeader)
+		stripForwardingHeaders(r.Header)
+
+		if !production {
+			next.ServeHTTP(w, r)
+			return
+		}
+		peer := net.ParseIP(clientIP(r))
+		if r.URL.Path == "/health" && peer != nil && peer.IsLoopback() {
+			// A header-free local probe must remain local attribution too. This
+			// exception does not authorize a loopback caller to name another IP.
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		presentedDigest := sha256.Sum256([]byte(presented))
+		secretOK := subtle.ConstantTimeCompare(presentedDigest[:], wantDigest[:]) == 1
+		clientAddr, clientIPOK := parseAuthenticatedClientIP(clientIPValues)
+		if len(authValues) != 1 || !secretOK || !clientIPOK {
+			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+			return
+		}
+		_, port, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			port = "0"
+		}
+		r.RemoteAddr = net.JoinHostPort(clientAddr, port)
 		next.ServeHTTP(w, r)
 	})
 }
 
-// rightmostPublicXFF returns the rightmost X-Forwarded-For entry that parses as
-// a public IP, or "" if there is none.
-func rightmostPublicXFF(xff string) string {
-	if xff == "" {
-		return ""
+func parseAuthenticatedClientIP(values []string) (string, bool) {
+	if len(values) != 1 || values[0] == "" || strings.TrimSpace(values[0]) != values[0] {
+		return "", false
 	}
-	parts := strings.Split(xff, ",")
-	for i := len(parts) - 1; i >= 0; i-- {
-		ip := net.ParseIP(strings.TrimSpace(parts[i]))
-		if ip == nil {
-			continue
-		}
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			continue
-		}
-		return ip.String()
+	ip := net.ParseIP(values[0])
+	if ip == nil {
+		return "", false
 	}
-	return ""
+	return ip.String(), true
+}
+
+func stripForwardingHeaders(header http.Header) {
+	header.Del("Forwarded")
+	header.Del("X-Forwarded-For")
+	header.Del("X-Real-IP")
+	header.Del("True-Client-IP")
 }

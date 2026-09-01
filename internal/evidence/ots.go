@@ -12,14 +12,13 @@ import (
 	"time"
 )
 
-// HTTPOTSAnchor talks to a public OpenTimestamps calendar to anchor a
-// SHA-256 digest in Bitcoin (free, decentralized, EU-court accepted).
+// HTTPOTSAnchor is an experimental development-only client that asks an
+// OpenTimestamps calendar to stamp a SHA-256 digest. Hash does not currently
+// parse, bind, upgrade, or verify the returned proof and production config
+// therefore rejects this feature.
 //
 // Default endpoint is `https://a.pool.opentimestamps.org/digest` which
-// accepts a 32-byte digest body via POST and returns a `.ots` proof.
-// The returned proof file is what readers later upgrade by querying
-// the same calendar until the Bitcoin attestation lands (typically
-// within an hour).
+// accepts a 32-byte digest body via POST and returns opaque `.ots` bytes.
 //
 // Network failure is non-fatal: Builder.Build catches the err and
 // drops the OpenTimestamps field from the manifest so the rest of the

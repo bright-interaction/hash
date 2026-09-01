@@ -20,8 +20,8 @@
   import {
     importHTML, importMarkdown, updateDocument, type BlockTree, type DocumentResponse
   } from '$lib/api/client';
-  import { fromProseMirror, toProseMirror } from './transform';
-  import { BlockIDExtension, DynamicVariable, PageBreak, SignatureField, TableBlock } from './nodes';
+  import { fromProseMirror, isCanonicalSignatureRole, toProseMirror } from './transform';
+  import { BlockIDExtension, DynamicVariable, OpaqueBlock, PageBreak, SignatureField, TableBlock } from './nodes';
 
   let { document: doc, onChange, userName, userColor }: {
     document: DocumentResponse;
@@ -131,6 +131,7 @@
         BlockIDExtension,
         SignatureField,
         DynamicVariable,
+        OpaqueBlock,
         PageBreak,
         TableBlock,
         Collaboration.configure({ document: ydoc }),
@@ -221,8 +222,19 @@
     editor?.chain().focus().setHorizontalRule().run();
   }
   function insertSignatureField() {
-    const role = window.prompt('Recipient role (e.g. client, provider)?', 'signer') || 'signer';
+    const input = window.prompt(
+      'Recipient role (lowercase letters, numbers, "_" or "-"; e.g. client, provider)?',
+      'signer'
+    );
+    if (input === null) return;
+    const role = input.trim();
+    if (!isCanonicalSignatureRole(role)) {
+      error =
+        'Recipient role must start with a lowercase letter, use only lowercase letters, numbers, "_" or "-", and be at most 64 characters. Viewer and CC roles cannot sign.';
+      return;
+    }
     const label = window.prompt('Label (optional)?', 'Signature') || 'Signature';
+    error = null;
     editor
       ?.chain()
       .focus()

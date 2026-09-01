@@ -24,6 +24,11 @@ type CertSigner struct {
 	pub  ed25519.PublicKey
 }
 
+const (
+	auditCertificateDomain = "hash:audit-cert:v1:"
+	evidenceManifestDomain = "hash:evidence-manifest:v1:"
+)
+
 // NewCertSigner accepts a base64-encoded ed25519 private key (the seed,
 // 32 bytes, raw or base64). If the input is empty, NewCertSigner returns
 // (nil, nil) so callers can opt out of signing in dev environments.
@@ -109,17 +114,41 @@ func (s *CertSigner) SeedBase64() string {
 // the SHA-256 of the payload + a domain-separation prefix so an attacker
 // can't replay one signed thing as another.
 func (s *CertSigner) SignPayload(payload []byte) string {
+	return s.signDomain(auditCertificateDomain, payload)
+}
+
+// SignEvidenceManifest signs the canonical evidence-package manifest under a
+// separate domain, so a signature issued for a certificate cannot be replayed
+// as an export attestation (or vice versa).
+func (s *CertSigner) SignEvidenceManifest(payload []byte) string {
+	return s.signDomain(evidenceManifestDomain, payload)
+}
+
+func (s *CertSigner) signDomain(domain string, payload []byte) string {
 	if s == nil {
 		return ""
 	}
-	digest := sha256.Sum256(append([]byte("hash:audit-cert:v1:"), payload...))
-	sig := ed25519.Sign(s.priv, digest[:])
+	h := sha256.New()
+	_, _ = h.Write([]byte(domain))
+	_, _ = h.Write(payload)
+	sig := ed25519.Sign(s.priv, h.Sum(nil))
 	return base64.StdEncoding.EncodeToString(sig)
 }
 
 // Verify checks a signature produced by SignPayload. Standalone helper so
 // the marketing page + audit-trail viewer can both use the same code path.
 func Verify(pubB64, payload, sigB64 string) bool {
+	return verifyDomain(pubB64, []byte(payload), sigB64, auditCertificateDomain)
+}
+
+// VerifyEvidenceManifest verifies a signature produced by
+// SignEvidenceManifest. Callers must separately pin pubB64 to a trusted Hash
+// key; cryptographic self-consistency alone does not establish issuer trust.
+func VerifyEvidenceManifest(pubB64 string, payload []byte, sigB64 string) bool {
+	return verifyDomain(pubB64, payload, sigB64, evidenceManifestDomain)
+}
+
+func verifyDomain(pubB64 string, payload []byte, sigB64, domain string) bool {
 	pub, err := decodeKey(pubB64)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		return false
@@ -128,8 +157,10 @@ func Verify(pubB64, payload, sigB64 string) bool {
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return false
 	}
-	digest := sha256.Sum256(append([]byte("hash:audit-cert:v1:"), []byte(payload)...))
-	return ed25519.Verify(pub, digest[:], sig)
+	h := sha256.New()
+	_, _ = h.Write([]byte(domain))
+	_, _ = h.Write(payload)
+	return ed25519.Verify(pub, h.Sum(nil), sig)
 }
 
 // decodeKey accepts base64-std or base64-url, with or without padding.

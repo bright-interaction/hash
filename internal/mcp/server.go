@@ -18,12 +18,12 @@ import (
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/evidence"
-	"github.com/bright-interaction/hash/internal/qes"
 	"github.com/bright-interaction/hash/internal/render"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/bright-interaction/hash/internal/versions"
+	"github.com/bright-interaction/hash/internal/webhooksecret"
 )
 
 // Deps gathers the runtime dependencies the tool + resource handlers need.
@@ -46,14 +46,17 @@ type Deps struct {
 	Bilingual    *aiapps.Bilingual
 	RiskAnalyzer *aiapps.RiskAnalyzer
 	Compliance   *compliance.Seeder
-	QES          *qes.Engine
 	Billing      *billing.Engine
 	// Send is the document-lifecycle engine. The workflow write tools route
 	// send/void/remind through it so the magic-token TTL, variable freeze,
 	// eIDAS guard, and billing quota are enforced identically to the REST
 	// surface (they previously diverged with raw SQL that fooled the TTL).
-	Send      *send.Engine
-	PublicURL string
+	Send        *send.Engine
+	PublicURL   string
+	Environment string
+	// WebhookSecrets encrypts newly minted outbound webhook signing keys before
+	// create_webhook writes the endpoint row.
+	WebhookSecrets *webhooksecret.Keyring
 
 	// RenderEmail is an optional function that lets the workflow write
 	// tools fan out invite + reminder emails. The handler layer wires this

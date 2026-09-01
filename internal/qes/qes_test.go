@@ -92,6 +92,19 @@ func TestNoopProvider_RejectsEverything(t *testing.T) {
 	}
 }
 
+func TestEngineLifecycleAlwaysFailsClosedEvenWithMockProvider(t *testing.T) {
+	e := New(nil, MockProvider{}, "https://hash.example")
+	if _, err := e.StartSession(context.Background(), StartInput{}, uuid.New()); !errors.Is(err, ErrCeremonyUnavailable) {
+		t.Fatalf("StartSession error = %v, want ErrCeremonyUnavailable", err)
+	}
+	if _, _, err := e.CompleteCallback(context.Background(), "legacy-provider-session", nil, nil); !errors.Is(err, ErrCeremonyUnavailable) {
+		t.Fatalf("CompleteCallback error = %v, want ErrCeremonyUnavailable", err)
+	}
+	if _, err := e.MostRecentForRecipient(context.Background(), uuid.New()); !errors.Is(err, ErrCeremonyUnavailable) {
+		t.Fatalf("MostRecentForRecipient error = %v, want ErrCeremonyUnavailable", err)
+	}
+}
+
 func TestIduraProvider_CallbackHMACValidation(t *testing.T) {
 	p := &IduraProvider{}
 	body := []byte(`{"session_id":"abc","status":"completed","signature_b64":"sig","cert_chain_pem":"pem","signer_name":"Test","signer_serial":"x"}`)

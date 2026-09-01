@@ -9,9 +9,31 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestAuditCertificateUsesConfiguredIssuerAndInstanceVerifyURL(t *testing.T) {
+	raw, err := os.ReadFile("flow.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	for _, required := range []string{
+		"issuer := strings.TrimSpace(e.OrgName)",
+		"strings.TrimRight(strings.TrimSpace(e.BaseURL), \"/\") + \"/verify\"",
+		"htmlEscape(issuer)",
+		"htmlEscape(verifyURL)",
+	} {
+		if !strings.Contains(src, required) {
+			t.Errorf("certificate lacks configured self-host identity marker %q", required)
+		}
+	}
+	if strings.Contains(src, "Hash / Bright Interaction AB") || strings.Contains(src, "https://esign.brightinteraction.com/verify") {
+		t.Fatal("audit certificate hard-codes the vendor identity or verification host")
+	}
+}
 
 // PublicKeyPEM must be valid SPKI so a third party can verify the audit
 // certificate offline with standard tooling (OpenSSL, python-cryptography).
@@ -64,6 +86,25 @@ func TestCertSigner_RejectsDifferentKey(t *testing.T) {
 	sig := s1.SignPayload(payload)
 	if Verify(s2.PublicKeyBase64(), string(payload), sig) {
 		t.Error("different key verified")
+	}
+}
+
+func TestEvidenceManifestSignatureUsesSeparateDomain(t *testing.T) {
+	s, err := GenerateCertSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"schema_version":2}`)
+	sig := s.SignEvidenceManifest(payload)
+	if !VerifyEvidenceManifest(s.PublicKeyBase64(), payload, sig) {
+		t.Fatal("evidence manifest signature did not verify")
+	}
+	if Verify(s.PublicKeyBase64(), string(payload), sig) {
+		t.Fatal("evidence-manifest signature replayed under audit-certificate domain")
+	}
+	certSig := s.SignPayload(payload)
+	if VerifyEvidenceManifest(s.PublicKeyBase64(), payload, certSig) {
+		t.Fatal("audit-certificate signature replayed under evidence-manifest domain")
 	}
 }
 

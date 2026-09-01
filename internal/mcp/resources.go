@@ -104,6 +104,7 @@ func capabilitiesPayload(s *Server) map[string]any {
 			"tools":           tools,
 		},
 		"intentionally_not_exposed": []string{
+			"AES/QES ceremony start, callback, status, resume, or completion operations (this release is SES-only)",
 			"raw recipient magic-link tokens (only token hashes are stored anyway)",
 			"signer signature image bytes (presigned URLs only)",
 			"webhook signing secrets",

@@ -13,29 +13,47 @@ import (
 	sentry "github.com/getsentry/sentry-go"
 )
 
-// signTokenPath matches the signer magic token in the request path
-// (/sign/<token>/...) so it can be redacted before an event leaves the process.
-var signTokenPath = regexp.MustCompile(`(/sign/)[^/?#]+`)
+// credentialPathPatterns match credentials/high-cardinality authentication
+// handles carried in URL paths so they can be redacted before an event leaves
+// the process. Query strings are removed wholesale below.
+var credentialPathPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(/sign/)[^/?#]+`),
+	regexp.MustCompile(`(/e/o/)[^/?#]+`),
+	regexp.MustCompile(`(/webhooks/billing/)[^/?#]+`),
+	regexp.MustCompile(`(/qes/callback/)[^/?#]+`),
+}
 
-// scrubSensitive strips credentials that ride in the request line: the signer
-// magic token (/sign/<token>/...) and the one-click action token (?t=<token> on
-// /a/cr, /a/comment). sentry-go serialises URL path + query regardless of
-// SendDefaultPII, so without this a Flare viewer could lift a still-valid token
-// off a panic event and replay a signing link. Applied to every event via
-// BeforeSend so it covers panics and CaptureException alike.
+func redactCredentialPath(raw string) string {
+	for _, pattern := range credentialPathPatterns {
+		raw = pattern.ReplaceAllString(raw, "${1}[redacted]")
+	}
+	return raw
+}
+
+// scrubSensitive removes request material that must never leave Hash. The SDK
+// buffers up to 10 KiB of request bodies independently of SendDefaultPII; that
+// can contain contract text, comments, typed names, identity data, API-key
+// creation inputs, or webhook payloads. Non-sensitive headers can still carry
+// customer-specific metadata and forwarding IPs, so retain only the redacted
+// method/URL needed to diagnose a failing route. Applied to errors and traces.
 func scrubSensitive(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 	if event != nil && event.Request != nil {
 		event.Request.QueryString = ""
-		event.Request.URL = signTokenPath.ReplaceAllString(event.Request.URL, "${1}[redacted]")
+		event.Request.URL = redactCredentialPath(event.Request.URL)
+		event.Request.Data = ""
+		event.Request.Cookies = ""
+		event.Request.Headers = nil
+		event.Request.Env = nil
 	}
 	return event
 }
 
 // InitFlare wires error reporting to the house Flare instance (Sentry-wire
-// protocol) when FLARE_DSN is set in the environment. The DSN is injected by
-// the deploy pipeline's flare-provision step; without it this is a no-op so
-// dev runs and self-hosts boot unchanged.
-func InitFlare(service, release string) bool {
+// protocol) when FLARE_DSN is set in the environment. release and environment
+// identify the exact deployed artifact and tier in every event. The DSN is
+// injected by the deploy pipeline's flare-provision step; without it this is a
+// no-op so dev runs and self-hosts boot unchanged.
+func InitFlare(service, release, environment string) bool {
 	dsn := os.Getenv("FLARE_DSN")
 	if dsn == "" {
 		return false
@@ -43,6 +61,7 @@ func InitFlare(service, release string) bool {
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn:              dsn,
 		Release:          release,
+		Environment:      environment,
 		ServerName:       service,
 		EnableTracing:    true,
 		TracesSampleRate: tracesSampleRate(),
@@ -56,7 +75,7 @@ func InitFlare(service, release string) bool {
 		slog.Warn("flare: error reporting disabled (sentry init failed)", "error", err)
 		return false
 	}
-	slog.Info("flare: error reporting enabled", "service", service)
+	slog.Info("flare: error reporting enabled", "service", service, "release", release, "environment", environment)
 	startHeartbeat(service)
 	installLogShipper(service)
 	return true
@@ -89,4 +108,27 @@ func CaptureErr(err error) {
 		return
 	}
 	sentry.CaptureException(err)
+}
+
+// CaptureWorkerFatal emits a deliberately data-free fatal signal and waits for
+// the Sentry transport before a worker supervisor terminates the process. The
+// native slog shipper is asynchronous, so a log followed by os.Exit cannot be
+// relied on to leave the process. Never accept the recovered panic value here:
+// panic payloads can contain contract data or credentials.
+func CaptureWorkerFatal(loop string, panicked bool) {
+	failure := "unexpected_return"
+	if panicked {
+		failure = "panic"
+	}
+	hub := sentry.CurrentHub().Clone()
+	hub.WithScope(func(scope *sentry.Scope) {
+		scope.SetLevel(sentry.LevelFatal)
+		scope.SetTag("worker_loop", loop)
+		scope.SetTag("worker_failure", failure)
+		scope.SetFingerprint([]string{"hash-worker-fatal", loop, failure})
+		hub.CaptureMessage("critical Hash worker loop stopped")
+	})
+	// No configured client returns immediately. A configured asynchronous
+	// transport gets a bounded chance to deliver before os.Exit skips defers.
+	hub.Flush(2 * time.Second)
 }

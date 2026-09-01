@@ -62,6 +62,29 @@ func TestHTTPSource_HappyPath(t *testing.T) {
 	}
 }
 
+func TestHTTPSource_RejectsPathAndQueryInjectionBeforeSendingBearerToken(t *testing.T) {
+	for _, sourceRef := range []string{
+		"../admin",
+		"deal_1?include=secrets",
+		"deal_1#fragment",
+		"deal_1%2fadmin",
+		"deal_1\\admin",
+		strings.Repeat("a", 257),
+	} {
+		t.Run(sourceRef, func(t *testing.T) {
+			doer := &fakeDoer{resp: mkResp(200, `{}`)}
+			src := NewCRMDealSource("https://crm.test", "tok-abc")
+			src.Client = doer
+			if _, err := src.Fetch(context.Background(), Ref{Source: sourceRef}); err == nil {
+				t.Fatalf("unsafe source_ref %q was accepted", sourceRef)
+			}
+			if doer.last != nil {
+				t.Fatalf("request was sent for unsafe source_ref %q", sourceRef)
+			}
+		})
+	}
+}
+
 func TestHTTPSource_404IsErrNotFound(t *testing.T) {
 	doer := &fakeDoer{resp: mkResp(404, `{}`)}
 	src := NewCRMContactSource("https://crm.test", "tok")

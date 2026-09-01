@@ -25,6 +25,7 @@ func registerAIAppsTools(s *Server, d Deps) {
 	if d.Clarifier != nil {
 		s.RegisterTool(ToolDef{
 			Name:        "clarify_clause",
+			Write:       true,
 			Description: "Return a plain-language explanation of a clause for a signer. Grounded in the supplied clause text + surrounding context + legal references; locale shapes the response language (sv-SE default). Shield-tokenizes PII before crossing to the model.",
 			InputSchema: schemaObject(map[string]any{
 				"document_id":         stringSchema("document uuid"),
@@ -200,29 +201,35 @@ func registerAIAppsTools(s *Server, d Deps) {
 					}
 					parent = pgtype.UUID{Bytes: pid, Valid: true}
 				}
-				row, err := d.Queries.InsertProposal(r.Context(), generated.InsertProposalParams{
-					DocumentID:   doc.ID,
-					OrgID:        u.OrgID,
-					ProposedBy:   pgtype.UUID{Bytes: u.UserID, Valid: true},
-					BlockID:      p.BlockID,
-					ProposalKind: p.ProposalKind,
-					ProposedText: p.ProposedText,
-					Rationale:    p.Rationale,
-					DiffJson:     []byte("{}"),
-					AiAssisted:   p.AIAssisted,
-					ParentID:     parent,
-				})
+				row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
+					func(q *generated.Queries) (*generated.DocumentProposal, error) {
+						return q.InsertProposal(r.Context(), generated.InsertProposalParams{
+							DocumentID:   doc.ID,
+							OrgID:        u.OrgID,
+							ProposedBy:   pgtype.UUID{Bytes: u.UserID, Valid: true},
+							BlockID:      p.BlockID,
+							ProposalKind: p.ProposalKind,
+							ProposedText: p.ProposedText,
+							Rationale:    p.Rationale,
+							DiffJson:     []byte("{}"),
+							AiAssisted:   p.AIAssisted,
+							ParentID:     parent,
+						})
+					},
+					func(row *generated.DocumentProposal) audit.Entry {
+						return audit.Entry{
+							OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
+							Kind: "negotiation.proposed",
+							Payload: map[string]any{
+								"via": "mcp", "tool": "propose_counter_clause",
+								"proposal_id": row.ID.String(), "block_id": p.BlockID, "kind": p.ProposalKind, "ai_assisted": p.AIAssisted,
+							},
+						}
+					},
+				)
 				if err != nil {
 					return nil, err
 				}
-				_, _ = d.Audit.Log(r.Context(), audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &doc.ID,
-					Kind: "negotiation.proposed",
-					Payload: map[string]any{
-						"via": "mcp", "tool": "propose_counter_clause",
-						"proposal_id": row.ID.String(), "block_id": p.BlockID, "kind": p.ProposalKind, "ai_assisted": p.AIAssisted,
-					},
-				})
 				return proposalRow(row), nil
 			},
 		})
@@ -265,17 +272,23 @@ func registerAIAppsTools(s *Server, d Deps) {
 				default:
 					return nil, errors.New("status must be pending | accepted | rejected | superseded")
 				}
-				row, err := d.Queries.SetProposalStatus(r.Context(), generated.SetProposalStatusParams{
-					ID: id, OrgID: u.OrgID, Status: p.Status,
-				})
+				row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
+					func(q *generated.Queries) (*generated.DocumentProposal, error) {
+						return q.SetProposalStatus(r.Context(), generated.SetProposalStatusParams{
+							ID: id, OrgID: u.OrgID, Status: p.Status,
+						})
+					},
+					func(row *generated.DocumentProposal) audit.Entry {
+						return audit.Entry{
+							OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &row.DocumentID,
+							Kind:    "negotiation.status_changed",
+							Payload: map[string]any{"via": "mcp", "proposal_id": id.String(), "status": p.Status},
+						}
+					},
+				)
 				if err != nil {
 					return nil, err
 				}
-				_, _ = d.Audit.Log(r.Context(), audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &row.DocumentID,
-					Kind:    "negotiation.status_changed",
-					Payload: map[string]any{"via": "mcp", "proposal_id": id.String(), "status": p.Status},
-				})
 				return proposalRow(row), nil
 			},
 		})
@@ -325,6 +338,7 @@ func registerAIAppsTools(s *Server, d Deps) {
 	if d.RiskAnalyzer != nil {
 		s.RegisterTool(ToolDef{
 			Name:        "run_risk_analysis",
+			Write:       true,
 			Description: "Read the document's draft block tree and return a deterministic list of findings flagging elevated-risk clauses (liability, IP, auto_renewal, jurisdiction, payment_terms, termination, indemnification, confidentiality, data_protection, warranty). Each finding has block_id, category, severity (low|medium|high), summary, suggestion. Use this before sending high-value contracts to surface risks the sender may have missed.",
 			InputSchema: schemaObject(map[string]any{
 				"document_id":    stringSchema("document uuid"),
@@ -385,6 +399,7 @@ func registerAIAppsTools(s *Server, d Deps) {
 	if d.Bilingual != nil {
 		s.RegisterTool(ToolDef{
 			Name:        "check_bilingual_equivalence",
+			Write:       true,
 			Description: "Compare two clauses in different languages and return {equivalent, drift, confidence}. Use this to verify a translation hasn't dropped or weakened obligations across languages.",
 			InputSchema: schemaObject(map[string]any{
 				"document_id": stringSchema("document uuid"),

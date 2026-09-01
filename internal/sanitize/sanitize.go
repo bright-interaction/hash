@@ -32,6 +32,7 @@ import (
 	"image/png"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 
 	pdfapi "github.com/pdfcpu/pdfcpu/pkg/api"
@@ -58,6 +59,15 @@ type Result struct {
 	Bytes  []byte
 	Report Report
 }
+
+// ErrActivePDFContent marks a PDF containing an action or active-content
+// facility. Hash deliberately rejects these uploads instead of trying to
+// preserve a partially functional document: actions can be reachable through
+// the catalog, name trees, page/field additional-actions dictionaries, or an
+// otherwise innocuous-looking indirect object. A single missed reference is
+// enough to re-enable JavaScript, launch, network, or rich-media behaviour in a
+// viewer.
+var ErrActivePDFContent = errors.New("sanitize: PDF contains active content")
 
 // Clean dispatches by content type. Unknown content types pass through
 // unchanged with Method="passthrough" + UnsupportedT=true so callers can
@@ -144,6 +154,16 @@ func cleanPDF(asset, ct string, raw []byte) (Result, error) {
 	// requires resetting the reader, so we do those as a second pass.
 	stripped = append(stripped, secondPassStrip(cleaned, &out)...)
 
+	// Defence in depth: assert that no active construct survived or was
+	// introduced by a rewrite pass. Never return bytes we have not checked.
+	active, err := activePDFFeatures(out.Bytes())
+	if err != nil {
+		return Result{}, fmt.Errorf("verify sanitized PDF active content: %w", err)
+	}
+	if len(active) > 0 {
+		return Result{}, fmt.Errorf("%w after rewrite: %s", ErrActivePDFContent, strings.Join(active, ", "))
+	}
+
 	return Result{
 		Bytes: out.Bytes(),
 		Report: Report{
@@ -155,6 +175,105 @@ func cleanPDF(asset, ct string, raw []byte) (Result, error) {
 			BytesAfter:  int64(out.Len()),
 		},
 	}, nil
+}
+
+// activePDFFeatures returns a stable list of active constructs found anywhere
+// in the parsed PDF object graph. ReadContext materializes every xref entry,
+// including objects stored in object streams, so scanning the table also finds
+// action dictionaries that are reached indirectly or deliberately left
+// outside the normal page tree.
+func activePDFFeatures(raw []byte) ([]string, error) {
+	conf := model.NewDefaultConfiguration()
+	conf.ValidationMode = model.ValidationRelaxed
+	ctx, err := pdfapi.ReadContext(bytes.NewReader(raw), conf)
+	if err != nil {
+		return nil, err
+	}
+
+	found := map[string]struct{}{}
+	for _, entry := range ctx.XRefTable.Table {
+		if entry == nil || entry.Free || entry.Object == nil {
+			continue
+		}
+		collectActivePDFFeatures(entry.Object, found)
+	}
+
+	out := make([]string, 0, len(found))
+	for feature := range found {
+		out = append(out, feature)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// PDF action subtype names from ISO 32000. Hash does not need interactive PDF
+// actions in uploaded agreements; rejecting all of them also avoids treating a
+// nominally benign GoTo action as safe when it is chained via /Next to a launch
+// or JavaScript action.
+var pdfActionSubtypes = map[string]struct{}{
+	"GoTo": {}, "GoToR": {}, "GoToE": {}, "Launch": {}, "Thread": {},
+	"URI": {}, "Sound": {}, "Movie": {}, "Hide": {}, "Named": {},
+	"SubmitForm": {}, "ResetForm": {}, "ImportData": {}, "JavaScript": {},
+	"SetOCGState": {}, "Rendition": {}, "Trans": {}, "GoTo3DView": {},
+}
+
+func collectActivePDFFeatures(obj pdftypes.Object, found map[string]struct{}) {
+	switch v := obj.(type) {
+	case pdftypes.Dict:
+		collectActivePDFDict(v, found)
+	case pdftypes.Array:
+		for _, item := range v {
+			if item != nil {
+				collectActivePDFFeatures(item, found)
+			}
+		}
+	case pdftypes.StreamDict:
+		collectActivePDFDict(v.Dict, found)
+	case *pdftypes.StreamDict:
+		if v != nil {
+			collectActivePDFDict(v.Dict, found)
+		}
+	case pdftypes.ObjectStreamDict:
+		collectActivePDFDict(v.Dict, found)
+	case *pdftypes.ObjectStreamDict:
+		if v != nil {
+			collectActivePDFDict(v.Dict, found)
+		}
+	case pdftypes.XRefStreamDict:
+		collectActivePDFDict(v.Dict, found)
+	case *pdftypes.XRefStreamDict:
+		if v != nil {
+			collectActivePDFDict(v.Dict, found)
+		}
+	}
+}
+
+func collectActivePDFDict(d pdftypes.Dict, found map[string]struct{}) {
+	// These keys are triggers or active-content roots regardless of where the
+	// value lives (inline dictionary, stream, array, or indirect reference).
+	for _, key := range []string{
+		"OpenAction", "AA", "JavaScript", "JS", "XFA", "RichMedia",
+		"RichMediaContent", "RichMediaSettings", "3D", "3DD",
+	} {
+		if _, ok := d[key]; ok {
+			found["/"+key] = struct{}{}
+		}
+	}
+
+	if subtype := d.NameEntry("S"); subtype != nil {
+		if _, ok := pdfActionSubtypes[*subtype]; ok {
+			found["action:/"+*subtype] = struct{}{}
+		}
+	}
+	if typ := d.NameEntry("Type"); typ != nil && (*typ == "Action" || *typ == "A") {
+		found["/Type /"+*typ] = struct{}{}
+	}
+
+	for _, value := range d {
+		if value != nil {
+			collectActivePDFFeatures(value, found)
+		}
+	}
 }
 
 // secondPassStrip runs pdfcpu commands that target specific subtrees and

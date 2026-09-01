@@ -1,15 +1,16 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { CheckCircle2, FileSignature, ShieldCheck, X } from 'lucide-svelte';
-  import { startTelemetry } from '$lib/telemetry';
   import SignerFields from '$lib/components/SignerFields.svelte';
   import PdfSignerView from '$lib/components/PdfSignerView.svelte';
   import A13Notice from '$lib/components/A13Notice.svelte';
-  import { t, locale, setLocale, initLocale, preferLocale, LOCALES, type Locale } from '$lib/i18n';
+  import { signerNoticeHeaders } from '$lib/api/signerNotice';
+  import { t, setLocale } from '$lib/i18n';
 
   type Privacy = {
     controller: string;
+    controller_contact: string;
     processor: string;
     processor_email: string;
     purpose_summary: string;
@@ -18,6 +19,36 @@
     jurisdiction_dp: string;
     policy_url: string;
     dsr_endpoint: string;
+    notice_digest: string;
+    copy: {
+      title: string;
+      intro: string;
+      controller_label: string;
+      controller_contact_label: string;
+      processor_label: string;
+      purpose_label: string;
+      legal_basis_label: string;
+      retention_label: string;
+      retention_value: string;
+      authority_label: string;
+      rights_summary: string;
+      rights_body: string;
+      submit_request_label: string;
+      kind_label: string;
+      dsr_access_label: string;
+      dsr_rectification_label: string;
+      dsr_erasure_label: string;
+      dsr_restriction_label: string;
+      dsr_portability_label: string;
+      dsr_objection_label: string;
+      note_label: string;
+      note_placeholder: string;
+      send_request_label: string;
+      request_received: string;
+      read_policy_label: string;
+      acknowledgement_label: string;
+      fine_print: string;
+    };
   };
 
   type Ctx = {
@@ -27,11 +58,32 @@
     source_kind: string;
     requires_signature: boolean;
     routing_tier?: string;
-    qes_provider?: string;
     recipient: { id: string; email: string; name: string; role: string; status: string; locale: string };
     fonts: string[];
     privacy: Privacy;
   };
+
+  // Acknowledgement state must never turn the bearer magic-link token into a
+  // persistent browser credential. Document + recipient IDs are opaque,
+  // non-secret identifiers; the version forces a fresh acknowledgement when
+  // the notice contract changes.
+  const A13_NOTICE_VERSION = 'v3';
+
+  function a13AcknowledgementKey(context: Ctx): string {
+    return `hash_signer_a13:${A13_NOTICE_VERSION}:${context.document_id}:${context.recipient.id}:${context.privacy.notice_digest}`;
+  }
+
+  function clearLegacyA13Acknowledgement(token: string) {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        // Delete, but never migrate or retain, the legacy key whose suffix was
+        // the raw bearer token.
+        localStorage.removeItem(`hash_signer_a13:${token}`);
+      }
+    } catch {
+      // Storage failures keep the notice fail-closed and visible.
+    }
+  }
 
   let ctx = $state<Ctx | null>(null);
   let loadError = $state<string | null>(null);
@@ -45,10 +97,12 @@
   let completed = $state<{ url: string | null } | null>(null);
   let accepted = $state(false);
   let accepting = $state(false);
+  let noticeAcknowledged = $state(false);
 
   let showDeclineModal = $state(false);
   let declineReason = $state('');
   let declined = $state(false);
+  let declining = $state(false);
 
   let showChangesModal = $state(false);
   let changesMessage = $state('');
@@ -72,30 +126,43 @@
   let commentBody = $state('');
   let postingComment = $state(false);
 
-  async function loadComments() {
+  async function loadComments(token = $page.params.token, signal?: AbortSignal) {
+    if (!token) return;
     try {
-      const res = await fetch(`/sign/${$page.params.token}/comments`);
-      if (res.ok) comments = (await res.json()).comments ?? [];
+      const res = await fetch(`/sign/${token}/comments`, { signal });
+      const body = res.ok ? await res.json() : null;
+      if (res.ok && !signal?.aborted && token === $page.params.token) {
+        comments = body?.comments ?? [];
+      }
     } catch {
       /* best effort */
     }
   }
 
   async function sendComment() {
-    if (!commentBody.trim()) return;
+    if (!ctx || !commentBody.trim()) return;
+    const token = $page.params.token;
+    const recipientID = ctx.recipient.id;
+    const noticeDigest = ctx.privacy.notice_digest;
+    if (!token) return;
     postingComment = true;
     try {
-      const res = await fetch(`/sign/${$page.params.token}/comments`, {
+      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      const res = await fetch(`/sign/${token}/comments`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({ body: commentBody.trim() })
       });
-      if (res.ok) {
+      if (res.ok && token === $page.params.token && recipientID === ctx?.recipient.id) {
         commentBody = '';
-        await loadComments();
+        await loadComments(token);
+      }
+    } catch (e) {
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+        signError = (e as Error).message;
       }
     } finally {
-      postingComment = false;
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) postingComment = false;
     }
   }
 
@@ -125,10 +192,16 @@
       annoError = $t('changes.placeholder');
       return;
     }
+    if (!ctx) return;
+    const token = $page.params.token;
+    const recipientID = ctx.recipient.id;
+    const noticeDigest = ctx.privacy.notice_digest;
+    if (!token) return;
     try {
-      const res = await fetch(`/sign/${$page.params.token}/request-changes`, {
+      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      const res = await fetch(`/sign/${token}/request-changes`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({
           message: annoComment,
           block_id: annoBlockId,
@@ -137,15 +210,22 @@
           proposed: annoProposed
         })
       });
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
       if (!res.ok) {
-        annoError = await res.text();
+        const message = await res.text();
+        if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+          annoError = message;
+        }
         return;
       }
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
       annoCount += 1;
       showAnno = false;
       window.getSelection()?.removeAllRanges();
     } catch (e) {
-      annoError = (e as Error).message;
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+        annoError = (e as Error).message;
+      }
     }
   }
 
@@ -158,36 +238,75 @@
     if (ctx?.recipient.name) typedName = ctx.recipient.name;
   });
 
-  async function load() {
-    const token = $page.params.token;
+  function resetRouteState() {
+    ctx = null;
+    loadError = null;
+    documentHTML = '';
+    typedName = '';
+    chosenFont = 'Caveat';
+    showAdoptModal = false;
+    signing = false;
+    signError = null;
+    completed = null;
+    accepted = false;
+    accepting = false;
+    noticeAcknowledged = false;
+    showDeclineModal = false;
+    declineReason = '';
+    declined = false;
+    declining = false;
+    showChangesModal = false;
+    changesMessage = '';
+    changesRequested = false;
+    showAnno = false;
+    annoQuote = '';
+    annoContext = '';
+    annoBlockId = '';
+    annoComment = '';
+    annoProposed = '';
+    annoCount = 0;
+    annoError = null;
+    comments = [];
+    commentBody = '';
+    postingComment = false;
+    fieldsFilled = true;
+  }
+
+  async function load(token: string, signal: AbortSignal) {
     try {
-      const res = await fetch(`/sign/${token}`);
+      const res = await fetch(`/sign/${token}`, { signal });
+      if (signal.aborted) return;
       if (!res.ok) {
         loadError = 'This link is invalid or has expired.';
         return;
       }
-      ctx = await res.json();
+      const loaded = await res.json() as Ctx;
+      if (signal.aborted || token !== $page.params.token) return;
+	  if (!loaded.privacy?.notice_digest) {
+		loadError = 'The required privacy notice is unavailable.';
+		return;
+	  }
+      ctx = loaded;
 
-      // Single-locale ceremony: render the whole signer experience (chrome,
-      // the Article 13 notice, buttons) in the language the sender chose for
-      // this recipient, so it can never mix with the browser language. The
-      // server already emits the notice + document + emails in this locale;
-      // preferLocale aligns the SPA store unless the visitor has manually
-      // picked their own language (their toggle still wins on return).
-      if (ctx?.recipient?.locale) preferLocale(ctx.recipient.locale, { force: true });
+	  // Legal translations have not all received counsel review. Keep the
+	  // complete signer ceremony in English until an approved catalog ships;
+	  // mixing translated chrome with English legal text is misleading.
+	  setLocale('en');
 
-      // Reflect what this recipient has already done so a return visit (after
-      // BankID/QES, or just reopening the link) never re-shows the signing
-      // form. Download is offered once the whole document is completed; a
-      // signer who signed while others are still pending sees the recorded
-      // state without a premature download.
-      const rs = ctx?.recipient.status;
-      const docDone = ctx?.status === 'completed';
+      // Reflect what this recipient has already done without fabricating a
+      // download credential. Completion invalidates the magic-link token, so
+      // only the fresh final_pdf_url returned by the terminal sign/accept call
+      // may expose the artifact. A signer who completed while others remain
+      // pending sees the recorded state without a premature download.
+      const rs = loaded.recipient.status;
+      const docDone = loaded.status === 'completed';
       if (rs === 'declined') {
         declined = true;
+	  } else if (rs === 'accepted' && !docDone) {
+		accepted = true;
       } else if (rs === 'signed' || docDone) {
-        completed = { url: docDone ? `/sign/${token}/final-pdf` : null };
-      } else if (ctx?.status === 'changes_requested') {
+        completed = { url: null };
+      } else if (loaded.status === 'changes_requested') {
         // A change request paused signing; show the pending state on return.
         changesRequested = true;
       }
@@ -195,47 +314,39 @@
       // Block-source documents render server-side HTML; pdf-source documents
       // render via pdf.js in PdfSignerView, so skip the HTML endpoint (it
       // refuses pdf-source).
-      if (ctx?.source_kind === 'blocks') {
-        const docRes = await fetch(`/sign/${token}/document`);
+      if (loaded.source_kind === 'blocks') {
+        const docRes = await fetch(`/sign/${token}/document`, { signal });
         if (docRes.ok) {
-          documentHTML = await docRes.text();
+          const html = await docRes.text();
+          if (!signal.aborted && token === $page.params.token) documentHTML = html;
         }
       }
-      // Best-effort view ping (idempotent server-side).
-      void fetch(`/sign/${token}/view`, { method: 'POST' });
-      void loadComments();
+      if (signal.aborted || token !== $page.params.token) return;
+      void loadComments(token, signal);
     } catch (e) {
-      loadError = (e as Error).message;
+      if (!signal.aborted && token === $page.params.token) loadError = (e as Error).message;
     }
   }
 
-  let stopTelemetry: (() => void) | null = null;
-
   onMount(() => {
-    initLocale();
+	setLocale('en');
+  });
+
+  // SvelteKit keeps this page component alive when only [token] changes.
+  // Scope every load to that token and tear down all recipient-specific UI
+  // state first, otherwise a late response can put the previous recipient's
+  // completion credential or Article 13 state onto the next ceremony.
+  $effect(() => {
     const token = $page.params.token;
+    resetRouteState();
     if (!token) {
       loadError = 'Missing sign token';
       return;
     }
-    load();
-    // Telemetry is gated on Article 13 consent; A13Notice fires
-    // onAcknowledged below when the signer picks "continue with
-    // analytics", which calls handleConsent(true).
-  });
-
-  function handleConsent(telemetry: boolean) {
-    const token = $page.params.token;
-    if (!telemetry || !token) return;
-    try {
-      stopTelemetry = startTelemetry(token);
-    } catch {
-      stopTelemetry = null;
-    }
-  }
-
-  onDestroy(() => {
-    stopTelemetry?.();
+    clearLegacyA13Acknowledgement(token);
+    const controller = new AbortController();
+    void load(token, controller.signal);
+    return () => controller.abort();
   });
 
   async function adopt() {
@@ -247,78 +358,143 @@
     showAdoptModal = true;
   }
 
+  function acknowledgeCurrentNotice() {
+    if (!ctx) return;
+    const token = $page.params.token;
+    const recipientID = ctx.recipient.id;
+    const noticeDigest = ctx.privacy.notice_digest;
+    if (!token) return;
+    noticeAcknowledged = true;
+    // The first evidence-producing interaction now happens only after the
+    // current notice was acknowledged. Repeats are idempotent server-side.
+    void fetch(`/sign/${token}/view`, {
+      method: 'POST',
+      headers: signerNoticeHeaders(noticeDigest),
+    }).then(() => {
+      // Do not let a late response touch state for a different magic link.
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
+    }).catch(() => {});
+  }
+
   async function confirmSign() {
     if (!ctx) return;
+    const token = $page.params.token;
+    const recipientID = ctx.recipient.id;
+    const noticeDigest = ctx.privacy.notice_digest;
+    if (!token) return;
     signing = true;
     signError = null;
     try {
-      const res = await fetch(`/sign/${$page.params.token}/sign`, {
+      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      const res = await fetch(`/sign/${token}/sign`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({ typed_name: typedName, font: chosenFont })
       });
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
       if (!res.ok) {
-        signError = await res.text();
+        const message = await res.text();
+        if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+          signError = message;
+        }
         return;
       }
       const body = await res.json();
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
       if (body.completed) {
-        // Prefer the stable signer route over the ephemeral presigned URL so
-        // the link keeps working if the signer reloads or returns later.
-        completed = { url: `/sign/${$page.params.token}/final-pdf` };
+        completed = {
+          url: typeof body.final_pdf_url === 'string' && body.final_pdf_url
+            ? body.final_pdf_url
+            : null
+        };
       } else {
         // Other signers still pending.
         completed = { url: null };
       }
       showAdoptModal = false;
     } catch (e) {
-      signError = (e as Error).message;
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+        signError = (e as Error).message;
+      }
     } finally {
-      signing = false;
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) signing = false;
     }
   }
 
   async function decline() {
+    signError = null;
     showDeclineModal = true;
   }
 
   async function accept() {
+    if (!ctx) return;
+    const token = $page.params.token;
+    const recipientID = ctx.recipient.id;
+    const noticeDigest = ctx.privacy.notice_digest;
+    if (!token) return;
     accepting = true;
     signError = null;
     try {
-      const res = await fetch(`/sign/${$page.params.token}/accept`, {
+      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      const res = await fetch(`/sign/${token}/accept`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
+        headers: signerNoticeHeaders(noticeDigest, true),
+        body: JSON.stringify({})
       });
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error ?? 'Could not accept the document');
       }
       const data = await res.json();
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
       if (data.completed) {
-        completed = { url: data.final_pdf_url ?? null };
+        completed = {
+          url: typeof data.final_pdf_url === 'string' && data.final_pdf_url
+            ? data.final_pdf_url
+            : null
+        };
       } else {
         accepted = true;
       }
     } catch (e) {
-      signError = (e as Error).message;
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+        signError = (e as Error).message;
+      }
     } finally {
-      accepting = false;
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) accepting = false;
     }
   }
 
   async function confirmDecline() {
     if (!ctx) return;
+    const token = $page.params.token;
+    const recipientID = ctx.recipient.id;
+    const noticeDigest = ctx.privacy.notice_digest;
+    if (!token) return;
+    declining = true;
+    signError = null;
     try {
-      await fetch(`/sign/${$page.params.token}/decline`, {
+      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      const res = await fetch(`/sign/${token}/decline`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({ reason: declineReason })
       });
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
+        throw new Error(data.error ?? `Could not decline the document (${res.status})`);
+      }
       declined = true;
       showDeclineModal = false;
     } catch (e) {
-      signError = (e as Error).message;
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+        signError = (e as Error).message;
+      }
+    } finally {
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) declining = false;
     }
   }
 
@@ -332,20 +508,32 @@
       signError = $t('changes.placeholder');
       return;
     }
+    const token = $page.params.token;
+    const recipientID = ctx.recipient.id;
+    const noticeDigest = ctx.privacy.notice_digest;
+    if (!token) return;
     try {
-      const res = await fetch(`/sign/${$page.params.token}/request-changes`, {
+      if (!noticeAcknowledged) throw new Error('Acknowledge the current privacy notice before continuing.');
+      const res = await fetch(`/sign/${token}/request-changes`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: signerNoticeHeaders(noticeDigest, true),
         body: JSON.stringify({ message: changesMessage })
       });
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
       if (!res.ok) {
-        signError = await res.text();
+        const message = await res.text();
+        if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+          signError = message;
+        }
         return;
       }
+      if (token !== $page.params.token || recipientID !== ctx?.recipient.id) return;
       changesRequested = true;
       showChangesModal = false;
     } catch (e) {
-      signError = (e as Error).message;
+      if (token === $page.params.token && recipientID === ctx?.recipient.id) {
+        signError = (e as Error).message;
+      }
     }
   }
 
@@ -353,32 +541,6 @@
     return `'${name}', cursive`;
   }
 
-  let qesStarting = $state(false);
-  let qesError = $state<string | null>(null);
-
-  async function startQES() {
-    if (!ctx) return;
-    qesError = null;
-    qesStarting = true;
-    try {
-      const res = await fetch(`/sign/${$page.params.token}/qes/start`, {
-        method: 'POST'
-      });
-      if (!res.ok) {
-        qesError = await res.text();
-        return;
-      }
-      const body = await res.json() as { redirect_url: string; provider: string };
-      // Send the signer's browser to the QTSP hosted UI. For the 'mock'
-      // provider this redirects right back to /qes/callback/{session_id}?mock=1
-      // so the flow completes without a real BankID round trip.
-      window.location.href = body.redirect_url;
-    } catch (e) {
-      qesError = (e as Error).message;
-    } finally {
-      qesStarting = false;
-    }
-  }
 </script>
 
 <svelte:head>
@@ -386,12 +548,13 @@
 </svelte:head>
 
 {#if ctx?.privacy}
-  <A13Notice
-    privacy={ctx.privacy}
-    documentName={ctx.document_name}
-    storageKey={`hash_signer_a13:${$page.params.token}`}
-    onAcknowledged={handleConsent}
-  />
+  {#key $page.params.token}
+    <A13Notice
+      privacy={ctx.privacy}
+      storageKey={a13AcknowledgementKey(ctx)}
+	  onAcknowledged={acknowledgeCurrentNotice}
+    />
+  {/key}
 {/if}
 
 <div class="signer-page">
@@ -408,16 +571,7 @@
           <span>{$t('sign.for', { name: ctx.recipient.name, role: ctx.recipient.role })}</span>
         </div>
       {/if}
-      <select
-        class="lang-select"
-        aria-label="Language"
-        value={$locale}
-        onchange={(e) => setLocale((e.currentTarget as HTMLSelectElement).value as Locale)}
-      >
-        {#each LOCALES as l (l.code)}
-          <option value={l.code}>{l.name}</option>
-        {/each}
-      </select>
+	  <span class="ceremony-language">English legal/signing experience</span>
     </div>
   </header>
 
@@ -434,14 +588,14 @@
   {:else if completed}
     <div class="state-card">
       <CheckCircle2 class="size-10 text-success mb-3 mx-auto" />
-      <h2>{$t('sign.signed.title')}</h2>
+	  <h2>{ctx.requires_signature ? $t('sign.signed.title') : $t('sign.accepted.completedTitle')}</h2>
       {#if completed.url}
-        <p>{$t('sign.signed.allParties')}</p>
+		<p>{ctx.requires_signature ? $t('sign.signed.allParties') : $t('sign.accepted.completedAllParties')}</p>
         <a class="btn btn-primary" href={completed.url} download>
-          {$t('sign.signed.download')}
+		  {ctx.requires_signature ? $t('sign.signed.download') : $t('sign.accepted.download')}
         </a>
       {:else}
-        <p>{$t('sign.signed.recorded')}</p>
+		<p>{ctx.requires_signature ? $t('sign.signed.recorded') : $t('sign.accepted.completedRecorded')}</p>
       {/if}
     </div>
   {:else if accepted}
@@ -462,6 +616,7 @@
         {#if ctx.source_kind === 'pdf'}
           <PdfSignerView
             token={$page.params.token ?? ''}
+            noticeDigest={ctx.privacy.notice_digest}
             signed={!!completed}
             onFilledChange={(v) => (fieldsFilled = v)}
             onSignatureClick={adopt}
@@ -475,29 +630,27 @@
       </article>
 
       <aside class="signer-actions">
-        {#if !ctx.requires_signature}
+        {#if ctx.routing_tier === 'AES' || ctx.routing_tier === 'QES'}
+          <h3 class="section-eyebrow">{$t('sign.tierUnavailable.title')}</h3>
+          <p class="text-xs text-text-muted mb-3">
+            {$t('sign.tierUnavailable.body', { tier: ctx.routing_tier })}
+          </p>
+          <button class="btn btn-secondary w-full" onclick={decline}>{$t('common.decline')}</button>
+          <button class="btn btn-secondary w-full" onclick={requestChanges}>{$t('common.requestChanges')}</button>
+        {:else if !ctx.requires_signature}
           <h3 class="section-eyebrow">{$t('sign.accept.title')}</h3>
           <p class="text-xs text-text-muted mb-3">{$t('sign.accept.body')}</p>
           <button class="btn btn-primary w-full" disabled={accepting} onclick={accept}>
             <CheckCircle2 class="size-4" /> {accepting ? $t('common.loading') : $t('sign.accept.button')}
           </button>
           <button class="btn btn-secondary w-full" onclick={decline}>{$t('common.decline')}</button>
-        {:else if ctx.routing_tier === 'QES'}
-          <h3 class="section-eyebrow">{$t('sign.qes.title')}</h3>
-          <p class="text-xs text-text-muted mb-3">
-            {$t('sign.qes.body', { provider: ctx.qes_provider ?? 'Hash QES' })}
-          </p>
-          <button class="btn btn-primary w-full" disabled={qesStarting} onclick={startQES}>
-            <ShieldCheck class="size-4" /> {$t('sign.qes.button')}
-          </button>
-          {#if qesError}
-            <p class="text-danger text-xs mt-2">{qesError}</p>
-          {/if}
-          <button class="btn btn-secondary w-full" onclick={decline}>{$t('common.decline')}</button>
-          <button class="btn btn-secondary w-full" onclick={requestChanges}>{$t('common.requestChanges')}</button>
         {:else}
         {#if ctx.source_kind !== 'pdf'}
-          <SignerFields token={$page.params.token ?? ''} onChange={(v) => (fieldsFilled = v)} />
+          <SignerFields
+            token={$page.params.token ?? ''}
+            noticeDigest={ctx.privacy.notice_digest}
+            onChange={(v) => (fieldsFilled = v)}
+          />
         {:else}
           <p class="text-xs text-text-muted mb-3">{$t('sign.pdf.fillHint')}</p>
         {/if}
@@ -533,7 +686,7 @@
 
         <p class="legal-note">
           <ShieldCheck class="size-3 inline" />
-          {$t('sign.legalNote')}
+		  {ctx.requires_signature ? $t('sign.legalNote') : $t('sign.accept.legalNote')}
         </p>
         {#if signError}
           <p class="error">{signError}</p>
@@ -614,8 +767,13 @@
       ></textarea>
       <div class="modal-actions">
         <button class="btn btn-secondary" onclick={() => (showDeclineModal = false)}>{$t('common.cancel')}</button>
-        <button class="btn btn-primary" onclick={confirmDecline}>{$t('decline.confirm')}</button>
+        <button class="btn btn-primary" disabled={declining} onclick={confirmDecline}>
+          {declining ? $t('common.loading') : $t('decline.confirm')}
+        </button>
       </div>
+      {#if signError}
+        <p class="error">{signError}</p>
+      {/if}
     </div>
   </div>
 {/if}
@@ -690,15 +848,7 @@
   }
   .dot { opacity: 0.5; }
   .bar-right { display: flex; align-items: center; gap: 1rem; }
-  .lang-select {
-    padding: 3px 8px;
-    font-size: 12px;
-    color: var(--t-text-secondary);
-    background: var(--t-bg-elevated);
-    border: 1px solid var(--t-border-light);
-    border-radius: 6px;
-    cursor: pointer;
-  }
+	.ceremony-language { color: var(--t-text-muted); font-size: 12px; }
   .loading { padding: 3rem; text-align: center; color: var(--t-text-muted); }
   .signer-main {
     display: grid;

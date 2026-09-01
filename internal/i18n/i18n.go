@@ -9,9 +9,11 @@
 // language across the email, the page, and the notice.
 package i18n
 
-import "strings"
+import "regexp"
 
 const fallback = "en"
+
+var placeholderPattern = regexp.MustCompile(`\{[A-Za-z0-9_]+\}`)
 
 // Normalize maps an empty/unknown locale to the English fallback so callers can
 // pass a recipient locale straight through.
@@ -33,10 +35,12 @@ func T(locale, key string, params map[string]string) string {
 	if s == "" {
 		s = key
 	}
-	for k, v := range params {
-		s = strings.ReplaceAll(s, "{"+k+"}", v)
-	}
-	return s
+	return placeholderPattern.ReplaceAllStringFunc(s, func(token string) string {
+		if value, ok := params[token[1:len(token)-1]]; ok {
+			return value
+		}
+		return token
+	})
 }
 
 func lookup(locale, key string) string {

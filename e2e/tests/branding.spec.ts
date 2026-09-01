@@ -3,6 +3,7 @@ import { test, expect, type APIRequestContext } from '@playwright/test';
 const API_KEY =
   process.env.HASH_E2E_API_KEY ||
   'mth_deadbeef_TESTKEYFORINTEGRATIONTESTINGONLY12345AAAAAAA';
+const SESSION_COOKIE = process.env.HASH_E2E_SESSION_COOKIE || '';
 
 // Phase 8.5: org-level brand theming. Reading the palette before any
 // upsert returns the system defaults. Upserting via MCP normalises hex
@@ -62,6 +63,7 @@ test.describe('brand theming (Phase 8.5)', () => {
   });
 
   test('document preview HTML embeds the CSS variable block', async ({ request }) => {
+    test.skip(!SESSION_COOKIE, 'requires HASH_E2E_SESSION_COOKIE for the sender preview endpoint');
     await tool(request, 'set_org_branding', { primary_hex: '#123456' });
     const doc = await tool(request, 'create_document', {
       name: `Preview e2e ${Date.now()}`,
@@ -71,19 +73,11 @@ test.describe('brand theming (Phase 8.5)', () => {
         blocks: [{ id: 'p', type: 'paragraph', text: 'Hello.' }]
       }
     });
-    // Preview requires session auth in the live stack; the agent path
-    // exercises the same renderer via render_document tool if present.
-    // Skip preview assertion if tool not available; the unit test in
-    // internal/branding already verifies CSSVariables emission.
-    const tools = await rpcRaw(request, 'tools/list', {});
-    const names = tools.result.tools.map((t: { name: string }) => t.name);
-    if (!names.includes('render_document')) {
-      test.skip(true, 'render_document tool not present; skipping HTML check');
-      return;
-    }
-    const rendered = await tool(request, 'render_document', { document_id: doc.id });
-    expect(typeof rendered.html).toBe('string');
-    expect(rendered.html).toContain('--hash-primary');
+    const preview = await request.get(`/api/v1/documents/${doc.id}/preview`, {
+      headers: { Cookie: SESSION_COOKIE }
+    });
+    expect(preview.status()).toBe(200);
+    expect(await preview.text()).toContain('--hash-primary');
   });
 });
 

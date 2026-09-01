@@ -18,13 +18,20 @@ import (
 	"time"
 )
 
+var (
+	_, cgnatRange, _     = net.ParseCIDR("100.64.0.0/10")
+	_, benchmarkRange, _ = net.ParseCIDR("198.18.0.0/15")
+)
+
 // IsBlockedIP reports whether ip is one an SSRF guard must refuse: nil,
 // loopback, RFC1918 private, link-local (incl. 169.254 cloud metadata),
-// unspecified, or multicast.
+// unspecified, multicast, shared-address-space (CGNAT/Tailscale), or the
+// benchmarking range frequently used for private service networks.
 func IsBlockedIP(ip net.IP) bool {
 	return ip == nil || ip.IsLoopback() || ip.IsPrivate() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() || ip.IsMulticast()
+		ip.IsUnspecified() || ip.IsMulticast() ||
+		cgnatRange.Contains(ip) || benchmarkRange.Contains(ip)
 }
 
 // dialControl returns a net.Dialer.Control that refuses to connect to a blocked
@@ -66,18 +73,17 @@ func Transport(allowPrivate func() bool) *http.Transport {
 	}
 }
 
-// Client returns an *http.Client using the hardened Transport plus a redirect
-// cap. Each redirect hop re-dials through the same Control guard, so a 3xx to an
-// internal host is refused too.
+// Client returns an *http.Client using the hardened Transport with redirects
+// disabled. Its current consumers send AI prompts together with API-key
+// headers; following even a public redirect could replay that credential/body
+// to a different origin or downgrade HTTPS. API endpoints are configured as
+// final URLs, so a redirect is treated as a fail-closed configuration error.
 func Client(timeout time.Duration, allowPrivate func() bool) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: Transport(allowPrivate),
-		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
-				return fmt.Errorf("nethard: stopped after 3 redirects")
-			}
-			return nil
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return fmt.Errorf("nethard: redirects are disabled for credentialed requests")
 		},
 	}
 }

@@ -86,6 +86,7 @@ func isUntraceable(p string) bool {
 // long cuid/hex tokens) to ":id" so transaction names stay low-cardinality,
 // without coupling this shared package to any specific router.
 func normalizeTracePath(p string) string {
+	p = redactCredentialPath(p)
 	if p == "" || p == "/" {
 		return p
 	}

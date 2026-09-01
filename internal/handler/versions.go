@@ -280,7 +280,23 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "restore only supported on block-source documents")
 		return
 	}
-	target, _, err := s.Versions.Restore(r.Context(), versions.RestoreInput{
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := s.Queries.WithTx(tx)
+	locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: sess.OrgID})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if locked.Status != "draft" || locked.SourceKind != "blocks" {
+		writeError(w, http.StatusConflict, "document not editable (must be draft + blocks-source)")
+		return
+	}
+	target, _, err := versions.New(q).Restore(r.Context(), versions.RestoreInput{
 		DocumentID:    docID,
 		TargetVersion: int32(n64),
 		OrgID:         sess.OrgID,
@@ -294,7 +310,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "target version is not block-source")
 		return
 	}
-	updated, err := s.Queries.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
+	updated, err := q.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
 		ID:            docID,
 		OrgID:         sess.OrgID,
 		BlocksJson:    target.BlockTreeJson,
@@ -304,7 +320,7 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID:       sess.OrgID,
 		ActorUserID: &sess.UserID,
 		DocumentID:  &docID,
@@ -318,6 +334,15 @@ func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request) {
 			"restored_blocks": blockCountOrZero(target.BlockTreeJson),
 		},
 	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	s.Audit.Publish(pending)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"document":        toDocumentResponse(updated),
 		"restored_from_v": target.VersionNo,

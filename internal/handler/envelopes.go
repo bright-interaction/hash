@@ -13,6 +13,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/envelopes"
 )
 
 // Phase 8.6 envelope REST surface. Envelopes ARE documents (with
@@ -33,7 +34,20 @@ func (s *Server) handlePromoteToEnvelope(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusServiceUnavailable, "envelopes engine not configured")
 		return
 	}
-	row, err := s.Envelopes.PromoteToEnvelope(r.Context(), docID, sess.OrgID)
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.Document, error) {
+			return envelopes.New(q).PromoteToEnvelope(r.Context(), docID, sess.OrgID)
+		},
+		func(*generated.Document) audit.Entry {
+			return audit.Entry{
+				OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &docID,
+				Kind:      audit.KindDocumentUpdated,
+				IP:        firstIPFromHeader(r),
+				UserAgent: r.UserAgent(),
+				Payload:   map[string]any{"via": "rest", "tool": "promote_to_envelope"},
+			}
+		},
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "document not found or not eligible (must be draft + blocks-source + not a child)")
@@ -42,13 +56,6 @@ func (s *Server) handlePromoteToEnvelope(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &docID,
-		Kind:      audit.KindDocumentUpdated,
-		IP:        firstIPFromHeader(r),
-		UserAgent: r.UserAgent(),
-		Payload:   map[string]any{"via": "rest", "tool": "promote_to_envelope"},
-	})
 	writeJSON(w, http.StatusOK, toDocumentResponse(row))
 }
 
@@ -78,18 +85,24 @@ func (s *Server) handleAttachToEnvelope(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "child_id must be a uuid")
 		return
 	}
-	row, err := s.Envelopes.Attach(r.Context(), envelopeID, childID, sess.OrgID, in.Position)
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.Document, error) {
+			return envelopes.New(q).Attach(r.Context(), envelopeID, childID, sess.OrgID, in.Position)
+		},
+		func(*generated.Document) audit.Entry {
+			return audit.Entry{
+				OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &envelopeID,
+				Kind:      audit.KindDocumentUpdated,
+				IP:        firstIPFromHeader(r),
+				UserAgent: r.UserAgent(),
+				Payload:   map[string]any{"via": "rest", "tool": "attach_to_envelope", "child_id": childID.String()},
+			}
+		},
+	)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &envelopeID,
-		Kind:      audit.KindDocumentUpdated,
-		IP:        firstIPFromHeader(r),
-		UserAgent: r.UserAgent(),
-		Payload:   map[string]any{"via": "rest", "tool": "attach_to_envelope", "child_id": childID.String()},
-	})
 	writeJSON(w, http.StatusOK, toDocumentResponse(row))
 }
 
@@ -118,18 +131,24 @@ func (s *Server) handleDetachFromEnvelope(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "child_id must be a uuid")
 		return
 	}
-	row, err := s.Envelopes.Detach(r.Context(), childID, sess.OrgID)
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.Document, error) {
+			return envelopes.New(q).Detach(r.Context(), childID, sess.OrgID)
+		},
+		func(*generated.Document) audit.Entry {
+			return audit.Entry{
+				OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &envelopeID,
+				Kind:      audit.KindDocumentUpdated,
+				IP:        firstIPFromHeader(r),
+				UserAgent: r.UserAgent(),
+				Payload:   map[string]any{"via": "rest", "tool": "detach_from_envelope", "child_id": childID.String()},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &envelopeID,
-		Kind:      audit.KindDocumentUpdated,
-		IP:        firstIPFromHeader(r),
-		UserAgent: r.UserAgent(),
-		Payload:   map[string]any{"via": "rest", "tool": "detach_from_envelope", "child_id": childID.String()},
-	})
 	writeJSON(w, http.StatusOK, toDocumentResponse(row))
 }
 
@@ -166,17 +185,36 @@ func (s *Server) handleReorderEnvelope(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "envelope not found")
 		return
 	}
-	if err := s.Envelopes.Reorder(r.Context(), envelopeID, sess.OrgID, ids); err != nil {
+	if s.Audit == nil {
+		writeInternalErrorMsg(w, "reorder envelope", errors.New("audit unavailable"))
+		return
+	}
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	if err := envelopes.New(s.Queries.WithTx(tx)).Reorder(r.Context(), envelopeID, sess.OrgID, ids); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &envelopeID,
 		Kind:      audit.KindDocumentUpdated,
 		IP:        firstIPFromHeader(r),
 		UserAgent: r.UserAgent(),
 		Payload:   map[string]any{"via": "rest", "tool": "reorder_envelope", "count": len(ids)},
 	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	s.Audit.Publish(pending)
 	children, err := s.Envelopes.Children(r.Context(), envelopeID, sess.OrgID)
 	if err != nil {
 		writeInternalError(w, err)

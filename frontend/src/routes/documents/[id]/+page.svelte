@@ -296,6 +296,7 @@
       <SenderPanel
         documentID={doc.id}
         status={doc.status}
+        requiresSignature={doc.requires_signature !== false}
         defaultLocale={doc.default_locale}
         signatureFields={doc.source_kind === 'blocks' ? documentSignatureFields(doc) : []}
         onStatusChange={(next) => {

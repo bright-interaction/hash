@@ -4,8 +4,12 @@ VALUES ($1, $2, $3, 'blocks', $4, $5, $6, $7)
 RETURNING *;
 
 -- name: CreatePDFDocument :one
-INSERT INTO documents (org_id, template_id, name, source_kind, pdf_storage_key, pdf_sha256, sender_id, expires_at)
-VALUES ($1, $2, $3, 'pdf', $4, $5, $6, $7)
+INSERT INTO documents (
+    org_id, template_id, name, source_kind,
+    pdf_storage_key, pdf_sha256, pdf_storage_version_id,
+    evidence_version_pins_required, sender_id, expires_at
+)
+VALUES ($1, $2, $3, 'pdf', $4, $5, $6, $7, $8, $9)
 RETURNING *;
 
 -- name: GetDocument :one
@@ -15,6 +19,13 @@ SELECT * FROM documents WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL;
 -- Row-locking read used by the signing engine to serialize concurrent
 -- sign/decline/finalize on the same document inside a transaction.
 SELECT * FROM documents WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR UPDATE;
+
+-- name: GetDocumentForShare :one
+-- Long-running signer clarification holds a SHARE row lock so revise/resend and
+-- every other document mutation wait for one ceremony epoch, while the
+-- separately committed request audit and AI-completion audit can still take
+-- their foreign-key KEY SHARE locks without self-deadlocking.
+SELECT * FROM documents WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR SHARE;
 
 -- name: GetDocumentByID :one
 -- System-level lookup by id alone (no org scope) for the background worker,
@@ -63,33 +74,18 @@ WHERE id = $1 AND org_id = $2 AND status = 'draft'
 RETURNING *;
 
 -- name: SetDocumentStatus :one
+-- The generic state helper must never allocate a durable send/finalization
+-- lifecycle state. Those transitions own immutable Article 13, retention, and
+-- completion commitments and must use their dedicated guarded queries.
 UPDATE documents
 SET status = $3,
-    sent_at = CASE WHEN $3 = 'sent' THEN now() ELSE sent_at END,
-    completed_at = CASE WHEN $3 = 'completed' THEN now() ELSE completed_at END,
     updated_at = now()
 WHERE id = $1 AND org_id = $2
+  AND (
+    ($3 = 'in_progress' AND documents.status = 'sent')
+    OR ($3 = 'expired' AND documents.status IN ('sent', 'in_progress'))
+  )
 RETURNING *;
-
--- name: SetDocumentFinal :execrows
--- Terminal write, guarded to status = 'in_progress'. finalize renders the PDF +
--- audit cert (slow Gotenberg calls) while holding only the per-document
--- advisory lock, NOT a row lock, so a concurrent Revise (-> draft, signatures
--- deleted) or Void (-> voided) can move the row out from under it. Requiring
--- status = 'in_progress' here (rather than merely <> 'completed') means such a
--- revised/voided document can NOT be flipped to 'completed' with a rendered PDF
--- + audit cert that embed now-invalid signatures. The caller inspects the
--- affected-row count: 0 rows means the document left in_progress mid-finalize,
--- so completion is aborted. A second finalize (retry worker racing the last
--- signer) short-circuits on the FinalPdfKey idempotency check before this write.
-UPDATE documents
-SET final_pdf_key = $3,
-    final_pdf_sha = $4,
-    audit_cert_key = $5,
-    completed_at = now(),
-    status = 'completed',
-    updated_at = now()
-WHERE id = $1 AND org_id = $2 AND status = 'in_progress';
 
 -- name: SetDocumentRequiresSignature :one
 -- Draft-only toggle between signature-required and acknowledgement (view/accept)
@@ -99,20 +95,6 @@ SET requires_signature = $3,
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status = 'draft'
 RETURNING *;
-
--- name: CompleteAcknowledgedDocument :execrows
--- No-signature completion: an acknowledgement-mode document completes when every
--- acceptor has accepted. The final artifact is the original upload; there is NO
--- ed25519 seal / audit cert (the tamper-evident proof is the event hash chain).
--- Guarded to in_progress + requires_signature = false so it can never flip a
--- signature-required document to completed without real signatures.
-UPDATE documents
-SET final_pdf_key = pdf_storage_key,
-    final_pdf_sha = pdf_sha256,
-    completed_at = now(),
-    status = 'completed',
-    updated_at = now()
-WHERE id = $1 AND org_id = $2 AND status = 'in_progress' AND requires_signature = false;
 
 -- name: DeclineDocumentIfActive :one
 -- Guarded decline transition: only an active (sent/in_progress) document can
@@ -126,8 +108,8 @@ WHERE id = $1 AND org_id = $2 AND status IN ('sent','in_progress')
 RETURNING *;
 
 -- name: VoidDocumentIfActive :one
--- Guarded void transition: only a non-terminal document can be voided. A
--- completed or already-voided doc returns no row. This closes the Void race
+-- Guarded void transition: only an active sent/in-progress ceremony can be
+-- voided. Draft, paused, and every terminal state return no row. This closes the Void race
 -- where a plain GetDocument + unguarded status write could overwrite a doc
 -- that finalize had just flipped to 'completed' (finalize holds only the
 -- advisory lock, not a row lock) back to 'voided'. Mirrors
@@ -135,7 +117,7 @@ RETURNING *;
 UPDATE documents
 SET status = 'voided',
     updated_at = now()
-WHERE id = $1 AND org_id = $2 AND status NOT IN ('completed', 'voided')
+WHERE id = $1 AND org_id = $2 AND status IN ('sent', 'in_progress')
 RETURNING *;
 
 -- name: RequestChangesOnDocument :one
@@ -145,6 +127,22 @@ UPDATE documents
 SET status = 'changes_requested',
     updated_at = now()
 WHERE id = $1 AND org_id = $2 AND status IN ('sent','in_progress','changes_requested')
+RETURNING *;
+
+-- name: ExpireDocumentIfActive :one
+-- Atomic expiration transition. The worker first discovers candidates with
+-- GetExpirableDocuments, then uses this guarded write inside a transaction with
+-- token invalidation + reminder cancellation. If signing/finalization wins the
+-- race and makes the document terminal, this returns no row and the worker must
+-- perform no expiration side effects.
+UPDATE documents
+SET status = 'expired',
+    updated_at = now()
+WHERE id = $1
+  AND org_id = $2
+  AND expires_at IS NOT NULL
+  AND expires_at <= clock_timestamp()
+  AND status IN ('sent','in_progress')
 RETURNING *;
 
 -- name: ApplyBlocksForChange :one
@@ -158,7 +156,8 @@ RETURNING *;
 
 -- name: ReopenDocumentToDraft :one
 -- The sender revises after a change request: a paused document returns to draft
--- so it can be edited and re-sent.
+-- so it can be edited and re-sent. article13_notice_epoch_at deliberately
+-- survives: the next sealing completion must allocate a strictly newer epoch.
 UPDATE documents
 SET status = 'draft',
     sent_at = NULL,
@@ -167,24 +166,46 @@ WHERE id = $1 AND org_id = $2 AND status = 'changes_requested'
 RETURNING *;
 
 -- name: GetStrandedDocuments :many
--- Documents where every signer has signed but finalize never completed (no
--- final PDF, status still in_progress). These are Gotenberg/MinIO failure
--- casualties; the finalize-retry worker re-invokes finalize idempotently.
+-- Documents ready for terminal artifact completion but stranded in_progress,
+-- plus finalizing documents whose exact staged artifacts need retention or a
+-- terminal SQL retry after a crash.
+-- SQL deliberately selects a broad bounded candidate set. Required roles for
+-- block documents depend on the frozen conditional tree and custom roles, so
+-- reimplementing that expression language in JSONPath would diverge from the
+-- signer/PDF projection. The signing engine is the sole readiness authority
+-- and re-checks the exact frozen role set before any terminal write.
+-- Keep crash-resume work ahead of not-yet-claimed rows, but select the oldest
+-- candidate in each class first. Newer failures must not continually displace
+-- a contract that has already waited longer; id makes equal timestamps stable.
 SELECT d.* FROM documents d
-WHERE d.status = 'in_progress'
+WHERE d.status IN ('in_progress','finalizing')
   AND d.final_pdf_key IS NULL
   AND d.deleted_at IS NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM recipients r
-    WHERE r.document_id = d.id
-      AND r.role = 'signer'
-      AND r.status NOT IN ('signed','declined')
+  -- Envelope children share their root's ceremony, terminal artifact, and
+  -- finalization intent. They must never be retried as standalone documents.
+  AND d.parent_envelope_id IS NULL
+  AND (
+    d.status = 'finalizing'
+    OR
+    (
+      d.requires_signature = false
+      AND NOT EXISTS (
+        SELECT 1 FROM recipients r
+        WHERE r.document_id = d.id
+          AND r.role <> 'cc'
+          AND r.status NOT IN ('accepted','declined')
+      )
+    )
+    OR (
+      d.requires_signature = true
+      AND EXISTS (
+        SELECT 1 FROM recipients signed
+        WHERE signed.document_id = d.id
+          AND signed.status = 'signed'
+      )
+    )
   )
-  AND EXISTS (
-    SELECT 1 FROM recipients r2
-    WHERE r2.document_id = d.id AND r2.role = 'signer' AND r2.status = 'signed'
-  )
-ORDER BY d.updated_at ASC
+ORDER BY (d.status = 'finalizing') DESC, d.updated_at ASC, d.id ASC
 LIMIT $1;
 
 -- name: DeleteDraftDocument :exec
@@ -200,13 +221,40 @@ UPDATE documents
 SET lawful_basis = $3
 WHERE id = $1 AND org_id = $2;
 
--- name: PurgeSoftDeletedDocuments :exec
--- Restricted to draft-only: DeleteDraftDocument (the only soft-delete entry
--- point) is draft-scoped, so this never hard-drops a signed/completed legal
--- record. Combined with events.document_id ON DELETE SET NULL (migration
--- 00029), a purge can no longer snap the org audit hash chain.
+-- name: ClaimSoftDeletedDocumentsForPurge :many
+-- Lease a bounded batch before object-store cleanup. updated_at doubles as a
+-- recoverable lease timestamp for already-deleted drafts: peers skip a claim
+-- for 15 minutes, while a crashed worker leaves it eligible for a later retry.
+-- The row remains intact until its document-owned source object is confirmed
+-- deleted, preserving the key needed to retry storage cleanup.
+WITH candidates AS (
+  SELECT documents.id
+  FROM documents
+  WHERE documents.deleted_at IS NOT NULL
+    AND documents.deleted_at < sqlc.arg(cutoff)
+    AND documents.status = 'draft'
+    AND documents.updated_at <= now() - interval '15 minutes'
+  ORDER BY documents.deleted_at
+  FOR UPDATE SKIP LOCKED
+  LIMIT sqlc.arg(batch_limit)
+)
+UPDATE documents d
+SET updated_at = now()
+FROM candidates
+WHERE d.id = candidates.id
+RETURNING d.*;
+
+-- name: DeleteClaimedSoftDeletedDocument :execrows
+-- Hard-delete only the exact draft lease the worker just cleaned. If any
+-- concurrent state change touched updated_at, the CAS fails and no legal row is
+-- removed. events.document_id uses ON DELETE SET NULL, preserving the org chain.
 DELETE FROM documents
-WHERE deleted_at IS NOT NULL AND deleted_at < $1 AND status = 'draft';
+WHERE id = $1
+  AND org_id = $2
+  AND deleted_at IS NOT NULL
+  AND deleted_at < $3
+  AND status = 'draft'
+  AND updated_at = $4;
 
 -- name: SearchDocumentsByName :many
 SELECT * FROM documents

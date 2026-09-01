@@ -58,8 +58,8 @@
   </div>
 
   <p class="text-sm text-text-secondary mb-4 leading-relaxed">
-    Every lifecycle event, hash-chained and tamper-evident. This is the same
-    record that backs the signed audit certificate.
+    Every lifecycle event is hash-chained and tamper-evident. For a successfully completed ceremony,
+    the document-scoped event set is committed into the signed audit certificate.
   </p>
 
   {#if error}

@@ -20,8 +20,17 @@ UPDATE document_agent_tokens
  WHERE id = $1 AND org_id = $2 AND revoked_at IS NULL
 RETURNING *;
 
--- name: TouchDocAgentToken :exec
+-- name: ClaimDocAgentTokenUse :one
+-- This guarded UPDATE is the authorization boundary for a document-scoped
+-- token. Lookup happens before the secret hash comparison, so it must never
+-- consume a use. Once the secret has been verified, this statement atomically
+-- re-checks revocation, expiry, and max_uses while incrementing used_count.
+-- Concurrent requests for a max_uses=1 token therefore cannot both proceed.
 UPDATE document_agent_tokens
    SET used_count   = used_count + 1,
        last_used_at = now()
- WHERE id = $1;
+ WHERE id = $1
+   AND revoked_at IS NULL
+   AND expires_at > now()
+   AND (max_uses = 0 OR used_count < max_uses)
+RETURNING id;

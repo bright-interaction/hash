@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -49,6 +50,21 @@ type SeedResult struct {
 	EIDASRulesSeeded int       `json:"eidas_rules_seeded"`
 }
 
+// NormalizeJurisdiction constrains the built-in legal kit to the only
+// jurisdiction its current text and eIDAS defaults actually implement. It is
+// shared by REST, MCP, and Seeder so no alternate caller can attach Swedish
+// rules or IMY copy to a different country code.
+func NormalizeJurisdiction(raw string) (string, error) {
+	jurisdiction := strings.ToUpper(strings.TrimSpace(raw))
+	if jurisdiction == "" {
+		jurisdiction = "SE"
+	}
+	if jurisdiction != "SE" {
+		return "", errors.New("compliance: built-in legal drafts currently support jurisdiction SE only")
+	}
+	return jurisdiction, nil
+}
+
 // Seed installs the full baseline kit for an org. Idempotent: re-seeds
 // only insert missing artifacts; existing artifacts are preserved + the
 // baseline row updated. The eIDAS Swedish defaults are seeded
@@ -60,9 +76,9 @@ func (s *Seeder) Seed(ctx context.Context, in SeedInput) (*SeedResult, error) {
 	if !in.BusinessType.Valid() {
 		return nil, fmt.Errorf("compliance: invalid business_type %q", in.BusinessType)
 	}
-	juris := in.Jurisdiction
-	if juris == "" {
-		juris = "SE"
+	juris, err := NormalizeJurisdiction(in.Jurisdiction)
+	if err != nil {
+		return nil, err
 	}
 	templates := TemplatesFor(in.BusinessType, juris)
 
@@ -130,15 +146,10 @@ func (s *Seeder) Seed(ctx context.Context, in SeedInput) (*SeedResult, error) {
 		out.PrivacyNoticeID = doc.ID
 	}
 
-	// eIDAS rules. Seed Swedish defaults first; future versions may
-	// fork by jurisdiction.
-	if s.EIDAS != nil {
-		if err := s.EIDAS.SeedSwedishDefaults(ctx, in.OrgID); err != nil {
-			return nil, fmt.Errorf("compliance: seed eIDAS: %w", err)
-		}
-		rules, _ := s.Q.ListEIDASRules(ctx, in.OrgID)
-		out.EIDASRulesSeeded = len(rules)
-	}
+	// Do not seed the historic Swedish AES/QES rules. Those ceremony tiers are
+	// unavailable and activating their legal assumptions would make otherwise
+	// valid SES documents unsendable. The compatibility field remains zero.
+	out.EIDASRulesSeeded = 0
 
 	row, err := s.Q.UpsertComplianceBaseline(ctx, generated.UpsertComplianceBaselineParams{
 		OrgID:           in.OrgID,

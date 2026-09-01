@@ -17,13 +17,23 @@ LIMIT $3;
 SELECT * FROM data_subject_requests
 WHERE id = $1 AND org_id = $2;
 
+-- name: GetDataSubjectRequestForUpdate :one
+-- Serialize competing fulfill/deny/withdraw transitions. All destructive
+-- erasure work and its audit rows run in the same caller-owned transaction
+-- while this lock is held.
+SELECT * FROM data_subject_requests
+WHERE id = $1 AND org_id = $2
+FOR UPDATE;
+
 -- name: UpdateDataSubjectRequestStatus :one
 UPDATE data_subject_requests
-SET status          = $3,
-    resolution_note = $4,
-    fulfilled_by    = $5,
-    fulfilled_at    = CASE WHEN $3 IN ('fulfilled','denied','withdrawn') THEN now() ELSE fulfilled_at END
-WHERE id = $1 AND org_id = $2
+SET status          = sqlc.arg(status),
+    resolution_note = sqlc.arg(resolution_note),
+    fulfilled_by    = sqlc.arg(fulfilled_by),
+    fulfilled_at    = CASE WHEN sqlc.arg(status)::text IN ('fulfilled','denied','withdrawn') THEN now() ELSE NULL END
+WHERE id = sqlc.arg(id)
+  AND org_id = sqlc.arg(org_id)
+  AND status = sqlc.arg(expected_status)
 RETURNING *;
 
 -- name: AnonymizeRecipient :execrows
@@ -86,7 +96,7 @@ WHERE s.recipient_id = $1
   AND s.document_id = d.id
   AND d.org_id = $3;
 
--- name: RedactDSRSubjectIdentifiers :exec
+-- name: RedactDSRSubjectIdentifiers :execrows
 -- L7: the erasure request row itself stores subject_email + subject_name; once
 -- fulfilled they are no longer needed (the request id ties the row to the audit
 -- trail) and must not linger in plaintext. Redact in place, org-scoped.

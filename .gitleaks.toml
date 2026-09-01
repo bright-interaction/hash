@@ -8,7 +8,16 @@ title = "hash"
 useDefault = true
 
 [allowlist]
-description = "Config placeholders use obvious markers, not real secrets"
+description = "Config placeholders are inert; generated frontend output is scanned at its source instead"
+paths = [
+  # `gitleaks --no-git` does not honor .gitignore. These are generated from
+  # tracked frontend sources + the frozen Bun lockfile and contain minified
+  # third-party strings that trigger generic-api-key false positives.
+  '''^frontend/build/''',
+  '''^frontend/\.svelte-kit/''',
+  '''^frontend/node_modules/''',
+  '''^e2e/node_modules/''',
+]
 regexes = [
   '''changeme''',
   '''change[_-]?me''',
@@ -17,6 +26,10 @@ regexes = [
   '''molliepathsecret16''',
   '''mollie-test-key''',
   '''EXAMPLE''',
+  # Historical log-redaction regression fixture. The exact low-entropy value
+  # appeared only as untrusted text that the test required the scrubber to
+  # remove; pin the complete fixture instead of allowlisting its file/rule.
+  '''^live_EXAMPLE_NOT_A_REAL_KEY$''',
   # config_test.go audit-key fixture, in mirror history pre-split. It is
   # base64("fake-ed25519-seed-for-tests"), not a credential.
   '''ZmFrZS1lZDI1NTE5LXNlZWQtZm9yLXRlc3Rz''',

@@ -23,6 +23,7 @@ type RollupQueries interface {
 	ListDocumentsWithPendingRollup(ctx context.Context) ([]uuid.UUID, error)
 	RollupBlockViews(ctx context.Context, documentID uuid.UUID) (int64, error)
 	PruneTelemetryOlderThan(ctx context.Context, createdAt pgtype.Timestamptz) (*generated.PruneTelemetryOlderThanRow, error)
+	PruneEngagementOlderThan(ctx context.Context, lastEventAt pgtype.Timestamptz) (int64, error)
 }
 
 // RunRollupOnce drains the rollup work queue and then enforces the raw-event
@@ -30,12 +31,14 @@ type RollupQueries interface {
 //
 // Ordering matters and is load-bearing: rollup first, prune second. Events
 // that reached the 90-day edge while the worker was down are folded into the
-// summary on the way out instead of being deleted uncounted.
+// summary on the way out instead of being deleted uncounted. Summary rows
+// whose newest contributing event is also past the edge are then removed so
+// optional analytics cannot form a permanent recipient reading profile.
 //
 // Each block.viewed row is claimed exactly once by RollupBlockViews (see
-// migration 00041), so the per-block totals accumulate and never decay. That
-// is what lets the raw rows be pruned at 90 days while the heatmap keeps
-// working, which is the contract migration 00011 has always documented.
+// migration 00041), so the per-block totals do not double count or partially
+// decay while the summary remains inside its bounded window. Once the newest
+// contributing event reaches the retention edge, the whole summary is pruned.
 func RunRollupOnce(ctx context.Context, q RollupQueries, retention time.Duration) {
 	docIDs, err := q.ListDocumentsWithPendingRollup(ctx)
 	if err != nil {
@@ -55,7 +58,7 @@ func RunRollupOnce(ctx context.Context, q RollupQueries, retention time.Duration
 		}
 	}
 
-	// Prune raw rows past retention. The aggregate summary rows stay. The
+	// Prune raw rows past retention. Aggregate rows follow the same cutoff. The
 	// prune is deliberately NOT skipped when an individual document failed
 	// above: the 90-day TTL is a privacy commitment (migration 00011) and must
 	// not be held hostage to an aggregation bug. Loss is made loud instead.
@@ -65,14 +68,19 @@ func RunRollupOnce(ctx context.Context, q RollupQueries, retention time.Duration
 		slog.Warn("telemetry: prune", "err", err)
 		return
 	}
-	if pruned == nil {
-		return
-	}
-	if pruned.DeletedRows > 0 {
+	if pruned != nil && pruned.DeletedRows > 0 {
 		slog.Info("telemetry: pruned raw events", "rows", pruned.DeletedRows)
 	}
-	if pruned.UnrolledViews > 0 {
+	if pruned != nil && pruned.UnrolledViews > 0 {
 		slog.Error("telemetry: block.viewed events hit the retention edge before they were rolled up, engagement totals under-count by this many views",
 			"views", pruned.UnrolledViews)
+	}
+	prunedSummaries, err := q.PruneEngagementOlderThan(ctx, pruneCutoff)
+	if err != nil {
+		slog.Warn("telemetry: prune engagement summaries", "err", err)
+		return
+	}
+	if prunedSummaries > 0 {
+		slog.Info("telemetry: pruned engagement summaries", "rows", prunedSummaries)
 	}
 }

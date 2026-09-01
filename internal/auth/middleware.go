@@ -6,23 +6,38 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
-// SessionPayload is the JSON we sign + store in the session cookie.
+// SessionPayload is the JSON we sign + store in the session cookie. Only the
+// stable user reference is serialized. The other fields remain source-compatible
+// hints for callers/tests but are deliberately excluded so email, tenant, and
+// privilege data are neither disclosed to the browser nor trusted for auth.
 type SessionPayload struct {
 	UserID uuid.UUID `json:"u"`
-	OrgID  uuid.UUID `json:"o"`
-	Role   string    `json:"r"`
-	Email  string    `json:"e"`
+	OrgID  uuid.UUID `json:"-"`
+	Role   string    `json:"-"`
+	Email  string    `json:"-"`
+}
+
+// SessionUserStore is the live authorization source for cookie sessions.
+// Signed cookies authenticate the session but do not authorize a role for
+// their full TTL: membership, tenant, role, and email are reloaded on every
+// request so a demotion or deletion takes effect immediately.
+type SessionUserStore interface {
+	GetUser(context.Context, uuid.UUID) (*generated.User, error)
 }
 
 // RequireSession is the chi-compatible middleware that enforces a valid
 // signed session cookie. On success it injects SessionUser into the context.
-func RequireSession(cookies *SignedCookie, cookieName string) func(http.Handler) http.Handler {
+func RequireSession(cookies *SignedCookie, cookieName string, users SessionUserStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			c, err := r.Cookie(cookieName)
@@ -40,14 +55,50 @@ func RequireSession(cookies *SignedCookie, cookieName string) func(http.Handler)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
+			if sp.UserID == uuid.Nil || users == nil {
+				if users == nil {
+					http.Error(w, "session authorization unavailable", http.StatusServiceUnavailable)
+				} else {
+					ClearSession(w, cookieName)
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+				}
+				return
+			}
+
+			// Loading the canonical row closes the 24-hour stale-privilege window
+			// after an owner demotes or removes a member. Legacy cookies may still
+			// carry old org/role/email JSON keys; decoding ignores those values.
+			user, err := users.GetUser(r.Context(), sp.UserID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				ClearSession(w, cookieName)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if err != nil {
+				http.Error(w, "session authorization unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if user == nil || user.ID != sp.UserID || user.OrgID == uuid.Nil || !validSessionRole(user.Role) {
+				ClearSession(w, cookieName)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 			ctx := r.Context()
-			ctx = context.WithValue(ctx, UserIDKey, sp.UserID)
-			ctx = context.WithValue(ctx, OrgIDKey, sp.OrgID)
-			ctx = context.WithValue(ctx, RoleKey, sp.Role)
-			ctx = context.WithValue(ctx, EmailKey, sp.Email)
+			ctx = context.WithValue(ctx, UserIDKey, user.ID)
+			ctx = context.WithValue(ctx, OrgIDKey, user.OrgID)
+			ctx = context.WithValue(ctx, RoleKey, user.Role)
+			ctx = context.WithValue(ctx, EmailKey, user.Email)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func validSessionRole(role string) bool {
+	switch role {
+	case string(RoleOwner), string(RoleSender), string(RoleViewer):
+		return true
+	}
+	return false
 }
 
 // MintSession serializes a SessionPayload, signs it, and writes the cookie.

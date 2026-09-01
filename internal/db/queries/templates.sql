@@ -4,8 +4,12 @@ VALUES ($1, $2, 'blocks', $3, $4, $5)
 RETURNING *;
 
 -- name: CreatePDFTemplate :one
-INSERT INTO templates (org_id, name, source_kind, pdf_storage_key, pdf_sha256, page_count, fields_json, created_by)
-VALUES ($1, $2, 'pdf', $3, $4, $5, $6, $7)
+INSERT INTO templates (
+    org_id, name, source_kind, pdf_storage_key, pdf_sha256,
+    pdf_storage_version_id, evidence_version_pin_required,
+    page_count, fields_json, created_by
+)
+VALUES ($1, $2, 'pdf', $3, $4, $5, $6, $7, $8, $9)
 RETURNING *;
 
 -- name: GetTemplate :one

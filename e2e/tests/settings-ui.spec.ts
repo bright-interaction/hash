@@ -40,3 +40,21 @@ test('settings index links to all sub-pages', async ({ request }) => {
   const body = await res.text();
   expect(body).toContain('<!doctype html>');
 });
+
+test('eIDAS settings cannot select or seed unavailable AES/QES tiers', async ({ page }) => {
+  await page.goto('/settings/eidas-rules');
+  await expect(page.getByRole('heading', { name: 'eIDAS routing rules' })).toBeVisible();
+  await expect(page.getByText('Production signing currently supports SES only.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Swedish defaults unavailable' })).toBeDisabled();
+
+  await page.getByRole('button', { name: 'New rule' }).click();
+  const tier = page.getByLabel('Required tier');
+  await expect(tier).toHaveValue('SES');
+  await expect(tier.locator('option[value="AES"]')).toHaveAttribute('disabled', '');
+  await expect(tier.locator('option[value="QES"]')).toHaveAttribute('disabled', '');
+
+  const currentTier = page.getByLabel('Current tier');
+  await expect(currentTier).toHaveValue('SES');
+  await expect(currentTier.locator('option[value="AES"]')).toHaveAttribute('disabled', '');
+  await expect(currentTier.locator('option[value="QES"]')).toHaveAttribute('disabled', '');
+});

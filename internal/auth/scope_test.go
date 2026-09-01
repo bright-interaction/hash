@@ -24,7 +24,7 @@ func TestHasWriteScope(t *testing.T) {
 		want   bool
 	}{
 		{"no scope set (session cookie) => full access", nil, false, true},
-		{"empty scope slice => full access", []string{}, true, true},
+		{"empty API-token scope slice => fail closed", []string{}, true, false},
 		{"read only => blocked", []string{"read"}, true, false},
 		{"read + write:authoring => allowed", []string{"read", "write:authoring"}, true, true},
 		{"read + write:workflow => allowed", []string{"read", "write:workflow"}, true, true},
@@ -45,6 +45,9 @@ func TestHasScope_ExactAndAdmin(t *testing.T) {
 	}
 	if HasScope(ctxWithScopes([]string{"read"}, true), "write") {
 		t.Error("read-only token should not have write scope")
+	}
+	if HasScope(ctxWithScopes([]string{}, true), "read") {
+		t.Error("empty API-token scope set should fail closed")
 	}
 	if !HasScope(ctxWithScopes([]string{"admin"}, true), "write") {
 		t.Error("admin should imply write")

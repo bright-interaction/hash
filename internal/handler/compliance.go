@@ -15,6 +15,7 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/compliance"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/eidas"
 )
 
 // zeroTime is the lower-bound passed to feed Fetch when we want every
@@ -30,6 +31,10 @@ func zeroTime() time.Time { return time.Time{} }
 func (s *Server) handleSeedCompliance(w http.ResponseWriter, r *http.Request) {
 	sess, ok := requireSessionUser(w, r.Context())
 	if !ok {
+		return
+	}
+	if s.Environment == "production" {
+		writeError(w, http.StatusServiceUnavailable, "built-in compliance legal drafts are unavailable pending counsel approval")
 		return
 	}
 	if s.Compliance == nil {
@@ -50,17 +55,29 @@ func (s *Server) handleSeedCompliance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "business_type must be law_firm | saas | consulting | healthcare | fintech | other")
 		return
 	}
-	res, err := s.Compliance.Seed(r.Context(), compliance.SeedInput{
+	jurisdiction, err := compliance.NormalizeJurisdiction(in.Jurisdiction)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := s.Queries.WithTx(tx)
+	res, err := compliance.New(q, eidas.New(q)).Seed(r.Context(), compliance.SeedInput{
 		OrgID:        sess.OrgID,
 		UserID:       sess.UserID,
 		BusinessType: bt,
-		Jurisdiction: in.Jurisdiction,
+		Jurisdiction: jurisdiction,
 	})
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID:       sess.OrgID,
 		ActorUserID: &sess.UserID,
 		Kind:        "compliance.baseline_seeded",
@@ -68,10 +85,19 @@ func (s *Server) handleSeedCompliance(w http.ResponseWriter, r *http.Request) {
 		UserAgent:   r.UserAgent(),
 		Payload: map[string]any{
 			"business_type":      bt,
-			"jurisdiction":       in.Jurisdiction,
+			"jurisdiction":       jurisdiction,
 			"eidas_rules_seeded": res.EIDASRulesSeeded,
 		},
 	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	s.Audit.Publish(pending)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -144,11 +170,22 @@ func (s *Server) handleSetComplianceFlagStatus(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "status must be open|acknowledged|resolved|dismissed")
 		return
 	}
-	row, err := s.Queries.SetComplianceFlagStatus(r.Context(), generated.SetComplianceFlagStatusParams{
-		ID:     id,
-		OrgID:  sess.OrgID,
-		Status: in.Status,
-	})
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.ComplianceFlag, error) {
+			return q.SetComplianceFlagStatus(r.Context(), generated.SetComplianceFlagStatusParams{
+				ID:     id,
+				OrgID:  sess.OrgID,
+				Status: in.Status,
+			})
+		},
+		func(*generated.ComplianceFlag) audit.Entry {
+			return audit.Entry{
+				OrgID: sess.OrgID, ActorUserID: &sess.UserID,
+				Kind:    "compliance.flag_status_changed",
+				Payload: map[string]any{"via": "rest", "flag_id": id.String(), "status": in.Status},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalError(w, err)
 		return
@@ -165,7 +202,6 @@ func (s *Server) handleComplianceFlagRun(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	_ = sess
 	if s.ComplianceFlagger == nil || s.ComplianceFeed == nil {
 		writeError(w, http.StatusServiceUnavailable, "flagger not configured")
 		return
@@ -175,10 +211,7 @@ func (s *Server) handleComplianceFlagRun(w http.ResponseWriter, r *http.Request)
 		writeInternalError(w, err)
 		return
 	}
-	if len(items) == 0 {
-		items = compliance.SampleFeedItems() // seed the dashboard with starter items if the feed has nothing
-	}
-	raised, err := s.ComplianceFlagger.FlagRun(r.Context(), items)
+	raised, err := s.ComplianceFlagger.FlagRunForOrg(r.Context(), sess.OrgID, items)
 	if err != nil {
 		writeInternalError(w, err)
 		return

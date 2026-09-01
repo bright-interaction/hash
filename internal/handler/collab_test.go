@@ -17,6 +17,7 @@ func TestCollabOriginPatterns_ProductionLocksToConfiguredHost(t *testing.T) {
 }
 
 func TestCollabOriginPatterns_LocalDevExpandsLoopback(t *testing.T) {
+	t.Setenv("HASH_ENVIRONMENT", "development")
 	got := collabOriginPatterns("http://localhost:8090")
 	// Local dev MUST include the localhost variants so the SvelteKit dev
 	// server (port 5173) can still join. The first entry is always the

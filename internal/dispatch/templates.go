@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"html/template"
+	"strings"
 
 	"github.com/bright-interaction/hash/internal/i18n"
 )
@@ -35,10 +36,20 @@ type TemplateContext struct {
 	OrgName       string
 	Locale        string // recipient locale for invite/reminder/completed_signer; empty = English
 	SignURL       string // signer-side magic link (for invite/reminder)
-	BeaconURL     string // 1×1 GIF beacon for `document.opened` tracking
-	DownloadURL   string // for completed_signer/sender
-	DeclineReason string // for declined; reused as the change comment for changes_requested
-	BrandColor    string // optional accent; default to black
+	// BeaconURL is retained only for source compatibility with older callers.
+	// Recipient-identifiable pre-notice email tracking is disabled: invite and
+	// reminder renderers deliberately ignore this value and never emit an image.
+	BeaconURL   string
+	DownloadURL string // for completed_signer/sender
+	// DownloadExpiresAt is the exact UTC deadline shown to external recipients.
+	// Completion rendering fails closed without it so credential TTL and copy
+	// cannot silently drift.
+	DownloadExpiresAt string
+	// Acknowledgement selects no-signature ceremony copy for recipient and
+	// sender lifecycle emails.
+	Acknowledgement bool
+	DeclineReason   string // for declined; reused as the change comment for changes_requested
+	BrandColor      string // optional accent; default to black
 
 	// Inline change-request snippet (for changes_requested).
 	ChangeQuote    string // the marked text
@@ -47,7 +58,6 @@ type TemplateContext struct {
 	OpenURL        string // deep link to the document in the app
 	ApproveURL     string // one-click approve link (signed action token)
 	DenyURL        string // one-click deny link (signed action token)
-	ReplyURL       string // one-click comment-reply link (signed action token)
 
 	// Quota warning fields. Empty for non-billing templates.
 	QuotaKind     string // "documents" or "recipients"
@@ -62,6 +72,9 @@ type TemplateContext struct {
 // Render returns (subject, html, text) for the given kind + ctx. Errors only
 // when the kind is unknown or templates fail to compile.
 func Render(kind string, ctx TemplateContext) (subject, html, text string, err error) {
+	if kind == KindCompletedSigner && strings.TrimSpace(ctx.DownloadExpiresAt) == "" {
+		return "", "", "", fmt.Errorf("completed recipient email requires download expiry")
+	}
 	subj, err := renderSubject(kind, ctx)
 	if err != nil {
 		return "", "", "", err
@@ -89,7 +102,10 @@ func renderSubject(kind string, ctx TemplateContext) (string, error) {
 	case KindCompletedSigner:
 		return fmt.Sprintf("Your signed copy of %s", ctx.DocumentName), nil
 	case KindCompletedSender:
-		return fmt.Sprintf("%s signed by all parties", ctx.DocumentName), nil
+		if ctx.Acknowledgement {
+			return fmt.Sprintf("%s acknowledgements complete", ctx.DocumentName), nil
+		}
+		return fmt.Sprintf("%s signing ceremony complete", ctx.DocumentName), nil
 	case KindDeclined:
 		return fmt.Sprintf("%s declined %s", ctx.RecipientName, ctx.DocumentName), nil
 	case KindChangesRequested:
@@ -162,13 +178,22 @@ func recipientLocalized(kind string) bool {
 	return false
 }
 
-func catalogPrefix(kind string) string {
+func catalogPrefix(kind string, ctx TemplateContext) string {
 	switch kind {
 	case KindInvite:
+		if ctx.Acknowledgement {
+			return "email.inviteAcknowledgement"
+		}
 		return "email.invite"
 	case KindReminder:
+		if ctx.Acknowledgement {
+			return "email.reminderAcknowledgement"
+		}
 		return "email.reminder"
 	case KindCompletedSigner:
+		if ctx.Acknowledgement {
+			return "email.completedAcknowledgement"
+		}
 		return "email.completedSigner"
 	}
 	return ""
@@ -176,11 +201,12 @@ func catalogPrefix(kind string) string {
 
 func emailParams(ctx TemplateContext) map[string]string {
 	return map[string]string{
-		"sender":    ctx.SenderName,
-		"email":     ctx.SenderEmail,
-		"document":  ctx.DocumentName,
-		"recipient": ctx.RecipientName,
-		"org":       ctx.OrgName,
+		"sender":     ctx.SenderName,
+		"email":      ctx.SenderEmail,
+		"document":   ctx.DocumentName,
+		"recipient":  ctx.RecipientName,
+		"org":        ctx.OrgName,
+		"expires_at": ctx.DownloadExpiresAt,
 	}
 }
 
@@ -193,29 +219,30 @@ func ctaURL(kind string, ctx TemplateContext) string {
 	return ctx.SignURL
 }
 
-// footerKey is the catalog key for a kind's footer; reminder reuses the common
-// footer (it has no dedicated one).
-func footerKey(kind string) string {
-	if kind == KindReminder {
+// footerKey is the catalog key for a kind's footer. Invites deliberately use
+// the factual common footer: deployment/data-flow review, not an email
+// template, determines whether a hosted instance may claim EU sovereignty.
+func footerKey(kind string, ctx TemplateContext) string {
+	if kind == KindInvite || kind == KindReminder {
 		return "email.common.footer"
 	}
-	return catalogPrefix(kind) + ".footer"
+	return catalogPrefix(kind, ctx) + ".footer"
 }
 
 func localizedSubject(kind string, ctx TemplateContext) string {
-	return i18n.T(i18n.Normalize(ctx.Locale), catalogPrefix(kind)+".subject", emailParams(ctx))
+	return i18n.T(i18n.Normalize(ctx.Locale), catalogPrefix(kind, ctx)+".subject", emailParams(ctx))
 }
 
 func localizedHTML(kind string, ctx TemplateContext) string {
 	loc := i18n.Normalize(ctx.Locale)
 	p := emailParams(ctx)
-	prefix := catalogPrefix(kind)
+	prefix := catalogPrefix(kind, ctx)
 	esc := template.HTMLEscapeString
 	eyebrow := esc(i18n.T(loc, prefix+".eyebrow", p))
 	heading := esc(i18n.T(loc, prefix+".heading", p))
 	body := esc(i18n.T(loc, prefix+".body", p))
 	cta := esc(i18n.T(loc, prefix+".cta", p))
-	footer := esc(i18n.T(loc, footerKey(kind), p))
+	footer := esc(i18n.T(loc, footerKey(kind, ctx), p))
 	url := ctaURL(kind, ctx)
 	urlEsc := esc(url)
 
@@ -228,10 +255,6 @@ func localizedHTML(kind string, ctx TemplateContext) string {
 		orOpen := esc(i18n.T(loc, "email.common.orOpenUrl", p))
 		extra = fmt.Sprintf(`<p style="font-size: 13px; color: #666;">%s <a href="%s">%s</a></p>`, orOpen, urlEsc, urlEsc)
 	}
-	beacon := ""
-	if ctx.BeaconURL != "" {
-		beacon = fmt.Sprintf(`<img src="%s" width="1" height="1" alt="" style="display:none">`, esc(ctx.BeaconURL))
-	}
 	return fmt.Sprintf(`<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">%s</p>
@@ -240,18 +263,17 @@ func localizedHTML(kind string, ctx TemplateContext) string {
 %s
 %s
 <p style="font-size: 11px; color: #999; margin-top: 32px;">%s</p>
-%s
-</body></html>`, eyebrow, heading, body, ctaBlock, extra, footer, beacon)
+</body></html>`, eyebrow, heading, body, ctaBlock, extra, footer)
 }
 
 func localizedText(kind string, ctx TemplateContext) string {
 	loc := i18n.Normalize(ctx.Locale)
 	p := emailParams(ctx)
-	prefix := catalogPrefix(kind)
+	prefix := catalogPrefix(kind, ctx)
 	heading := i18n.T(loc, prefix+".heading", p)
 	body := i18n.T(loc, prefix+".body", p)
 	cta := i18n.T(loc, prefix+".cta", p)
-	footer := i18n.T(loc, footerKey(kind), p)
+	footer := i18n.T(loc, footerKey(kind, ctx), p)
 	url := ctaURL(kind, ctx)
 	if url == "" {
 		return fmt.Sprintf("%s\n\n%s\n\n%s\n", heading, body, footer)
@@ -313,18 +335,28 @@ func textFor(kind string) string {
 
 const inviteHTML = `<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
+{{if .Acknowledgement}}
+<p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">Acknowledgement requested</p>
+<h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.SenderName}} sent you {{.DocumentName}}</h1>
+<p>{{.SenderName}} ({{.SenderEmail}}) is asking you to review and acknowledge <strong>{{.DocumentName}}</strong>. No signature will be requested.</p>
+<p style="margin: 24px 0;"><a href="{{.SignURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Review and acknowledge</a></p>
+{{else}}
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">Signature requested</p>
 <h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.SenderName}} sent you {{.DocumentName}}</h1>
 <p>{{.SenderName}} ({{.SenderEmail}}) is asking for your signature on <strong>{{.DocumentName}}</strong>.</p>
 <p style="margin: 24px 0;"><a href="{{.SignURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Review and sign</a></p>
+{{end}}
 <p style="font-size: 13px; color: #666;">Or open this URL: <a href="{{.SignURL}}">{{.SignURL}}</a></p>
-<p style="font-size: 11px; color: #999; margin-top: 32px;">Sent via Hash, EU-sovereign e-signing for {{.OrgName}}.</p>
-{{if .BeaconURL}}<img src="{{.BeaconURL}}" width="1" height="1" alt="" style="display:none">{{end}}
+<p style="font-size: 11px; color: #999; margin-top: 32px;">Sent via Hash for {{.OrgName}}.</p>
 </body></html>`
 
-const inviteText = `{{.SenderName}} sent you {{.DocumentName}} for signature.
+const inviteText = `{{if .Acknowledgement}}{{.SenderName}} sent you {{.DocumentName}} to review and acknowledge. No signature will be requested.
+
+Open this URL to review and acknowledge:
+{{else}}{{.SenderName}} sent you {{.DocumentName}} for signature.
 
 Open this URL to review and sign:
+{{end}}
 {{.SignURL}}
 
 Sent via Hash for {{.OrgName}}.
@@ -333,28 +365,37 @@ Sent via Hash for {{.OrgName}}.
 const reminderHTML = `<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">Reminder</p>
+{{if .Acknowledgement}}
+<h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.DocumentName}} still awaits your acknowledgement</h1>
+<p>Hi {{.RecipientName}}, just a reminder that {{.SenderName}} is waiting for you to review and acknowledge this document. No signature will be requested.</p>
+<p style="margin: 24px 0;"><a href="{{.SignURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Review and acknowledge</a></p>
+{{else}}
 <h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.DocumentName}} still awaiting your signature</h1>
 <p>Hi {{.RecipientName}}, just a reminder that {{.SenderName}} is still waiting on your signature.</p>
 <p style="margin: 24px 0;"><a href="{{.SignURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Open and sign</a></p>
+{{end}}
 <p style="font-size: 11px; color: #999; margin-top: 32px;">Sent via Hash for {{.OrgName}}.</p>
-{{if .BeaconURL}}<img src="{{.BeaconURL}}" width="1" height="1" alt="" style="display:none">{{end}}
 </body></html>`
 
-const reminderText = `Reminder: {{.DocumentName}} is still awaiting your signature.
+const reminderText = `{{if .Acknowledgement}}Reminder: {{.DocumentName}} still awaits your acknowledgement.
+
+Review and acknowledge: {{.SignURL}}
+{{else}}Reminder: {{.DocumentName}} is still awaiting your signature.
 
 Open and sign: {{.SignURL}}
+{{end}}
 `
 
 const completedSignerHTML = `<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">Signed</p>
 <h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">Your signed copy of {{.DocumentName}}</h1>
-<p>The document has been signed by all parties. Your copy is attached below.</p>
+<p>The signing ceremony is complete. Use the link below to download and save the completed signed PDF before {{.DownloadExpiresAt}}. The link does not include the separately stored audit certificate.</p>
 {{if .DownloadURL}}<p style="margin: 24px 0;"><a href="{{.DownloadURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Download signed PDF</a></p>{{end}}
-<p style="font-size: 11px; color: #999; margin-top: 32px;">Sent via Hash for {{.OrgName}}. Keep this email; the audit certificate is bundled with the PDF.</p>
+<p style="font-size: 11px; color: #999; margin-top: 32px;">Sent via Hash for {{.OrgName}}.</p>
 </body></html>`
 
-const completedSignerText = `Your signed copy of {{.DocumentName}} is ready.
+const completedSignerText = `The completed signed PDF for {{.DocumentName}} is ready. The download link expires at {{.DownloadExpiresAt}} and does not include the separately stored audit certificate.
 
 Download: {{.DownloadURL}}
 `
@@ -362,12 +403,18 @@ Download: {{.DownloadURL}}
 const completedSenderHTML = `<!doctype html>
 <html><body style="font-family: Inter, -apple-system, sans-serif; color: #111; padding: 24px; max-width: 560px;">
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">Completed</p>
-<h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.DocumentName}} is fully signed</h1>
-<p>All recipients have signed. The final PDF + audit certificate are ready to download.</p>
-{{if .DownloadURL}}<p style="margin: 24px 0;"><a href="{{.DownloadURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Download final PDF</a></p>{{end}}
+{{if .Acknowledgement}}
+<h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.DocumentName}} acknowledgements are complete</h1>
+<p>All required recipients acknowledged the document. The completed PDF contains no signature image or representation that a party signed. The separately stored audit certificate records acknowledgement evidence and is not included in this download.</p>
+{{else}}
+<h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.DocumentName}} signing ceremony is complete</h1>
+<p>All required signing roles completed. The final signed PDF is ready; the audit certificate is stored separately and is not included in this download.</p>
+{{end}}
+{{if .DownloadURL}}<p style="margin: 24px 0;"><a href="{{.DownloadURL}}" style="background: #111; color: white; padding: 12px 20px; text-decoration: none; border-radius: 6px; display: inline-block;">Download completed PDF</a></p>{{end}}
 </body></html>`
 
-const completedSenderText = `{{.DocumentName}} is signed by all parties. Download: {{.DownloadURL}}
+const completedSenderText = `{{if .Acknowledgement}}All required acknowledgements for {{.DocumentName}} are complete. The PDF contains no signature image or representation that a party signed; the acknowledgement audit certificate is stored separately and is not included in this download.{{else}}All required signing roles for {{.DocumentName}} completed. The audit certificate is stored separately and is not included in this download.{{end}}
+Download completed PDF: {{.DownloadURL}}
 `
 
 const declinedHTML = `<!doctype html>
@@ -413,12 +460,12 @@ const newCommentHTML = `<!doctype html>
 <p style="font-family: monospace; text-transform: uppercase; font-size: 11px; letter-spacing: 0.2em; color: #777;">New comment</p>
 <h1 style="font-weight: 200; font-size: 24px; margin: 8px 0 16px;">{{.RecipientName}} commented on {{.DocumentName}}</h1>
 <blockquote style="border-left: 3px solid #0891B2; padding-left: 12px; color: #555; white-space: pre-wrap;">{{.DeclineReason}}</blockquote>
-{{if .OpenURL}}<p style="margin-top: 20px;"><a href="{{.OpenURL}}" style="display: inline-block; background: #0891B2; color: #fff; text-decoration: none; padding: 10px 18px; border-radius: 6px; font-weight: 600;">Open the document to reply</a></p>{{else if .ReplyURL}}<p style="margin-top: 20px;"><a href="{{.ReplyURL}}" style="display: inline-block; background: #0891B2; color: #fff; text-decoration: none; padding: 10px 18px; border-radius: 6px; font-weight: 600;">Reply</a></p>{{else}}<p style="margin-top: 16px; color: #777;">Open the signing link from your invitation to reply.</p>{{end}}
+{{if .OpenURL}}<p style="margin-top: 20px;"><a href="{{.OpenURL}}" style="display: inline-block; background: #0891B2; color: #fff; text-decoration: none; padding: 10px 18px; border-radius: 6px; font-weight: 600;">Open the document to reply</a></p>{{else}}<p style="margin-top: 16px; color: #777;">Open the signing link from your invitation or reminder, review the current privacy notice, and reply there.</p>{{end}}
 </body></html>`
 
 const newCommentText = `{{.RecipientName}} commented on {{.DocumentName}}:
 {{.DeclineReason}}
-{{if .OpenURL}}Reply: {{.OpenURL}}{{else if .ReplyURL}}Reply: {{.ReplyURL}}{{else}}Open the signing link from your invitation to reply.{{end}}
+{{if .OpenURL}}Reply: {{.OpenURL}}{{else}}Open the signing link from your invitation or reminder, review the current privacy notice, and reply there.{{end}}
 `
 
 const voidedHTML = `<!doctype html>

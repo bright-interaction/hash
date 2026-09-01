@@ -22,7 +22,7 @@
   let showForm = $state(false);
   let editingId = $state<string | null>(null);
   let fName = $state('');
-  let fTier = $state('AES');
+  let fTier = $state('SES');
   let fReason = $state('');
   let fPriority = $state(0);
   let fActive = $state(true);
@@ -159,7 +159,7 @@
   function resetForm() {
     editingId = null;
     fName = '';
-    fTier = 'AES';
+    fTier = 'SES';
     fReason = '';
     fPriority = 0;
     fActive = true;
@@ -174,6 +174,10 @@
     showForm = true;
   }
   function openEdit(r: EIDASRule) {
+    if (r.required_tier === 'AES' || r.required_tier === 'QES') {
+      error = `${r.required_tier} is unavailable in this production release. Deactivate or delete the rule instead.`;
+      return;
+    }
     resetForm();
     editingId = r.id;
     fName = r.name;
@@ -226,6 +230,10 @@
 
   async function save() {
     formError = null;
+    if (fTier !== 'SES') {
+      formError = 'AES and QES are unavailable in this production release.';
+      return;
+    }
     if (!fName.trim()) {
       formError = 'Name is required.';
       return;
@@ -259,6 +267,10 @@
   }
 
   async function toggleActive(r: EIDASRule) {
+    if (!r.active && (r.required_tier === 'AES' || r.required_tier === 'QES')) {
+      error = `${r.required_tier} is unavailable and this rule cannot be reactivated.`;
+      return;
+    }
     try {
       await updateEIDASRule(r.id, { active: !r.active });
       await refresh();
@@ -303,8 +315,13 @@
       <h1 class="page-title">eIDAS routing rules</h1>
     </div>
     <div class="flex gap-2">
-      <button class="btn btn-secondary" onclick={seed} disabled={seeding}>
-        <Sparkles class="size-4" /> {seeding ? 'Seeding...' : 'Seed Swedish defaults'}
+      <button
+        class="btn btn-secondary"
+        onclick={seed}
+        disabled
+        title="Unavailable while AES and QES signing are disabled"
+      >
+        <Sparkles class="size-4" /> Swedish defaults unavailable
       </button>
       <button class="btn btn-primary" onclick={openNew}>
         <Plus class="size-4" /> New rule
@@ -313,10 +330,10 @@
   </div>
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
-    Rules evaluate at send time. The highest tier across matching rules wins;
-    the document refuses to send if its current tier is below that. Swedish
-    defaults: amounts above 100k SEK auto-escalate to AES; above 1M SEK to QES;
-    healthcare auto-escalates to AES.
+    Production signing currently supports SES only. AES and QES are not
+    production-capable and cannot be selected or reactivated. Existing higher-tier
+    rules remain visible so you can deactivate or delete them; any document that
+    requires one of those tiers is blocked rather than silently downgraded to SES.
   </p>
 
   {#if error}
@@ -341,7 +358,7 @@
           <input
             type="text"
             bind:value={fName}
-            placeholder="High-value contracts require AES"
+            placeholder="SES routing note"
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           />
         </label>
@@ -352,8 +369,8 @@
             class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           >
             <option value="SES">SES (simple)</option>
-            <option value="AES">AES (advanced)</option>
-            <option value="QES">QES (qualified / BankID)</option>
+            <option value="AES" disabled>AES (unavailable)</option>
+            <option value="QES" disabled>QES (unavailable)</option>
           </select>
         </label>
         <label class="text-sm">
@@ -369,7 +386,7 @@
           <input
             type="text"
             bind:value={fReason}
-            placeholder="Contracts over 100k SEK need an advanced signature."
+            placeholder="Reason shown when this rule matches."
             class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
           />
         </label>
@@ -481,8 +498,7 @@
       <p class="text-text-muted text-sm">Loading...</p>
     {:else if rules.length === 0}
       <p class="text-text-muted text-sm">
-        No rules yet. Click <em>Seed Swedish defaults</em> for a starting set, or
-        <em>New rule</em> to build your own.
+        No rules yet. Click <em>New rule</em> to add an SES routing rule.
       </p>
     {:else}
       <table class="w-full text-sm">
@@ -502,19 +518,29 @@
                 <div class="font-medium">{r.name}</div>
                 <div class="text-xs text-text-muted">{r.reason}</div>
               </td>
-              <td class="font-mono text-xs {tierColor(r.required_tier)}">{r.required_tier}</td>
+              <td class="font-mono text-xs {tierColor(r.required_tier)}">
+                {r.required_tier}{r.required_tier === 'AES' || r.required_tier === 'QES' ? ' · unavailable' : ''}
+              </td>
               <td class="font-mono text-xs">{r.priority}</td>
               <td>
                 <button
                   class="text-xs font-mono underline decoration-dotted"
                   onclick={() => toggleActive(r)}
+                  disabled={!r.active && (r.required_tier === 'AES' || r.required_tier === 'QES')}
                   title="Toggle active"
                 >
                   {r.active ? 'yes' : 'no'}
                 </button>
               </td>
               <td class="text-right whitespace-nowrap">
-                <button class="btn btn-secondary text-xs" onclick={() => openEdit(r)}>
+                <button
+                  class="btn btn-secondary text-xs"
+                  onclick={() => openEdit(r)}
+                  disabled={r.required_tier === 'AES' || r.required_tier === 'QES'}
+                  title={r.required_tier === 'AES' || r.required_tier === 'QES'
+                    ? `${r.required_tier} is unavailable; deactivate or delete this rule`
+                    : 'Edit rule'}
+                >
                   <Pencil class="size-3" />
                 </button>
                 <button class="btn btn-secondary text-xs" onclick={() => remove(r.id)}>
@@ -570,8 +596,8 @@
           class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
         >
           <option value="SES">SES</option>
-          <option value="AES">AES</option>
-          <option value="QES">QES</option>
+          <option value="AES" disabled>AES (unavailable)</option>
+          <option value="QES" disabled>QES (unavailable)</option>
         </select>
       </label>
     </div>
@@ -590,7 +616,9 @@
         <div class="flex items-baseline gap-2 mb-2">
           <span class="text-sm text-text-muted">Required tier:</span>
           <span class="font-mono text-base {tierColor(pvResult.required_tier)}">{pvResult.required_tier}</span>
-          {#if pvResult.would_block}
+          {#if pvResult.required_tier === 'AES' || pvResult.required_tier === 'QES'}
+            <span class="text-xs text-danger ml-2">unavailable in this release · send blocked</span>
+          {:else if pvResult.would_block}
             <span class="text-xs text-danger ml-2">would block this send</span>
           {:else}
             <span class="text-xs text-success ml-2">send allowed at current tier</span>

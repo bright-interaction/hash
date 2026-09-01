@@ -38,11 +38,17 @@ func registerWorkflowTools(s *Server, d Deps) {
 		Description: "Transition a draft document to sent. Mints a fresh magic link per signer and queues invite emails + a document.sent webhook. Returns one signing URL per recipient.",
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid (must be in draft state)"),
-		}, []string{"document_id"}),
+			"lawful_basis": map[string]any{
+				"type":        "string",
+				"enum":        []string{"contract"},
+				"description": "Controller confirmation that GDPR Article 6(1)(b), contract or requested pre-contractual steps, applies to this document",
+			},
+		}, []string{"document_id", "lawful_basis"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
 			var p struct {
-				DocumentID string `json:"document_id"`
+				DocumentID  string `json:"document_id"`
+				LawfulBasis string `json:"lawful_basis"`
 			}
 			if err := MustParseArgs(args, &p); err != nil {
 				return nil, err
@@ -54,6 +60,9 @@ func registerWorkflowTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
+			if err := send.ValidateLawfulBasis(p.LawfulBasis); err != nil {
+				return nil, err
+			}
 			// Route through the lifecycle engine so the agent send path
 			// enforces the SAME quota gate, variable freeze, eIDAS guard, and
 			// magic-token expiry as the REST surface. The raw UPDATE this
@@ -61,6 +70,7 @@ func registerWorkflowTools(s *Server, d Deps) {
 			res, err := d.Send.Send(r.Context(), send.Actor{
 				UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email,
 				IP: clientIP(r), Via: "mcp", Tool: "send_document",
+				LawfulBasis: p.LawfulBasis,
 			}, id)
 			if err != nil {
 				return nil, err
@@ -185,20 +195,43 @@ func registerWorkflowTools(s *Server, d Deps) {
 				}
 				expiresArg = pgtype.Timestamptz{Time: t, Valid: true}
 			}
-			doc, err := d.Queries.UpdateDocumentMetadata(r.Context(), generated.UpdateDocumentMetadataParams{
+			if d.Pool == nil || d.Audit == nil {
+				return nil, errors.New("atomic audit dependencies unavailable")
+			}
+			tx, err := d.Pool.Begin(r.Context())
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = tx.Rollback(r.Context()) }()
+			q := d.Queries.WithTx(tx)
+			locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
+			if err != nil {
+				return nil, err
+			}
+			if locked.Status != "draft" {
+				return nil, errors.New("expiry can only be edited while the document is draft")
+			}
+			doc, err := q.UpdateDocumentMetadata(r.Context(), generated.UpdateDocumentMetadataParams{
 				ID: id, OrgID: u.OrgID,
-				Name:      existing.Name,
+				Name:      locked.Name,
 				ExpiresAt: expiresArg,
-				Metadata:  existing.Metadata,
+				Metadata:  locked.Metadata,
 			})
 			if err != nil {
 				return nil, err
 			}
-			logMCPEvent(r, d, audit.Entry{
+			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
 				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
 				Kind:    audit.KindDocumentUpdated,
 				Payload: map[string]any{"via": "mcp", "tool": "set_expiry", "expires_at": p.ExpiresAt},
 			})
+			if err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return nil, err
+			}
+			d.Audit.Publish(pending)
 			return doc, nil
 		},
 	})
@@ -232,36 +265,54 @@ func registerWorkflowTools(s *Server, d Deps) {
 			if p.Key == "" {
 				return nil, errors.New("key required")
 			}
-			existing, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, errors.New("document not found")
+			if d.Pool == nil || d.Audit == nil {
+				return nil, errors.New("atomic audit dependencies unavailable")
 			}
+			tx, err := d.Pool.Begin(r.Context())
 			if err != nil {
 				return nil, err
 			}
+			defer func() { _ = tx.Rollback(r.Context()) }()
+			q := d.Queries.WithTx(tx)
+			locked, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
+			if err != nil {
+				return nil, err
+			}
+			if locked.Status != "draft" {
+				return nil, errors.New("metadata can only be edited while the document is draft")
+			}
 			meta := map[string]any{}
-			if len(existing.Metadata) > 0 {
-				_ = json.Unmarshal(existing.Metadata, &meta)
+			if len(locked.Metadata) > 0 {
+				if err := json.Unmarshal(locked.Metadata, &meta); err != nil {
+					return nil, fmt.Errorf("stored metadata invalid: %w", err)
+				}
 			}
 			meta[p.Key] = p.Value
 			raw, err := json.Marshal(meta)
 			if err != nil {
 				return nil, err
 			}
-			doc, err := d.Queries.UpdateDocumentMetadata(r.Context(), generated.UpdateDocumentMetadataParams{
+			doc, err := q.UpdateDocumentMetadata(r.Context(), generated.UpdateDocumentMetadataParams{
 				ID: id, OrgID: u.OrgID,
-				Name:      existing.Name,
-				ExpiresAt: existing.ExpiresAt,
+				Name:      locked.Name,
+				ExpiresAt: locked.ExpiresAt,
 				Metadata:  raw,
 			})
 			if err != nil {
 				return nil, err
 			}
-			logMCPEvent(r, d, audit.Entry{
+			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
 				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
 				Kind:    audit.KindDocumentUpdated,
 				Payload: map[string]any{"via": "mcp", "tool": "attach_metadata", "key": p.Key, "value": p.Value},
 			})
+			if err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return nil, err
+			}
+			d.Audit.Publish(pending)
 			return doc, nil
 		},
 	})

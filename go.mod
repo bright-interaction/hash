@@ -1,14 +1,6 @@
 module github.com/bright-interaction/hash
 
-go 1.26.3
-
-// Pinned to the toolchain the container image already builds with. Without this,
-// go.mod permits an older Go and govulncheck reports the standard-library
-// vulnerabilities fixed in 1.26.6 (net/http ReadHeaderTimeout on the unencrypted
-// HTTP/2 check, encoding/xml and encoding/asn1 decode recursion, x/net/idna
-// Punycode label rejection) as reachable. The pin makes the
-// version that keeps this safe a guarantee rather than a property of the base image.
-toolchain go1.26.6
+go 1.26.7
 
 require (
 	github.com/coreos/go-oidc/v3 v3.11.0
@@ -21,8 +13,8 @@ require (
 	github.com/minio/minio-go/v7 v7.0.77
 	github.com/pdfcpu/pdfcpu v0.12.0
 	github.com/pressly/goose/v3 v3.22.1
-	golang.org/x/net v0.56.0
-	golang.org/x/oauth2 v0.23.0
+	golang.org/x/net v0.57.0
+	golang.org/x/oauth2 v0.27.0
 	nhooyr.io/websocket v1.8.17
 )
 
@@ -40,7 +32,7 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
-	github.com/klauspost/compress v1.17.9 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
@@ -51,7 +43,7 @@ require (
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/image v0.45.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect

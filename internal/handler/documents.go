@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	blockschema "github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/sanitize"
 	"github.com/bright-interaction/hash/internal/sign"
@@ -170,27 +171,56 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 		if len(blocks) == 0 {
 			blocks = json.RawMessage(`{"version":1,"blocks":[]}`)
 		}
+		normalizedBlocks, err := blockschema.NormalizeTreeJSON(blocks)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid blocks_json: "+err.Error())
+			return
+		}
+		blocks = normalizedBlocks
 		if len(vars) == 0 {
 			vars = json.RawMessage(`{}`)
 		}
-		d, err := s.Queries.CreateBlocksDocument(r.Context(), generated.CreateBlocksDocumentParams{
-			OrgID:         u.OrgID,
-			TemplateID:    templateID,
-			Name:          in.Name,
-			BlocksJson:    blocks,
-			VariablesJson: vars,
-			SenderID:      u.UserID,
-			ExpiresAt:     expiresAt,
-		})
+		if _, err := blockschema.ParseVariableValues(vars); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid variables_json: "+err.Error())
+			return
+		}
+		d, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+			func(q *generated.Queries) (*generated.Document, error) {
+				if err := s.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
+					return nil, err
+				}
+				doc, err := q.CreateBlocksDocument(r.Context(), generated.CreateBlocksDocumentParams{
+					OrgID:         u.OrgID,
+					TemplateID:    templateID,
+					Name:          in.Name,
+					BlocksJson:    blocks,
+					VariablesJson: vars,
+					SenderID:      u.UserID,
+					ExpiresAt:     expiresAt,
+				})
+				if err != nil {
+					return nil, err
+				}
+				if err := s.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
+					return nil, err
+				}
+				return doc, nil
+			},
+			func(d *generated.Document) audit.Entry {
+				return audit.Entry{
+					OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &d.ID,
+					Kind:    audit.KindDocumentCreated,
+					Payload: map[string]any{"name": d.Name, "source_kind": "blocks"},
+				}
+			},
+		)
 		if err != nil {
+			if s.writeAuthoringQuotaError(w, err) {
+				return
+			}
 			writeInternalErrorMsg(w, "create document failed", err)
 			return
 		}
-		_, _ = s.Audit.Log(r.Context(), audit.Entry{
-			OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &d.ID,
-			Kind:    audit.KindDocumentCreated,
-			Payload: map[string]any{"name": d.Name, "source_kind": "blocks"},
-		})
 		writeJSON(w, http.StatusCreated, toDocumentResponse(d))
 	case "pdf":
 		// For week 1 the PDF path requires an existing template (so we have
@@ -211,34 +241,55 @@ func (s *Server) handleCreateDocument(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "template is not a pdf-source template")
 			return
 		}
-		d, err := s.Queries.CreatePDFDocument(r.Context(), generated.CreatePDFDocumentParams{
-			OrgID:         u.OrgID,
-			TemplateID:    templateID,
-			Name:          in.Name,
-			PdfStorageKey: tpl.PdfStorageKey,
-			PdfSha256:     tpl.PdfSha256,
-			SenderID:      u.UserID,
-			ExpiresAt:     expiresAt,
-		})
+		rep, repErr := sanitize.SyntheticTemplateReport()
+		if repErr != nil {
+			writeInternalErrorMsg(w, "create metadata redaction report", repErr)
+			return
+		}
+		d, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+			func(q *generated.Queries) (*generated.Document, error) {
+				if err := s.Billing.LockDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
+					return nil, err
+				}
+				d, err := q.CreatePDFDocument(r.Context(), generated.CreatePDFDocumentParams{
+					OrgID:                       u.OrgID,
+					TemplateID:                  templateID,
+					Name:                        in.Name,
+					PdfStorageKey:               tpl.PdfStorageKey,
+					PdfSha256:                   tpl.PdfSha256,
+					PdfStorageVersionID:         tpl.PdfStorageVersionID,
+					EvidenceVersionPinsRequired: tpl.EvidenceVersionPinRequired,
+					SenderID:                    u.UserID,
+					ExpiresAt:                   expiresAt,
+				})
+				if err != nil {
+					return nil, err
+				}
+				if err := q.UpdateMetadataRedactionReport(r.Context(), generated.UpdateMetadataRedactionReportParams{
+					ID: d.ID, MetadataRedactionReport: rep,
+				}); err != nil {
+					return nil, err
+				}
+				if err := s.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
+					return nil, err
+				}
+				return d, nil
+			},
+			func(d *generated.Document) audit.Entry {
+				return audit.Entry{
+					OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &d.ID,
+					Kind:    audit.KindDocumentCreated,
+					Payload: map[string]any{"name": d.Name, "source_kind": "pdf"},
+				}
+			},
+		)
 		if err != nil {
+			if s.writeAuthoringQuotaError(w, err) {
+				return
+			}
 			writeInternalErrorMsg(w, "create document failed", err)
 			return
 		}
-		// Phase 8.7: every pdf-source template was sanitized on upload
-		// (handleCreatePDFTemplate routes through sanitize.Clean). Record
-		// that on the document so the audit cert can attest to the
-		// GDPR-safe handling without having to look up the template row.
-		if rep, err := sanitize.SyntheticTemplateReport(); err == nil {
-			_ = s.Queries.UpdateMetadataRedactionReport(r.Context(), generated.UpdateMetadataRedactionReportParams{
-				ID:                      d.ID,
-				MetadataRedactionReport: rep,
-			})
-		}
-		_, _ = s.Audit.Log(r.Context(), audit.Entry{
-			OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &d.ID,
-			Kind:    audit.KindDocumentCreated,
-			Payload: map[string]any{"name": d.Name, "source_kind": "pdf"},
-		})
 		writeJSON(w, http.StatusCreated, toDocumentResponse(d))
 	}
 }
@@ -328,7 +379,7 @@ func (s *Server) handleGetDocumentPDF(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "document has no source pdf")
 		return
 	}
-	body, err := s.Storage.Get(r.Context(), d.PdfStorageKey.String)
+	body, err := readDocumentArtifact(r.Context(), s.Storage, d, d.PdfStorageKey.String, d.PdfSha256, d.PdfStorageVersionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load pdf failed")
 		return
@@ -374,6 +425,22 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "document not in draft state")
 		return
 	}
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := s.Queries.WithTx(tx)
+	existing, err = q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: id, OrgID: u.OrgID})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if existing.Status != "draft" {
+		writeError(w, http.StatusConflict, "document not in draft state")
+		return
+	}
 
 	// Block updates only valid for block-source documents.
 	if existing.SourceKind == "blocks" && (len(in.BlocksJSON) > 0 || len(in.VariablesJSON) > 0) {
@@ -381,11 +448,20 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		if len(blocks) == 0 {
 			blocks = existing.BlocksJson
 		}
+		blocks, err = blockschema.NormalizeTreeJSON(blocks)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid blocks_json: "+err.Error())
+			return
+		}
 		vars := in.VariablesJSON
 		if len(vars) == 0 {
 			vars = existing.VariablesJson
 		}
-		if _, err := s.Queries.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
+		if _, err := blockschema.ParseVariableValues(vars); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid variables_json: "+err.Error())
+			return
+		}
+		if _, err := q.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
 			ID:            id,
 			OrgID:         u.OrgID,
 			BlocksJson:    blocks,
@@ -412,7 +488,7 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		}
 		expiresArg = pgtype.Timestamptz{Time: t, Valid: true}
 	}
-	d, err := s.Queries.UpdateDocumentMetadata(r.Context(), generated.UpdateDocumentMetadataParams{
+	d, err := q.UpdateDocumentMetadata(r.Context(), generated.UpdateDocumentMetadataParams{
 		ID:        id,
 		OrgID:     u.OrgID,
 		Name:      name,
@@ -427,7 +503,7 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 	// Document-level default signing language: the sender's "send this in
 	// Swedish" choice. New recipients inherit it (see handleCreateRecipient).
 	if in.DefaultLocale != "" && in.DefaultLocale != d.DefaultLocale {
-		d, err = s.Queries.SetDocumentDefaultLocale(r.Context(), generated.SetDocumentDefaultLocaleParams{
+		d, err = q.SetDocumentDefaultLocale(r.Context(), generated.SetDocumentDefaultLocaleParams{
 			ID:            id,
 			OrgID:         u.OrgID,
 			DefaultLocale: in.DefaultLocale,
@@ -441,7 +517,7 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 	// Signature mode: draft-only toggle between signature-required and
 	// acknowledgement (view/accept). Locked once sent.
 	if in.RequiresSignature != nil && *in.RequiresSignature != d.RequiresSignature {
-		d, err = s.Queries.SetDocumentRequiresSignature(r.Context(), generated.SetDocumentRequiresSignatureParams{
+		d, err = q.SetDocumentRequiresSignature(r.Context(), generated.SetDocumentRequiresSignatureParams{
 			ID:                id,
 			OrgID:             u.OrgID,
 			RequiresSignature: *in.RequiresSignature,
@@ -452,10 +528,19 @@ func (s *Server) handleUpdateDocument(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &d.ID,
 		Kind: audit.KindDocumentUpdated,
 	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	s.Audit.Publish(pending)
 	writeJSON(w, http.StatusOK, toDocumentResponse(d))
 }
 
@@ -592,8 +677,16 @@ func (s *Server) handleReviseDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	doc, err := s.Sign.Revise(r.Context(), u.OrgID, id)
 	if err != nil {
+		if errors.Is(err, sign.ErrEnvelopeTransitionUnsupported) {
+			writeError(w, http.StatusConflict, "envelope revision is not supported; void the envelope and create a new draft instead")
+			return
+		}
 		if errors.Is(err, sign.ErrNotRevisable) {
 			writeError(w, http.StatusConflict, "document is not awaiting revision")
+			return
+		}
+		if errors.Is(err, sign.ErrRevisionWouldDestroyEvidence) {
+			writeError(w, http.StatusConflict, "revision blocked because this ceremony already contains captured legal evidence; void and create a superseding document instead")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "revise failed")
@@ -688,9 +781,52 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Queries.DeleteDraftDocument(r.Context(), generated.DeleteDraftDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
-		writeError(w, http.StatusInternalServerError, "delete document failed")
+	// GetDocumentByID includes already-soft-deleted rows. That makes object
+	// cleanup retryable if PostgreSQL accepted the delete but MinIO was
+	// temporarily unavailable during the first request.
+	doc, err := s.Queries.GetDocumentByID(r.Context(), id)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && doc.OrgID != u.OrgID) {
+		writeError(w, http.StatusNotFound, "document not found")
 		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "get document failed")
+		return
+	}
+	if doc.Status != "draft" {
+		writeError(w, http.StatusConflict, "only draft documents can be deleted")
+		return
+	}
+	if !doc.DeletedAt.Valid {
+		if err := s.Queries.DeleteDraftDocument(r.Context(), generated.DeleteDraftDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
+			writeError(w, http.StatusInternalServerError, "delete document failed")
+			return
+		}
+		// DeleteDraftDocument is an :exec query and therefore reports nil even
+		// when a concurrent send changed the status and the guarded UPDATE
+		// matched zero rows. Re-read before deleting bytes so that race cannot
+		// remove the source underneath an active agreement.
+		doc, err = s.Queries.GetDocumentByID(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "verify document delete failed")
+			return
+		}
+		if !doc.DeletedAt.Valid {
+			writeError(w, http.StatusConflict, "document changed state before it could be deleted")
+			return
+		}
+	}
+
+	keys := draftSourceObjectKeys(doc)
+	if len(keys) > 0 && s.Storage == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage unavailable for document cleanup")
+		return
+	}
+	for _, key := range keys {
+		if err := deleteObjectDetached(r.Context(), s.Storage, key); err != nil {
+			writeInternalErrorMsg(w, "delete document source failed; retry the delete", err)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -14,7 +14,7 @@
   let newURL = $state('');
   let evt = $state({
     sent: true, viewed: false, signed: true, completed: true,
-    declined: true, voided: false, expired: false, bounced: false
+    declined: true, changesRequested: true, voided: false, expired: false, bounced: false
   });
   let creating = $state(false);
 
@@ -52,6 +52,7 @@
       if (evt.signed) events.push('document.signed');
       if (evt.completed) events.push('document.completed');
       if (evt.declined) events.push('document.declined');
+      if (evt.changesRequested) events.push('document.changes_requested');
       if (evt.voided) events.push('document.voided');
       if (evt.expired) events.push('document.expired');
       if (evt.bounced) events.push('recipient.bounced');
@@ -175,6 +176,7 @@
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.signed} /> document.signed</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.completed} /> document.completed</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.declined} /> document.declined</label>
+        <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.changesRequested} /> document.changes_requested</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.voided} /> document.voided</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.expired} /> document.expired</label>
         <label class="flex items-center gap-2"><input type="checkbox" bind:checked={evt.bounced} /> recipient.bounced</label>

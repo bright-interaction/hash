@@ -13,6 +13,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	recipientrules "github.com/bright-interaction/hash/internal/recipients"
 )
 
 // registerEngagementTools mounts the Phase 8.3 read surface for agents.
@@ -24,7 +25,7 @@ import (
 func registerEngagementTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:        "get_document_engagement",
-		Description: "Return the per-block dwell/view rollup for a document. Privacy gate: if the document has only one recipient and they haven't signed, the rollup is hidden until they do (GDPR proportionality).",
+		Description: "Return the retained legacy per-block dwell/view rollup for a document. New signer analytics are disabled. Privacy gate: for a one-recipient document, legacy data stays hidden until the recipient signs or accepts (GDPR proportionality).",
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid"),
 		}, []string{"document_id"}),
@@ -53,18 +54,18 @@ func registerEngagementTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			allSigned := true
+			allResponded := true
 			for _, rc := range recipients {
-				if rc.Status != "signed" && rc.Status != "completed" {
-					allSigned = false
+				if !recipientrules.HasTerminalResponse(rc.Status) {
+					allResponded = false
 					break
 				}
 			}
-			if len(recipients) <= 1 && !allSigned {
+			if len(recipients) <= 1 && !allResponded {
 				return map[string]any{
 					"blocks":        []any{},
 					"privacy_gated": true,
-					"reason":        "single-recipient engagement is hidden until the recipient signs",
+					"reason":        "single-recipient engagement is hidden until the recipient responds",
 				}, nil
 			}
 			rows, err := d.Queries.ListEngagementByDocument(r.Context(), id)
@@ -91,7 +92,7 @@ func registerEngagementTools(s *Server, d Deps) {
 
 	s.RegisterTool(ToolDef{
 		Name:        "get_document_telemetry_stream",
-		Description: "Return the most recent raw signer-side telemetry events for a document (block.viewed, page.scroll, interaction.click, session.start/end). Up to 200 by default, max 500. Returns block_id, kind, payload, ua_class, country, timestamp. Same single-recipient privacy gate as get_document_engagement. Phase 8.8 owns get_document_timeline for the audit-event view.",
+		Description: "Return retained legacy signer-side telemetry events for a document. New signer analytics are disabled. Up to 200 by default, max 500; the same sign-or-accept single-recipient privacy gate as get_document_engagement applies. Phase 8.8 owns get_document_timeline for audit events.",
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid"),
 			"limit":       intSchema("max events (default 200, max 500)", 1, 500, 200),
@@ -129,14 +130,14 @@ func registerEngagementTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, err
 			}
-			allSigned := true
+			allResponded := true
 			for _, rc := range recipients {
-				if rc.Status != "signed" && rc.Status != "completed" {
-					allSigned = false
+				if !recipientrules.HasTerminalResponse(rc.Status) {
+					allResponded = false
 					break
 				}
 			}
-			if len(recipients) <= 1 && !allSigned {
+			if len(recipients) <= 1 && !allResponded {
 				return map[string]any{"events": []any{}, "privacy_gated": true}, nil
 			}
 			rows, err := d.Queries.ListTelemetryByDocument(r.Context(), generated.ListTelemetryByDocumentParams{

@@ -27,6 +27,9 @@ func TestVerifyExpired(t *testing.T) {
 	if _, err := Verify("k", tok, now.Add(2*time.Minute)); err != ErrExpired {
 		t.Fatalf("expected ErrExpired, got %v", err)
 	}
+	if _, err := Verify("k", tok, now.Add(time.Minute)); err != ErrExpired {
+		t.Fatalf("token must expire at the exact exp boundary, got %v", err)
+	}
 }
 
 func TestVerifyTamperAndWrongKey(t *testing.T) {

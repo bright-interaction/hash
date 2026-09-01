@@ -4,10 +4,12 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
@@ -87,9 +89,25 @@ func (s *Server) handleUpdateMemberRole(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Serialize role changes for the whole organization. Locking only the target
+	// user permits two concurrent last-owner demotions to both observe two owners
+	// and leave the tenant ownerless.
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "begin role update failed")
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	var lockedOrg uuid.UUID
+	if err := tx.QueryRow(r.Context(), `SELECT id FROM orgs WHERE id = $1 FOR UPDATE`, u.OrgID).Scan(&lockedOrg); err != nil {
+		writeError(w, http.StatusInternalServerError, "lock organization failed")
+		return
+	}
+	q := s.Queries.WithTx(tx)
+
 	// Resolve the target within the caller's org (ListUsersByOrg is org-scoped,
 	// so this also enforces no cross-tenant edits).
-	rows, err := s.Queries.ListUsersByOrg(r.Context(), u.OrgID)
+	rows, err := q.ListUsersByOrg(r.Context(), u.OrgID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "lookup failed")
 		return
@@ -109,7 +127,7 @@ func (s *Server) handleUpdateMemberRole(w http.ResponseWriter, r *http.Request) 
 	// Never strip the org's last owner: that would lock everyone out of org
 	// settings + member management permanently.
 	if target.Role == "owner" && in.Role != "owner" {
-		owners, oerr := s.Queries.CountOrgOwners(r.Context(), u.OrgID)
+		owners, oerr := q.CountOrgOwners(r.Context(), u.OrgID)
 		if oerr != nil {
 			writeError(w, http.StatusInternalServerError, "owner check failed")
 			return
@@ -120,14 +138,18 @@ func (s *Server) handleUpdateMemberRole(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	row, err := s.Queries.UpdateUserRole(r.Context(), generated.UpdateUserRoleParams{
+	row, err := q.UpdateUserRole(r.Context(), generated.UpdateUserRoleParams{
 		ID: id, OrgID: u.OrgID, Role: in.Role,
 	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "member not found")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "update role failed")
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID: u.OrgID, ActorUserID: &u.UserID,
 		Kind: "member.role_changed",
 		IP:   clientIP(r),
@@ -137,5 +159,14 @@ func (s *Server) handleUpdateMemberRole(w http.ResponseWriter, r *http.Request) 
 			"to":        in.Role,
 		},
 	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "audit role update failed")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "commit role update failed")
+		return
+	}
+	s.Audit.Publish(pending)
 	writeJSON(w, http.StatusOK, toMemberResponse(row, u.UserID))
 }

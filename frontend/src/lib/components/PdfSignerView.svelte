@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { signerNoticeHeaders } from '$lib/api/signerNotice';
   import { t } from '$lib/i18n';
 
   type Field = {
@@ -18,52 +19,84 @@
 
   type Props = {
     token: string;
+    noticeDigest: string;
     signed?: boolean;
     onFilledChange?: (filled: boolean) => void;
     onSignatureClick?: () => void;
   };
-  let { token, signed = false, onFilledChange, onSignatureClick }: Props = $props();
+  let { token, noticeDigest, signed = false, onFilledChange, onSignatureClick }: Props = $props();
 
   type PageInfo = { num: number; w: number };
 
   let pages = $state<PageInfo[]>([]);
   let fields = $state<Field[]>([]);
+  let fieldsLoaded = $state(false);
   let loading = $state(true);
   let error = $state<string | null>(null);
   const buf = $state<Record<string, string>>({});
+  const persisted = $state<Record<string, string>>({});
+  const saving = $state<Record<string, boolean>>({});
+  const saveErrors = $state<Record<string, string>>({});
   const canvasEls: Record<number, HTMLCanvasElement> = {};
   const MAX_W = 760;
 
-  function isFilled(f: Field): boolean {
-    const v = buf[f.id] ?? '';
+  function emptyValue(f: Field): string {
+    return f.type === 'checkbox' ? 'false' : '';
+  }
+
+  function isFilled(f: Field, v: string): boolean {
     if (f.type === 'checkbox') return v === 'true';
     return v.trim() !== '';
   }
+
   function recomputeFilled(): boolean {
+    if (!fieldsLoaded) return false;
+    if (Object.keys(saveErrors).length > 0) return false;
     for (const f of fields) {
-      if (f.type === 'signature' || !f.required) continue;
-      if (!isFilled(f)) return false;
+      if (f.type === 'signature') continue;
+      const draftValue = buf[f.id] ?? emptyValue(f);
+      const persistedValue = persisted[f.id] ?? emptyValue(f);
+      // Do not let signing race an autosave or proceed with a value that the
+      // server has not confirmed. This also protects optional edits from being
+      // silently lost when the recipient signs immediately after changing one.
+      if (saving[f.id] || draftValue !== persistedValue) return false;
+      if (f.required && !isFilled(f, persistedValue)) return false;
     }
     return true;
   }
+
   $effect(() => {
-    // referencing buf + fields keeps this reactive to every keystroke.
+    // Referencing each state object keeps the parent gate reactive to field
+    // loading, every keystroke, and every autosave transition.
+    void fieldsLoaded;
     void JSON.stringify(buf);
+    void JSON.stringify(persisted);
+    void JSON.stringify(saving);
+    void JSON.stringify(saveErrors);
     void fields.length;
     onFilledChange?.(recomputeFilled());
   });
 
   onMount(async () => {
     try {
-      const pdf = await import('$lib/pdf');
       const fres = await fetch(`/sign/${token}/fields`);
-      if (fres.ok) {
-        const data = (await fres.json()) as { fields: Field[] };
-        fields = data.fields ?? [];
-        for (const f of fields) {
-          buf[f.id] = f.value ?? (f.type === 'checkbox' ? 'false' : '');
-        }
+      if (!fres.ok) {
+        throw new Error(await responseError(fres));
       }
+      const data = (await fres.json()) as { fields: Field[] };
+      fields = data.fields ?? [];
+      for (const f of fields) {
+        const value = f.value ?? emptyValue(f);
+        buf[f.id] = value;
+        persisted[f.id] = value;
+      }
+      fieldsLoaded = true;
+    } catch (e) {
+      error = `Unable to load document fields: ${errorMessage(e)}`;
+    }
+
+    try {
+      const pdf = await import('$lib/pdf');
       const doc = await pdf.loadPdf(`/sign/${token}/pdf`);
       const infos: PageInfo[] = [];
       const scales: number[] = [];
@@ -82,33 +115,89 @@
       }
       pages = [...pages];
     } catch (e) {
-      error = (e as Error).message;
+      const message = `Unable to load document: ${errorMessage(e)}`;
+      error = error ? `${error} ${message}` : message;
     } finally {
       loading = false;
     }
   });
 
-  async function saveField(f: Field) {
+  function errorMessage(value: unknown): string {
+    return value instanceof Error && value.message ? value.message : 'The request failed.';
+  }
+
+  async function responseError(res: Response): Promise<string> {
+    const fallback = `The request failed (${res.status}).`;
+    const body = (await res.text()).trim();
+    if (!body) return fallback;
     try {
-      await fetch(`/sign/${token}/fields`, {
+      const parsed = JSON.parse(body) as { error?: unknown };
+      if (typeof parsed.error === 'string' && parsed.error.trim()) return parsed.error.trim();
+    } catch {
+      // A plain-text response is already suitable for the visible error below.
+    }
+    return body;
+  }
+
+  async function saveField(f: Field) {
+    const nextValue = buf[f.id] ?? emptyValue(f);
+    const previousValue = persisted[f.id] ?? emptyValue(f);
+    if (saving[f.id] || nextValue === previousValue) return;
+
+    saving[f.id] = true;
+    delete saveErrors[f.id];
+    try {
+      const res = await fetch(`/sign/${token}/fields`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ values: [{ field_id: f.id, value: buf[f.id] ?? '' }] }),
+        headers: signerNoticeHeaders(noticeDigest, true),
+        body: JSON.stringify({ values: [{ field_id: f.id, value: nextValue }] }),
       });
+      if (!res.ok) {
+        throw new Error(await responseError(res));
+      }
+
+      const data = (await res.json()) as { updated?: Field[] };
+      const updated = data.updated?.find((candidate) => candidate.id === f.id);
+      if (!updated) {
+        throw new Error('The server did not confirm the saved field.');
+      }
+
+      const confirmedValue = updated.value ?? emptyValue(f);
+      persisted[f.id] = confirmedValue;
+      buf[f.id] = confirmedValue;
+      const index = fields.findIndex((candidate) => candidate.id === f.id);
+      if (index >= 0) {
+        fields[index] = { ...fields[index], ...updated };
+        fields = [...fields];
+      }
     } catch (e) {
-      error = (e as Error).message;
+      // A failed request may not have reached the server. Revert the visible
+      // control to the last confirmed value so the UI and signing gate agree
+      // with the durable ceremony state.
+      buf[f.id] = previousValue;
+      saveErrors[f.id] = errorMessage(e);
+    } finally {
+      saving[f.id] = false;
     }
   }
 
   function fieldsOnPage(page: number): Field[] {
     return fields.filter((f) => f.page === page);
   }
+
+  function fieldName(fieldID: string): string {
+    const field = fields.find((candidate) => candidate.id === fieldID);
+    return field?.label || field?.type || 'field';
+  }
 </script>
 
 <div class="pdf-signer">
   {#if error}
-    <div class="err">{error}</div>
+    <div class="err" role="alert">{error}</div>
   {/if}
+  {#each Object.entries(saveErrors) as [fieldID, message] (fieldID)}
+    <div class="err" role="alert">Could not save {fieldName(fieldID)}: {message}</div>
+  {/each}
   {#if loading}
     <p class="muted">{$t('pdf.loading')}</p>
   {:else}
@@ -123,8 +212,11 @@
                 class="fld sig"
                 class:done={signed}
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
-                onclick={() => onSignatureClick?.()}
-                disabled={signed}
+                onclick={() => {
+                  if (recomputeFilled()) onSignatureClick?.();
+                }}
+                disabled={signed || !recomputeFilled()}
+                title={!recomputeFilled() ? $t('sign.fillRequiredTitle') : ''}
               >
                 {signed ? $t('pdf.signed') : $t('pdf.signHere')}
               </button>
@@ -136,9 +228,13 @@
                 <input
                   type="checkbox"
                   checked={buf[f.id] === 'true'}
+                  class:save-failed={Boolean(saveErrors[f.id])}
+                  aria-invalid={Boolean(saveErrors[f.id])}
+                  aria-busy={Boolean(saving[f.id])}
+                  disabled={Boolean(saving[f.id])}
                   onchange={(e) => {
                     buf[f.id] = (e.currentTarget as HTMLInputElement).checked ? 'true' : 'false';
-                    saveField(f);
+                    void saveField(f);
                   }}
                 />
               </label>
@@ -147,7 +243,11 @@
                 class="fld inp"
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
                 bind:value={buf[f.id]}
-                onchange={() => saveField(f)}
+                class:save-failed={Boolean(saveErrors[f.id])}
+                aria-invalid={Boolean(saveErrors[f.id])}
+                aria-busy={Boolean(saving[f.id])}
+                disabled={Boolean(saving[f.id])}
+                onchange={() => void saveField(f)}
               >
                 <option value="">{f.label || 'Select…'}</option>
                 {#each f.options?.choices ?? [] as c}
@@ -161,7 +261,11 @@
                 placeholder={f.label || f.type}
                 style="left:{f.x_pct}%;top:{f.y_pct}%;width:{f.w_pct}%;height:{f.h_pct}%"
                 bind:value={buf[f.id]}
-                onchange={() => saveField(f)}
+                class:save-failed={Boolean(saveErrors[f.id])}
+                aria-invalid={Boolean(saveErrors[f.id])}
+                aria-busy={Boolean(saving[f.id])}
+                disabled={Boolean(saving[f.id])}
+                onchange={() => void saveField(f)}
               />
             {/if}
           {/each}
@@ -200,6 +304,10 @@
     background: rgba(79, 70, 229, 0.06);
     border-radius: 3px;
     padding: 0 4px;
+  }
+  .save-failed {
+    border-color: var(--color-danger, #dc2626);
+    outline: 2px solid rgba(220, 38, 38, 0.18);
   }
   .chk {
     display: flex;

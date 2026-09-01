@@ -64,7 +64,7 @@ func TestRender_SenderFacingIgnoresLocale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(subj, "signed by all parties") {
+	if !strings.Contains(subj, "signing ceremony complete") {
 		t.Errorf("sender-facing subject should stay English: %q", subj)
 	}
 }

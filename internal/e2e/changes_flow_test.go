@@ -94,13 +94,20 @@ func TestChangeRequestFlow(t *testing.T) {
 		return rec
 	}
 	rec := mkRecipient()
-	_, err = sendEng.Send(ctx, send.Actor{UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "test"}, doc.ID)
+	_, err = sendEng.Send(ctx, send.Actor{UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "test", LawfulBasis: "contract"}, doc.ID)
 	dmust(t, err, "send")
+	sentRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: org.ID})
+	dmust(t, err, "load sent recipient")
+	oldTokenHash := append([]byte(nil), sentRec.MagicTokenHash...)
 
 	// Signer requests changes instead of signing.
-	rc, err := signEng.LookupByRecipientID(ctx, rec.ID, org.ID)
+	rc, err := signEng.LookupByToken(ctx, oldTokenHash)
 	dmust(t, err, "lookup")
-	dmust(t, signEng.RequestChanges(ctx, rc, sign.ChangeRequestInput{Message: "Sänk priset och lägg till en garanti.", BlockID: "p", Quote: "Pris {{price}} kr.", Proposed: "Pris 12 000 kr.", IP: "203.0.113.5", UserAgent: "test"}), "request changes")
+	notice := testArticle13NoticeEvidence(t, rc)
+	dmust(t, signEng.RequestChanges(ctx, rc, sign.ChangeRequestInput{
+		Message: "Sänk priset och lägg till en garanti.", BlockID: "p", Quote: "Pris {{price}} kr.", Proposed: "Pris 12 000 kr.",
+		IP: "203.0.113.5", UserAgent: "test", Notice: notice,
+	}), "request changes")
 
 	paused, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: org.ID})
 	dmust(t, err, "reload paused")
@@ -113,7 +120,9 @@ func TestChangeRequestFlow(t *testing.T) {
 		t.Fatalf("expected 1 open change request, got %+v", crs)
 	}
 	// Signing must be refused while paused.
-	if _, serr := signEng.Sign(ctx, rc, sign.SignInput{TypedName: "Client", Font: "Caveat", IP: "203.0.113.5", UserAgent: "test"}); serr == nil {
+	if _, serr := signEng.Sign(ctx, rc, sign.SignInput{
+		TypedName: "Client", Font: "Caveat", IP: "203.0.113.5", UserAgent: "test", Notice: notice,
+	}); serr == nil {
 		t.Fatal("signing should be refused while changes are requested")
 	}
 
@@ -145,13 +154,27 @@ func TestChangeRequestFlow(t *testing.T) {
 	if freshRec.Status != "pending" {
 		t.Fatalf("expected recipient reset to pending, got %s", freshRec.Status)
 	}
+	if !freshRec.MagicTokenExpiresAt.Valid || freshRec.MagicTokenExpiresAt.Time.After(time.Now()) {
+		t.Fatalf("expected revise to expire the old ceremony token, got %+v", freshRec.MagicTokenExpiresAt)
+	}
+	if _, staleErr := signEng.LookupByToken(ctx, oldTokenHash); staleErr == nil {
+		t.Fatal("old signer token still reads the reopened draft")
+	}
 
 	// Re-send the revised draft and sign to completion.
-	_, err = sendEng.Send(ctx, send.Actor{UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "test"}, doc.ID)
+	_, err = sendEng.Send(ctx, send.Actor{UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "test", LawfulBasis: "contract"}, doc.ID)
 	dmust(t, err, "re-send")
-	rc2, err := signEng.LookupByRecipientID(ctx, rec.ID, org.ID)
+	resentRec, err := q.GetRecipient(ctx, generated.GetRecipientParams{ID: rec.ID, OrgID: org.ID})
+	dmust(t, err, "load re-sent recipient")
+	if string(resentRec.MagicTokenHash) == string(oldTokenHash) {
+		t.Fatal("re-send did not mint a fresh ceremony credential")
+	}
+	rc2, err := signEng.LookupByToken(ctx, resentRec.MagicTokenHash)
 	dmust(t, err, "lookup2")
-	res, err := signEng.Sign(ctx, rc2, sign.SignInput{TypedName: "Client", Font: "Caveat", IP: "203.0.113.5", UserAgent: "test"})
+	res, err := signEng.Sign(ctx, rc2, sign.SignInput{
+		TypedName: "Client", Font: "Caveat", IP: "203.0.113.5", UserAgent: "test",
+		Notice: testArticle13NoticeEvidence(t, rc2),
+	})
 	dmust(t, err, "sign")
 	if !res.Completed {
 		t.Fatalf("expected completed after re-sign, got %+v", res)

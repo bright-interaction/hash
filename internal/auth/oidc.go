@@ -54,7 +54,13 @@ func (o *OIDC) resolve(ctx context.Context) (*oauth2.Config, *oidc.IDTokenVerifi
 	if o.oauth2 != nil {
 		return o.oauth2, o.verifier, nil
 	}
-	provider, err := oidc.NewProvider(ctx, o.cfg.IssuerURL)
+	timeout := o.cfg.DiscoveryTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	discoveryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	provider, err := oidc.NewProvider(discoveryCtx, o.cfg.IssuerURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("oidc discovery: %w", err)
 	}
@@ -83,6 +89,9 @@ type OIDCConfig struct {
 	ClientSecret string
 	RedirectURL  string
 	Cookies      *SignedCookie
+	// DiscoveryTimeout bounds both the boot probe and each lazy retry. Zero
+	// selects the production default (10 seconds).
+	DiscoveryTimeout time.Duration
 }
 
 // NewOIDC returns an OIDC for cfg. It attempts discovery immediately so a
@@ -145,6 +154,19 @@ func setLoginCookie(w http.ResponseWriter, name, value string) {
 		SameSite: http.SameSiteLaxMode,
 		Expires:  time.Now().Add(10 * time.Minute),
 	})
+}
+
+// ClearOIDCLoginCookies removes the one-use state, nonce, and PKCE verifier
+// after the callback request has received them. They expire after ten minutes
+// regardless, but clearing them immediately narrows replay exposure and keeps
+// the public cookie notice exact.
+func ClearOIDCLoginCookies(w http.ResponseWriter) {
+	for _, name := range []string{"hash_oauth_state", "hash_oauth_nonce", "hash_oauth_verifier"} {
+		http.SetCookie(w, &http.Cookie{
+			Name: name, Value: "", Path: "/", HttpOnly: true, Secure: true,
+			SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0),
+		})
+	}
 }
 
 // Callback exchanges the authorization code for an ID token and returns the

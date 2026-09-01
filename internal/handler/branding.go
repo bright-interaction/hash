@@ -105,31 +105,37 @@ func (s *Server) handleUpsertOrgBranding(w http.ResponseWriter, r *http.Request)
 	}
 	def := branding.DefaultBranding()
 	merged := mergeBrandingInput(def, in)
-	row, err := s.Queries.UpsertOrgBranding(r.Context(), generated.UpsertOrgBrandingParams{
-		OrgID:          sess.OrgID,
-		PrimaryHex:     merged.PrimaryHex,
-		AccentHex:      merged.AccentHex,
-		SurfaceHex:     merged.SurfaceHex,
-		TextHex:        merged.TextHex,
-		MutedHex:       merged.MutedHex,
-		LogoUrl:        merged.LogoURL,
-		LogoAlt:        merged.LogoAlt,
-		FontHeading:    merged.FontHeading,
-		FontBody:       merged.FontBody,
-		SignatureColor: merged.SignatureColor,
-	})
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.OrgBranding, error) {
+			return q.UpsertOrgBranding(r.Context(), generated.UpsertOrgBrandingParams{
+				OrgID:          sess.OrgID,
+				PrimaryHex:     merged.PrimaryHex,
+				AccentHex:      merged.AccentHex,
+				SurfaceHex:     merged.SurfaceHex,
+				TextHex:        merged.TextHex,
+				MutedHex:       merged.MutedHex,
+				LogoUrl:        merged.LogoURL,
+				LogoAlt:        merged.LogoAlt,
+				FontHeading:    merged.FontHeading,
+				FontBody:       merged.FontBody,
+				SignatureColor: merged.SignatureColor,
+			})
+		},
+		func(*generated.OrgBranding) audit.Entry {
+			return audit.Entry{
+				OrgID:       sess.OrgID,
+				ActorUserID: &sess.UserID,
+				Kind:        audit.KindDocumentUpdated,
+				IP:          firstIPFromHeader(r),
+				UserAgent:   r.UserAgent(),
+				Payload:     map[string]any{"via": "rest", "tool": "upsert_org_branding"},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID:       sess.OrgID,
-		ActorUserID: &sess.UserID,
-		Kind:        audit.KindDocumentUpdated, // reuse the closest enum; org-level event taxonomy can land later
-		IP:          firstIPFromHeader(r),
-		UserAgent:   r.UserAgent(),
-		Payload:     map[string]any{"via": "rest", "tool": "upsert_org_branding"},
-	})
 	writeJSON(w, http.StatusOK, brandingFromOrgRow(row))
 }
 

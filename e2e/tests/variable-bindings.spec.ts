@@ -158,12 +158,18 @@ test.describe('variable bindings (Phase 8.2)', () => {
     const doc = await tool(request, 'create_document', {
       name: 'Bind freeze guard',
       source_kind: 'blocks',
-      blocks_json: { version: 1, blocks: [] }
+      blocks_json: {
+        version: 1,
+        blocks: [{ id: 's', type: 'signature_field', attrs: { recipient_role: 'signer' } }]
+      }
     });
-    await rpcRaw(request, 'tools/call', {
-      name: 'void_document',
-      arguments: { document_id: doc.id, reason: 'unit test' }
+    await tool(request, 'add_recipient', {
+      document_id: doc.id,
+      role: 'signer',
+      email: `bind-freeze-${Date.now()}@example.com`,
+      name: 'Binding Freeze Guard'
     });
+    await tool(request, 'send_document', { document_id: doc.id, lawful_basis: 'contract' });
     const res = await rpcRaw(request, 'tools/call', {
       name: 'bind_variable_to_org_setting',
       arguments: { document_id: doc.id, variable: 'x', path: 'org.name' }

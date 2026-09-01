@@ -4,18 +4,18 @@
 package handler
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/config"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/webhooksecret"
 )
 
 type webhookEndpointResponse struct {
@@ -28,17 +28,6 @@ type webhookEndpointResponse struct {
 	// reads return the empty string so a stolen list cannot leak the
 	// signing key.
 	Secret string `json:"secret,omitempty"`
-}
-
-// mintWebhookSecret generates a 32-byte cryptographically random key
-// encoded as 64 lowercase hex chars. Sized to match HMAC-SHA256 best
-// practice (256-bit secret for a 256-bit MAC).
-func mintWebhookSecret() (string, error) {
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b[:]), nil
 }
 
 type createWebhookInput struct {
@@ -71,40 +60,63 @@ func (s *Server) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, ev := range in.Events {
-		switch ev {
-		case "document.sent", "document.viewed", "document.signed",
-			"document.completed", "document.declined", "document.voided",
-			"document.expired", "recipient.bounced":
-		default:
+		if !dispatch.IsPublicEventKind(ev) {
 			writeError(w, http.StatusBadRequest, "unknown event kind: "+ev)
 			return
 		}
 	}
 
-	secret, err := mintWebhookSecret()
+	if s.WebhookSecrets == nil {
+		writeError(w, http.StatusServiceUnavailable, "webhook endpoint encryption is unavailable")
+		return
+	}
+	endpointID, err := uuid.NewRandom()
+	if err != nil {
+		writeInternalErrorMsg(w, "endpoint id generation failed", err)
+		return
+	}
+	secret, err := webhooksecret.Mint()
 	if err != nil {
 		writeInternalErrorMsg(w, "secret generation failed", err)
 		return
 	}
-	row, err := s.Queries.CreateWebhookEndpoint(r.Context(), generated.CreateWebhookEndpointParams{
-		OrgID:            u.OrgID,
-		Url:              in.URL,
-		SecretRef:        "per-endpoint",
-		Secret:           secret,
-		EventsSubscribed: in.Events,
-	})
+	secretCiphertext, err := s.WebhookSecrets.SealNew(u.OrgID, endpointID, secret)
+	if err != nil {
+		writeInternalErrorMsg(w, "secret encryption failed", err)
+		return
+	}
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.CreateWebhookEndpointRow, error) {
+			return q.CreateWebhookEndpoint(r.Context(), generated.CreateWebhookEndpointParams{
+				ID:               endpointID,
+				OrgID:            u.OrgID,
+				Url:              in.URL,
+				SecretRef:        "per-endpoint-aesgcm-v1",
+				SecretCiphertext: secretCiphertext,
+				EventsSubscribed: in.Events,
+			})
+		},
+		func(created *generated.CreateWebhookEndpointRow) audit.Entry {
+			return audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID,
+				Kind: "webhook.created",
+				IP:   clientIP(r),
+				// Webhook paths and query strings commonly contain provider secrets.
+				// The endpoint id is the durable audit selector; never copy the URL
+				// into the org-readable immutable activity ledger.
+				Payload: map[string]any{"endpoint_id": created.ID, "events": in.Events},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalErrorMsg(w, "create webhook failed", err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: u.OrgID, ActorUserID: &u.UserID,
-		Kind:    "webhook.created",
-		IP:      clientIP(r),
-		Payload: map[string]any{"endpoint_id": row.ID, "url": row.Url, "events": in.Events},
-	})
 	// Secret is returned ONCE on create. Subsequent reads omit it so a
-	// list endpoint cannot leak the signing key.
+	// list endpoint cannot leak the signing key. Prevent the one-time response
+	// from being retained by a browser, service worker, or shared intermediary.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	writeJSON(w, http.StatusCreated, webhookEndpointResponse{
 		ID:               row.ID,
 		URL:              row.Url,
@@ -147,18 +159,27 @@ func (s *Server) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Queries.DeleteWebhookEndpoint(r.Context(), generated.DeleteWebhookEndpointParams{
-		ID: id, OrgID: u.OrgID,
-	}); err != nil {
+	_, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (uuid.UUID, error) {
+			return q.DeleteWebhookEndpoint(r.Context(), generated.DeleteWebhookEndpointParams{ID: id, OrgID: u.OrgID})
+		},
+		func(deletedID uuid.UUID) audit.Entry {
+			return audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID,
+				Kind:    "webhook.deleted",
+				IP:      clientIP(r),
+				Payload: map[string]any{"endpoint_id": deletedID},
+			}
+		},
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "webhook endpoint not found")
+		return
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: u.OrgID, ActorUserID: &u.UserID,
-		Kind:    "webhook.deleted",
-		IP:      clientIP(r),
-		Payload: map[string]any{"endpoint_id": id},
-	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -218,7 +239,3 @@ func (s *Server) handleListWebhookDeliveries(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deliveries": out})
 }
-
-var (
-	_ = errors.New
-)

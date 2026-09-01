@@ -11,7 +11,32 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestOIDCDiscoveryHasBoundedTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	started := time.Now()
+	o, err := NewOIDC(context.Background(), OIDCConfig{
+		IssuerURL:        srv.URL,
+		ClientID:         "hash",
+		RedirectURL:      "https://hash.example.com/auth/callback",
+		DiscoveryTimeout: 50 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("a discovery endpoint that never responds should time out")
+	}
+	if o == nil {
+		t.Fatal("timed-out discovery must retain a retryable OIDC instance")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("discovery timeout took %s; boot/login must remain bounded", elapsed)
+	}
+}
 
 // discoveryStub serves the OIDC discovery document, but refuses until healthy
 // is set. It models the real failure: the IdP is briefly unreachable while hash

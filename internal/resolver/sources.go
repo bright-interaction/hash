@@ -4,6 +4,7 @@
 package resolver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/nethard"
 )
 
 // httpDoer is the small subset of http.Client we need. Lets tests inject a
@@ -41,11 +43,14 @@ func (h *HTTPSource) Fetch(ctx context.Context, ref Ref) (string, error) {
 	if h.BaseURL == "" || h.Token == "" {
 		return "", ErrNotConfigured
 	}
-	if ref.Source == "" {
-		return "", errors.New("source_ref required")
+	if err := validateHTTPSourceRef(ref.Source); err != nil {
+		return "", err
 	}
 	if h.Client == nil {
-		h.Client = &http.Client{Timeout: 10 * time.Second}
+		// Resolver calls carry an integration bearer token. Refuse private-IP
+		// destinations at dial time and never replay the credential across a
+		// redirect. Local development constructors explicitly opt out below.
+		h.Client = nethard.Client(10*time.Second, nil)
 	}
 	url := strings.TrimRight(h.BaseURL, "/") + h.pathFor(ref)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -71,8 +76,13 @@ func (h *HTTPSource) Fetch(ctx context.Context, ref Ref) (string, error) {
 		return "", err
 	}
 	var doc map[string]any
-	if err := json.Unmarshal(body, &doc); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&doc); err != nil {
 		return "", fmt.Errorf("%s decode: %w", h.kind, err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return "", fmt.Errorf("%s decode: trailing JSON content", h.kind)
 	}
 	val, ok := jsonPathLookup(doc, ref.Path)
 	if !ok {
@@ -85,14 +95,42 @@ func (h *HTTPSource) Fetch(ctx context.Context, ref Ref) (string, error) {
 	return s, nil
 }
 
+// validateHTTPSourceRef keeps a document-authored entity identifier confined to
+// the single URL path segment selected by its resolver. Without this boundary a
+// value such as "../../admin" or "id?include=secrets" could turn Hash into a
+// confused deputy and use its integration bearer token against an unintended
+// BrightCRM/scanner endpoint. The supported integrations issue ASCII opaque IDs
+// (UUIDs and prefixed IDs), so a deliberately small alphabet is sufficient.
+func validateHTTPSourceRef(ref string) error {
+	if ref == "" {
+		return errors.New("source_ref required")
+	}
+	if len(ref) > 256 {
+		return errors.New("source_ref exceeds 256 bytes")
+	}
+	if ref == "." || ref == ".." {
+		return errors.New("source_ref contains an unsafe path segment")
+	}
+	for _, c := range ref {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '-' ||
+			c == '.' || c == ':' || c == '@' {
+			continue
+		}
+		return errors.New("source_ref contains characters that are unsafe in an entity id")
+	}
+	return nil
+}
+
 // NewCRMDealSource builds the BrightCRM deal-by-id resolver. base is
 // typically "https://crm.example.com" and token a Hash-minted
 // API key. With both empty, every Fetch returns ErrNotConfigured so the UI
 // shows a clear "configure CRM integration" message instead of a 500.
-func NewCRMDealSource(base, token string) *HTTPSource {
+func NewCRMDealSource(base, token string, allowPrivate ...bool) *HTTPSource {
 	return &HTTPSource{
 		BaseURL: base,
 		Token:   token,
+		Client:  integrationHTTPClient(allowPrivate),
 		kind:    SourceCRMDeal,
 		pathFor: func(ref Ref) string {
 			return "/api/v1/deals/" + ref.Source
@@ -101,10 +139,11 @@ func NewCRMDealSource(base, token string) *HTTPSource {
 }
 
 // NewCRMContactSource builds the BrightCRM contact-by-id resolver.
-func NewCRMContactSource(base, token string) *HTTPSource {
+func NewCRMContactSource(base, token string, allowPrivate ...bool) *HTTPSource {
 	return &HTTPSource{
 		BaseURL: base,
 		Token:   token,
+		Client:  integrationHTTPClient(allowPrivate),
 		kind:    SourceCRMContact,
 		pathFor: func(ref Ref) string {
 			return "/api/v1/contacts/" + ref.Source
@@ -115,15 +154,21 @@ func NewCRMContactSource(base, token string) *HTTPSource {
 // NewScannerFindingSource builds the SVAR scan-by-id resolver. Path lookups
 // like "summary.critical_count" are how proposals can pull "you have 3
 // critical findings" into a generated MSA.
-func NewScannerFindingSource(base, token string) *HTTPSource {
+func NewScannerFindingSource(base, token string, allowPrivate ...bool) *HTTPSource {
 	return &HTTPSource{
 		BaseURL: base,
 		Token:   token,
+		Client:  integrationHTTPClient(allowPrivate),
 		kind:    SourceScannerFind,
 		pathFor: func(ref Ref) string {
 			return "/api/v1/scans/" + ref.Source
 		},
 	}
+}
+
+func integrationHTTPClient(allowPrivate []bool) *http.Client {
+	allowed := len(allowPrivate) > 0 && allowPrivate[0]
+	return nethard.Client(10*time.Second, func() bool { return allowed })
 }
 
 // OrgSettingSource reads from the local hash.orgs row plus (when 8.5

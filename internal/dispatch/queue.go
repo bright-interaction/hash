@@ -6,11 +6,14 @@ package dispatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
@@ -22,18 +25,20 @@ import (
 // Update this set when adding a new public event surface. The hook in
 // cmd/server checks membership before enqueuing.
 var PublicEventKinds = map[string]struct{}{
-	"document.created":      {},
-	"document.sent":         {},
-	"document.opened":       {},
-	"document.viewed":       {},
-	"document.field_filled": {},
-	"document.signed":       {},
-	"document.completed":    {},
-	"document.declined":     {},
-	"document.voided":       {},
-	"document.expired":      {},
-	"recipient.invited":     {},
-	"recipient.bounced":     {},
+	"document.created":         {},
+	"document.sent":            {},
+	"document.opened":          {},
+	"document.viewed":          {},
+	"document.field_filled":    {},
+	"document.signed":          {},
+	"document.completed":       {},
+	"document.declined":        {},
+	audit.KindChangesRequested: {},
+	"document.voided":          {},
+	"document.expired":         {},
+	"recipient.created":        {},
+	"recipient.invited":        {},
+	"recipient.bounced":        {},
 }
 
 // IsPublicEventKind reports whether kind is in PublicEventKinds. Callers
@@ -57,12 +62,12 @@ func Enqueue(ctx context.Context, q *generated.Queries, orgID uuid.UUID, eventID
 	if err != nil {
 		return fmt.Errorf("list endpoints: %w", err)
 	}
-	for _, ep := range endpoints {
+	for _, endpointID := range endpoints {
 		if _, err := q.EnqueueWebhookDelivery(ctx, generated.EnqueueWebhookDeliveryParams{
-			EndpointID: ep.ID,
+			EndpointID: endpointID,
 			EventID:    eventID,
 		}); err != nil {
-			return fmt.Errorf("enqueue delivery for %s: %w", ep.Url, err)
+			return fmt.Errorf("enqueue delivery for endpoint %s: %w", endpointID, err)
 		}
 	}
 	return nil
@@ -79,12 +84,35 @@ func LoadEvent(ctx context.Context, q *generated.Queries, eventID uuid.UUID) (We
 	if len(e.PayloadJson) > 0 {
 		_ = json.Unmarshal(e.PayloadJson, &payload)
 	}
+	var document map[string]any
+	var automationRequestID string
+	if e.DocumentID.Valid {
+		documentID := uuid.UUID(e.DocumentID.Bytes)
+		document = map[string]any{"id": documentID.String()}
+		requestID, lookupErr := q.GetAutomationSignatureRequestIDByDocument(ctx,
+			generated.GetAutomationSignatureRequestIDByDocumentParams{
+				OrgID:      e.OrgID,
+				DocumentID: e.DocumentID,
+			})
+		if lookupErr == nil {
+			automationRequestID = requestID.String()
+		} else if !errors.Is(lookupErr, pgx.ErrNoRows) {
+			return WebhookEvent{}, fmt.Errorf("get automation correlation: %w", lookupErr)
+		}
+	}
+	var recipient map[string]any
+	if e.RecipientID.Valid {
+		recipient = map[string]any{"id": uuid.UUID(e.RecipientID.Bytes).String()}
+	}
 	return WebhookEvent{
-		EventID:    e.ID.String(),
-		Kind:       e.Kind,
-		OccurredAt: e.CreatedAt.Time,
-		OrgID:      e.OrgID.String(),
-		Payload:    payload,
+		EventID:             e.ID.String(),
+		Kind:                e.Kind,
+		OccurredAt:          e.CreatedAt.Time,
+		OrgID:               e.OrgID.String(),
+		AutomationRequestID: automationRequestID,
+		Document:            document,
+		Recipient:           recipient,
+		Payload:             payload,
 	}, nil
 }
 

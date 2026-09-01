@@ -110,7 +110,7 @@ func TestSeverityAndSuggestion(t *testing.T) {
 }
 
 func TestSyntheticFeed_FiltersBySince(t *testing.T) {
-	f := &SyntheticFeed{Items: SampleFeedItems()}
+	f := &SyntheticFeed{Items: DevelopmentSampleFeedItems()}
 	all, err := f.Fetch(context.Background(), time.Time{})
 	if err != nil {
 		t.Fatalf("fetch all: %v", err)

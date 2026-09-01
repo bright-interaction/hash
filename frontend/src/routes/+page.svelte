@@ -41,7 +41,7 @@
 
   <main class="flex-1 flex flex-col items-center justify-center px-6 text-center max-w-3xl mx-auto py-20">
     <p class="page-eyebrow mb-4">Hash · Every signature, hash-chained</p>
-    <h1 class="page-title mb-6">Agent-native e-signing.<br />Self-hosted. EU-sovereign.</h1>
+    <h1 class="page-title mb-6">Agent-native e-signing.<br />Self-hosted. Deployment-controlled.</h1>
     <p class="text-text-secondary text-lg max-w-xl mb-10 leading-relaxed">
       Document creation + e-signing with PandaDoc-style typed signatures, an open MCP for
       BYOAI authoring, and zero per-user fees.
@@ -76,13 +76,14 @@
         <ShieldCheck class="size-5 text-accent mb-3" />
         <h3 class="font-display font-extralight text-lg mb-2">Audit-grade evidence</h3>
         <p class="text-text-secondary text-sm leading-relaxed">
-          Every signing event hashed, timestamped, and bound into a server-signed certificate.
+          Every signing event is hash-chained and timestamped. Successfully completed ceremonies
+          bind their applicable event evidence into a server-signed certificate.
         </p>
       </div>
     </div>
   </main>
 
   <footer class="border-t border-border-light px-6 py-4 text-xs text-text-muted text-center">
-    Built by Bright Interaction. eIDAS SES + AES compliant. QES via QTSP-of-choice.
+    Built by Bright Interaction. Production signing currently supports eIDAS SES; AES and QES are unavailable.
   </footer>
 </div>

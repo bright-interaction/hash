@@ -4,12 +4,12 @@
 package handler
 
 import (
-	"encoding/hex"
 	"errors"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/audit"
@@ -72,6 +72,10 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// API keys also authenticate the core standalone automation endpoint. Key
+	// issuance therefore cannot inherit MCP's plan entitlement: /mcp rechecks
+	// its own feature gate on every use, while the same credential remains valid
+	// for /api/automation/v1/signature-requests when it has both write scopes.
 	var in createAPIKeyInput
 	if err := decodeJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -111,31 +115,36 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	row, err := s.Queries.CreateAPIKey(r.Context(), generated.CreateAPIKeyParams{
-		OrgID:     u.OrgID,
-		UserID:    u.UserID,
-		KeyPrefix: key.Prefix,
-		KeyHash:   key.Hash,
-		Name:      in.Name,
-		Scopes:    scopes,
-		ExpiresAt: expires,
-	})
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.ApiKey, error) {
+			return q.CreateAPIKey(r.Context(), generated.CreateAPIKeyParams{
+				OrgID:     u.OrgID,
+				UserID:    u.UserID,
+				KeyPrefix: key.Prefix,
+				KeyHash:   key.Hash,
+				Name:      in.Name,
+				Scopes:    scopes,
+				ExpiresAt: expires,
+			})
+		},
+		func(created *generated.ApiKey) audit.Entry {
+			return audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID,
+				Kind: "api_key.created",
+				IP:   clientIP(r),
+				Payload: map[string]any{
+					"key_id":     created.ID,
+					"key_prefix": created.KeyPrefix,
+					"name":       in.Name,
+					"scopes":     scopes,
+				},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalErrorMsg(w, "create api key failed", err)
 		return
 	}
-
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: u.OrgID, ActorUserID: &u.UserID,
-		Kind: "api_key.created",
-		IP:   clientIP(r),
-		Payload: map[string]any{
-			"key_id":     row.ID,
-			"key_prefix": row.KeyPrefix,
-			"name":       in.Name,
-			"scopes":     scopes,
-		},
-	})
 
 	out := apiKeyResponse{
 		ID:        row.ID,
@@ -177,23 +186,26 @@ func (s *Server) handleDeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Queries.DeleteAPIKey(r.Context(), generated.DeleteAPIKeyParams{
-		ID: id, UserID: u.UserID,
-	}); err != nil {
+	_, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (uuid.UUID, error) {
+			return q.DeleteAPIKey(r.Context(), generated.DeleteAPIKeyParams{ID: id, UserID: u.UserID})
+		},
+		func(deletedID uuid.UUID) audit.Entry {
+			return audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID,
+				Kind:    "api_key.revoked",
+				IP:      clientIP(r),
+				Payload: map[string]any{"key_id": deletedID},
+			}
+		},
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "api key not found")
+		return
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: u.OrgID, ActorUserID: &u.UserID,
-		Kind:    "api_key.revoked",
-		IP:      clientIP(r),
-		Payload: map[string]any{"key_id": id},
-	})
 	w.WriteHeader(http.StatusNoContent)
 }
-
-// guard against unused imports if the file evolves.
-var (
-	_ = hex.EncodeToString
-	_ = errors.New
-)

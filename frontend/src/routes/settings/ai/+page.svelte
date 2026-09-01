@@ -99,8 +99,10 @@
     Bring your own AI: route this org's risk analysis, clarification and
     negotiation calls to your own provider and key instead of the platform
     default. Your key is encrypted at rest and never shown again. Shield
-    tokenization still applies, so personal data is masked before any prompt
-    leaves the platform.
+    tokenization masks configured terms and recognised patterns before a prompt
+    is sent, but it is not complete anonymisation and may not detect a personal
+    name that appears only in free-form clause text. Approve the provider and
+    data-processing scope accordingly.
   </p>
 
   {#if error}

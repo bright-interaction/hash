@@ -89,20 +89,13 @@ func sigField(id, role, label string) blocks.Block {
 // Clause set synthesised from a six-perspective legal/commercial review.
 var ServicesAgreement = Starter{
 	Key:         "services-agreement-sv",
-	Name:        "Tjänsteavtal: webbplats och automationer (svenska)",
-	Description: "Komplett återanvändbart avtal med tjänstetabell, tidplan och platshållare.",
+	Name:        "UTKAST — Tjänsteavtal: webbplats och automationer (svenska)",
+	Description: "Juridiskt utkast som kräver godkännande av exakt revision före användning.",
 	Variables: map[string]string{
 		"provider":                "Bright Interaction AB",
-		"provider_orgnr":          "559XXX-XXXX",
 		"provider_signatory":      "Tom Isgren",
 		"provider_title":          "Grundare",
-		"client":                  "Kundföretaget AB",
-		"client_orgnr":            "55XXXX-XXXX",
-		"client_signatory":        "",
-		"client_title":            "",
-		"effective_date":          "2026-06-23",
 		"offer_valid_days":        "30",
-		"offer_valid_until":       "2026-07-23",
 		"price":                   "15 000",
 		"vat_rate":                "25",
 		"payment_terms_days":      "15",
@@ -115,7 +108,6 @@ var ServicesAgreement = Starter{
 		"termination_notice_days": "14",
 		"cure_days":               "30",
 		"force_majeure_days":      "60",
-		"incident_notice_hours":   "48",
 		"reference_optin":         "namngiven",
 		"venue":                   "Stockholms tingsrätt",
 		"city":                    "Stockholm",
@@ -123,6 +115,7 @@ var ServicesAgreement = Starter{
 	Tree: blocks.Tree{Version: 1, Blocks: []blocks.Block{
 		// Försättsblad (front page): title, key terms, and both parties.
 		h("title", 1, "Tjänsteavtal"),
+		quote("legal-draft-warning", "UTKAST — får inte skickas för undertecknande utan juridiskt godkännande av denna exakta revision. Godkännandereferens: {{legal_approval_reference}}."),
 		p("subtitle", "Webbplats och automationer för {{client}}"),
 		p("cover-meta", "Avtalsdatum: {{effective_date}}  ·  Avtalssumma: {{price}} kr ex moms  ·  Erbjudande giltigt t.o.m.: {{offer_valid_until}}"),
 		p("cover-parties-label", "Detta avtal tecknas mellan följande parter:"),
@@ -144,7 +137,7 @@ var ServicesAgreement = Starter{
 		p("s2", "Avtalet är bindande när båda parter undertecknat eller när {{client}} skriftligen accepterat detta erbjudande, senast {{offer_valid_until}}. Erbjudandet gäller i {{offer_valid_days}} dagar från {{effective_date}}."),
 
 		h("h3", 2, "3. Omfattning och bilagor"),
-		p("s3", "Avtalad omfattning framgår av Bilaga 1 (Tjänster) och Bilaga 2 (Tidplan). Allt som inte uttryckligen anges som ingående är inte med i det fasta priset. Vid motstrid gäller huvudtexten före bilagorna, dock har Bilaga A (personuppgiftsbiträdesavtal) företräde i frågor om personuppgiftsbehandling."),
+		p("s3", "Avtalad omfattning framgår av Bilaga 1 (Tjänster) och Bilaga 2 (Tidplan). Allt som inte uttryckligen anges som ingående är inte med i det fasta priset. Vid motstrid gäller huvudtexten före dessa två bilagor. Separata avtal gäller endast om parterna uttryckligen identifierar och undertecknar dem."),
 
 		h("h4", 2, "4. Kundens åtagande och förutsättningar"),
 		p("s4", "{{client}} ska i tid tillhandahålla varumärkesmaterial (logotyp i vektorformat, färger, typsnitt), allt innehåll (texter, bilder, produktdata) samt nödvändig åtkomst till domän, DNS, befintligt CMS, CRM, e-post och betalkonto. {{client}} ansvarar för att inneha rätt att använda allt material som lämnas och för att innehåll och produkter följer lag och branschregler."),
@@ -176,8 +169,8 @@ var ServicesAgreement = Starter{
 		h("h13", 2, "13. Överlämning och dokumentation"),
 		p("s13", "Vid godkännande och full betalning överlämnas Atomicsite-binären, runbook och relevanta inloggningsuppgifter. {{client}} ansvarar för att förvara inloggningsuppgifter säkert. En digital genomgång om cirka en timme ingår; ytterligare utbildning är separat tjänst."),
 
-		h("h14", 2, "14. Äganderätt, nyttjanderätt och öppen källkod"),
-		p("s14", "{{client}} äger sitt innehåll, varumärke, domän och kunddata. Vid full betalning får {{client}} en icke-exklusiv och icke-överlåtbar nyttjanderätt till den levererade webbplatskonfigurationen. Atomicsite-binären levereras under sin öppna licens Apache 2.0, vilket redan i sig ger {{client}} en evig och oåterkallelig rätt att köra och driftsätta den. {{provider}} behåller alla generella metoder, mallar, byggblock och verktyg och får återanvända dem fritt. {{provider}} efterger den ideella rätten i den mån lagen tillåter."),
+		h("h14", 2, "14. Äganderätt och nyttjanderätt"),
+		p("s14", "{{client}} äger sitt innehåll, varumärke, domän och kunddata. Vid full betalning får {{client}} en icke-exklusiv och icke-överlåtbar nyttjanderätt till den levererade webbplatskonfigurationen. Atomicsite-binären överlämnas tillsammans med den licenstext och de notices som hör till den faktiskt levererade versionen; dessa licensvillkor, inte en etikett i detta Avtal, reglerar rätten att använda och distribuera programvaran. {{provider}} behåller alla generella metoder, mallar, byggblock och verktyg och får återanvända dem fritt. {{provider}} efterger den ideella rätten i den mån lagen tillåter."),
 
 		h("h15", 2, "15. Domän och kontoägande"),
 		p("s15", "{{client}} äger och bekostar domän, DNS, hostingkonto, e-postkonton, betalkonto och CRM-konto om inte annat avtalats. Tredjepartsavgifter bekostas av {{client}} och vidarefaktureras till självkostnad om {{provider}} lägger ut dem, men aldrig utan {{client}}s godkännande."),
@@ -189,7 +182,7 @@ var ServicesAgreement = Starter{
 		p("s17", "{{client}} garanterar att tillhandahållet material är lagligt och inte gör intrång i tredje parts rättigheter, och håller {{provider}} skadeslös för krav som grundar sig på {{client}}s material, produkter eller marknadsföring. {{provider}} håller {{client}} skadeslös för krav om att {{provider}}s egna verktyg eller metoder gör intrång i tredje parts rättigheter, begränsat enligt ansvarsbegränsningen."),
 
 		h("h18", 2, "18. Personuppgifter"),
-		p("s18", "När {{provider}} behandlar personuppgifter för {{client}}s räkning sker det som personuppgiftsbiträde enligt artikel 28 GDPR. {{client}} är personuppgiftsansvarig och {{provider}} biträde. Ett personuppgiftsbiträdesavtal (Bilaga A) gäller från driftstart, med instruktioner, säkerhetsåtgärder, underbiträden, radering vid avslut och incidentunderrättelse inom {{incident_notice_hours}} timmar, och har företräde i frågor om personuppgiftsbehandling."),
+		p("s18", "Denna avtalsmall innehåller inget personuppgiftsbiträdesavtal. Om {{provider}} ska behandla personuppgifter för {{client}}s räkning får sådan behandling inte börja förrän parterna separat har undertecknat ett avtal enligt artikel 28 GDPR. Referens till det separat undertecknade avtalet, eller uttrycklig notering att någon biträdesbehandling inte ingår: {{dpa_reference}}."),
 
 		h("h19", 2, "19. Force majeure"),
 		p("s19", "Ingen part ansvarar för dröjsmål eller utebliven prestation som beror på omständighet utanför partens rimliga kontroll, såsom strömavbrott, avbrott hos tredjepartsleverantör, myndighetsbeslut eller omfattande cyberattack. Drabbad part ska underrätta motparten utan dröjsmål. Varar hindret längre än {{force_majeure_days}} dagar får endera parten säga upp Avtalet, varvid betalning sker för utfört arbete."),
@@ -218,7 +211,7 @@ var ServicesAgreement = Starter{
 				{"Webbplats på Atomicsite", "Responsiv sajt med {{client}}s brand, A+ säkerhetsprofil vid leverans, EU-hosting under uppdraget", "1 sajt, upp till 5 sidor", "Ja", "Ingår"},
 				{"Innehållsmigrering", "Flytt av befintligt innehåll (text, bilder, produktdata) till ny sajt", "upp till 5 sidor", "Ja", "Ingår"},
 				{"Automation: formulär till CRM", "Kontaktformulär skickar lead till CRM automatiskt med notis", "1 flöde", "Ja", "Ingår"},
-				{"Överlämning", "Atomicsite-binär (Apache 2.0) + runbook + genomgång ca 1 timme", "1 paket", "Ja", "Ingår"},
+				{"Överlämning", "Atomicsite-binär med tillämplig licenstext och notices + runbook + genomgång ca 1 timme", "1 paket", "Ja", "Ingår"},
 			}),
 
 		h("bil2", 2, "Bilaga 2: Tidplan och milstolpar"),

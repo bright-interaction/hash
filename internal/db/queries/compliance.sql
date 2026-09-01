@@ -23,7 +23,9 @@ INSERT INTO compliance_flags (
     affected_topic, block_id, severity, suggested_action
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9
-) RETURNING *;
+)
+ON CONFLICT DO NOTHING
+RETURNING *;
 
 -- name: ListComplianceFlags :many
 SELECT * FROM compliance_flags
@@ -49,4 +51,4 @@ ON CONFLICT (id) DO UPDATE SET
     published_at = EXCLUDED.published_at;
 
 -- name: ListAllOrgsForCompliance :many
-SELECT id FROM orgs ORDER BY id ASC LIMIT $1;
+SELECT id FROM orgs ORDER BY id ASC;

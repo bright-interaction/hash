@@ -36,6 +36,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
@@ -146,13 +147,12 @@ func (r *Resolver) Resolve(ctx context.Context, doc *generated.Document, opts Re
 
 	// Layer 1: document static values (variables_json).
 	if len(doc.VariablesJson) > 0 {
-		var statics map[string]any
-		if err := json.Unmarshal(doc.VariablesJson, &statics); err == nil {
-			for k, v := range statics {
-				if s, ok := stringify(v); ok {
-					out[k] = s
-				}
-			}
+		statics, err := blocks.ParseVariableValues(doc.VariablesJson)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve: invalid static variables: %w", err)
+		}
+		for key, value := range statics {
+			out[key] = value
 		}
 	}
 
@@ -237,6 +237,16 @@ func (r *Resolver) fetchOne(ctx context.Context, doc *generated.Document, b *gen
 	cacheKey := fmt.Sprintf("%s|%s|%s|%s",
 		doc.OrgID.String(), b.SourceKind, b.SourceRef, b.SourcePath)
 	if hit, ok := r.Cache.get(cacheKey); ok {
+		// Cache entries intentionally span documents in the same org. The
+		// resolved value still belongs in this binding's audit/cache columns:
+		// otherwise a new document that reuses an org setting resolves correctly
+		// in memory but list_variable_bindings reports an empty last_value, and a
+		// later frozen render has no binding-local value to read.
+		_ = r.Q.UpdateVariableBindingResolved(ctx, generated.UpdateVariableBindingResolvedParams{
+			DocumentID:   b.DocumentID,
+			VariableName: b.VariableName,
+			LastValue:    hit,
+		})
 		return hit, "cached"
 	}
 	val, err := src.Fetch(ctx, Ref{
@@ -281,6 +291,8 @@ func stringify(v any) (string, bool) {
 	switch t := v.(type) {
 	case string:
 		return t, true
+	case json.Number:
+		return t.String(), true
 	case float64:
 		// JSON numbers come out as float64. Avoid scientific notation for
 		// reasonable amounts.
@@ -342,21 +354,34 @@ func (c *cache) put(key, value string) {
 	c.m[key] = cacheEntry{value: value, at: time.Now()}
 }
 
-// InvalidateForSource drops every cache entry whose key references the
-// supplied (sourceKind, sourceRef) tuple, regardless of org or path.
-// Used by the BrightCRM webhook receiver in Phase 9.1: when BrightCRM
-// emits deal.updated for deal_4f2c9e8a, every cached resolution that
-// referenced that deal becomes stale, so the next render re-fetches.
-func (r *Resolver) InvalidateForSource(sourceKind, sourceRef string) int {
-	if r == nil || r.Cache == nil {
+// InvalidateForSourceOrgs drops cache entries for the supplied source tuple
+// only in tenant ledgers the caller has already resolved and audited. A
+// process-wide source reference is not a tenant identity: two organizations
+// can legitimately use the same upstream ID, and one must not authorize an
+// unaudited cache mutation for the other.
+func (r *Resolver) InvalidateForSourceOrgs(sourceKind, sourceRef string, orgIDs []uuid.UUID) int {
+	if r == nil || r.Cache == nil || len(orgIDs) == 0 {
 		return 0
 	}
-	prefix := "|" + sourceKind + "|" + sourceRef + "|"
+	allowed := make(map[string]struct{}, len(orgIDs))
+	for _, orgID := range orgIDs {
+		if orgID != uuid.Nil {
+			allowed[orgID.String()] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return 0
+	}
+	sourcePrefix := "|" + sourceKind + "|" + sourceRef + "|"
 	r.Cache.mu.Lock()
 	defer r.Cache.mu.Unlock()
 	dropped := 0
 	for k := range r.Cache.m {
-		if strings.Contains(k, prefix) {
+		separator := strings.IndexByte(k, '|')
+		if separator <= 0 {
+			continue
+		}
+		if _, ok := allowed[k[:separator]]; ok && strings.HasPrefix(k[separator:], sourcePrefix) {
 			delete(r.Cache.m, k)
 			dropped++
 		}

@@ -8,12 +8,15 @@ test.describe('marketing landing page', () => {
 
   test('renders hero copy', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByText('Agent-native e-signing.')).toBeVisible();
-    await expect(page.getByText('Roman god of contracts')).toBeVisible();
+    await expect(page.getByRole('heading', {
+      level: 1,
+      name: 'Agent-native e-signing. Self-hosted. Deployment-controlled.',
+    })).toBeVisible();
+    await expect(page.getByText('Hash · Every signature, hash-chained')).toBeVisible();
   });
 
   test('shows Sign in CTA when unauthenticated', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByRole('link', { name: /Sign in/i })).toBeVisible();
+    await expect(page.getByRole('main').getByRole('link', { name: 'Sign in', exact: true })).toBeVisible();
   });
 });

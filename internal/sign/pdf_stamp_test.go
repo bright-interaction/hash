@@ -9,8 +9,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	pdfapi "github.com/pdfcpu/pdfcpu/pkg/api"
 	pdfmodel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
+
+	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/render"
 )
 
 // onePagePDF builds a one-page A4 PDF carrying a line of text, in memory.
@@ -54,6 +59,21 @@ func TestBuildPageOverlayHTML(t *testing.T) {
 	}
 }
 
+func TestStampInnerHTMLRejectsOverlongStoredSignature(t *testing.T) {
+	recipientID := uuid.New()
+	field := &generated.DocumentField{
+		Type:        "signature",
+		RecipientID: pgtype.UUID{Bytes: recipientID, Valid: true},
+	}
+	signature := &generated.Signature{
+		ID: recipientID, RecipientID: recipientID, Font: "Caveat",
+		TypedName: strings.Repeat("界", render.MaxSignatureNameRunes+1),
+	}
+	if _, err := stampInnerHTML(field, map[string]*generated.Signature{recipientID.String(): signature}); err == nil {
+		t.Fatal("terminal PDF stamp accepted an overlong stored signature name")
+	}
+}
+
 func TestStampInnerHTML_Checkbox(t *testing.T) {
 	// truthy checkbox renders a check mark, falsy renders nothing.
 	if got := isTruthy("yes"); !got {
@@ -89,6 +109,20 @@ func TestStampOverlays_EmptyMapPassthrough(t *testing.T) {
 	}
 	if !bytes.Equal(out, original) {
 		t.Error("empty overlay map should return the original bytes unchanged")
+	}
+}
+
+func TestValidateStampTargetPageRejectsInvisibleOutOfRangeField(t *testing.T) {
+	field := &generated.DocumentField{ID: uuid.New(), Page: 1}
+	if err := validateStampTargetPage(field, 1); err != nil {
+		t.Fatalf("valid page rejected: %v", err)
+	}
+	field.Page = 2
+	if err := validateStampTargetPage(field, 1); err == nil {
+		t.Fatal("page 2 of a one-page source must fail closed")
+	}
+	if err := validateStampTargetPage(nil, 1); err == nil {
+		t.Fatal("nil field must fail closed")
 	}
 }
 

@@ -4,31 +4,21 @@
 package mcp
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	"github.com/bright-interaction/hash/internal/config"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/webhooksecret"
 )
-
-// mintWebhookSecret matches the handler-side helper. Duplicated here
-// (rather than imported) to keep the mcp package free of an http handler
-// import; the value is purely a random hex string.
-func mintWebhookSecret() (string, error) {
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b[:]), nil
-}
 
 // registerWebhookTools exposes outbound-webhook CRUD over MCP so an
 // agent can stand up integrations without a human touching the settings
@@ -37,6 +27,7 @@ func mintWebhookSecret() (string, error) {
 func registerWebhookTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:        "list_webhooks",
+		MinRole:     auth.RoleOwner,
 		Description: "List the outbound webhook endpoints registered for the caller's org. Returns id, url, events_subscribed, active, created_at per endpoint.",
 		InputSchema: schemaObject(map[string]any{}, nil),
 		Handler: func(r *http.Request, _ json.RawMessage) (any, error) {
@@ -47,7 +38,7 @@ func registerWebhookTools(s *Server, d Deps) {
 			}
 			out := make([]map[string]any, 0, len(rows))
 			for _, row := range rows {
-				out = append(out, webhookRow(row))
+				out = append(out, webhookRow(row.ID, row.Url, row.EventsSubscribed, row.Active, row.CreatedAt.Time))
 			}
 			return map[string]any{"webhooks": out, "count": len(out)}, nil
 		},
@@ -59,7 +50,7 @@ func registerWebhookTools(s *Server, d Deps) {
 		MinRole: auth.RoleOwner, // REST create-webhook is owner-only; match it (a sender webhook is a data-exfil primitive)
 		Description: "Register a new outbound webhook endpoint. The URL receives signed POST bodies on every subscribed event kind. " +
 			"Signature header: X-Hash-Signature: t=<unix>,v1=<hex>. Valid event kinds: " +
-			"document.created, document.sent, document.opened, document.viewed, document.field_filled, document.signed, document.completed, document.declined, document.voided, document.expired, recipient.invited, recipient.bounced.",
+			"document.created, document.sent, document.opened, document.viewed, document.field_filled, document.signed, document.completed, document.declined, document.changes_requested, document.voided, document.expired, recipient.created, recipient.invited, recipient.bounced.",
 		InputSchema: schemaObject(map[string]any{
 			"url": stringSchema("https URL that will receive the POST"),
 			"events_subscribed": map[string]any{
@@ -91,35 +82,50 @@ func registerWebhookTools(s *Server, d Deps) {
 					return nil, errors.New("unknown event kind: " + ev)
 				}
 			}
-			secret, err := mintWebhookSecret()
+			if d.WebhookSecrets == nil {
+				return nil, errors.New("webhook endpoint encryption is unavailable")
+			}
+			endpointID, err := uuid.NewRandom()
 			if err != nil {
 				return nil, err
 			}
-			row, err := d.Queries.CreateWebhookEndpoint(r.Context(), generated.CreateWebhookEndpointParams{
-				OrgID:            u.OrgID,
-				Url:              p.URL,
-				SecretRef:        "per-endpoint",
-				Secret:           secret,
-				EventsSubscribed: p.EventsSubscribed,
-			})
+			secret, err := webhooksecret.Mint()
 			if err != nil {
 				return nil, err
 			}
-			if d.Audit != nil {
-				_, _ = d.Audit.Log(r.Context(), audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID,
-					Kind: "webhook.created",
-					Payload: map[string]any{
-						"endpoint_id": row.ID.String(),
-						"url":         row.Url,
-						"events":      p.EventsSubscribed,
-						"via":         "mcp",
-					},
-				})
+			secretCiphertext, err := d.WebhookSecrets.SealNew(u.OrgID, endpointID, secret)
+			if err != nil {
+				return nil, err
+			}
+			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
+				func(q *generated.Queries) (*generated.CreateWebhookEndpointRow, error) {
+					return q.CreateWebhookEndpoint(r.Context(), generated.CreateWebhookEndpointParams{
+						ID:               endpointID,
+						OrgID:            u.OrgID,
+						Url:              p.URL,
+						SecretRef:        "per-endpoint-aesgcm-v1",
+						SecretCiphertext: secretCiphertext,
+						EventsSubscribed: p.EventsSubscribed,
+					})
+				},
+				func(created *generated.CreateWebhookEndpointRow) audit.Entry {
+					return audit.Entry{
+						OrgID: u.OrgID, ActorUserID: &u.UserID,
+						Kind: "webhook.created",
+						Payload: map[string]any{
+							"endpoint_id": created.ID.String(),
+							"events":      p.EventsSubscribed,
+							"via":         "mcp",
+						},
+					}
+				},
+			)
+			if err != nil {
+				return nil, err
 			}
 			// The secret is returned exactly once on create.
 			// Subsequent reads (list_webhooks) omit it.
-			out := webhookRow(row)
+			out := webhookRow(row.ID, row.Url, row.EventsSubscribed, row.Active, row.CreatedAt.Time)
 			out["secret"] = secret
 			return out, nil
 		},
@@ -145,24 +151,33 @@ func registerWebhookTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, errors.New("endpoint_id must be a uuid")
 			}
-			if err := d.Queries.DeleteWebhookEndpoint(r.Context(), generated.DeleteWebhookEndpointParams{
-				ID: id, OrgID: u.OrgID,
-			}); err != nil {
+			deletedID, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
+				func(q *generated.Queries) (uuid.UUID, error) {
+					return q.DeleteWebhookEndpoint(r.Context(), generated.DeleteWebhookEndpointParams{
+						ID: id, OrgID: u.OrgID,
+					})
+				},
+				func(deletedID uuid.UUID) audit.Entry {
+					return audit.Entry{
+						OrgID: u.OrgID, ActorUserID: &u.UserID,
+						Kind:    "webhook.deleted",
+						Payload: map[string]any{"endpoint_id": deletedID.String(), "via": "mcp"},
+					}
+				},
+			)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errors.New("webhook endpoint not found")
+			}
+			if err != nil {
 				return nil, err
 			}
-			if d.Audit != nil {
-				_, _ = d.Audit.Log(r.Context(), audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID,
-					Kind:    "webhook.deleted",
-					Payload: map[string]any{"endpoint_id": id.String(), "via": "mcp"},
-				})
-			}
-			return map[string]any{"deleted": id.String()}, nil
+			return map[string]any{"deleted": deletedID.String()}, nil
 		},
 	})
 
 	s.RegisterTool(ToolDef{
 		Name:        "list_webhook_deliveries",
+		MinRole:     auth.RoleOwner,
 		Description: "List recent delivery attempts for an outbound webhook endpoint. Up to 200 rows. Useful for debugging why a downstream isn't receiving events.",
 		InputSchema: schemaObject(map[string]any{
 			"endpoint_id": stringSchema("uuid of the endpoint"),
@@ -230,12 +245,12 @@ func registerWebhookTools(s *Server, d Deps) {
 	})
 }
 
-func webhookRow(row *generated.WebhookEndpoint) map[string]any {
+func webhookRow(id uuid.UUID, endpointURL string, events []string, active bool, createdAt time.Time) map[string]any {
 	return map[string]any{
-		"id":                row.ID.String(),
-		"url":               row.Url,
-		"events_subscribed": append([]string{}, row.EventsSubscribed...),
-		"active":            row.Active,
-		"created_at":        row.CreatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"id":                id.String(),
+		"url":               endpointURL,
+		"events_subscribed": append([]string{}, events...),
+		"active":            active,
+		"created_at":        createdAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}
 }

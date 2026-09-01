@@ -16,7 +16,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/bright-interaction/hash/internal/actiontoken"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
 	mdb "github.com/bright-interaction/hash/internal/db"
@@ -54,11 +53,16 @@ func TestCommentThread(t *testing.T) {
 	dmust(t, err, "token")
 	rec, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Email: "client@example.com", Name: "Client", OrderIndex: 0, MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(72 * time.Hour), Valid: true}, Locale: "sv"})
 	dmust(t, err, "recipient")
+	sentAt := time.Now().UTC().Truncate(time.Microsecond)
+	_, err = pool.Exec(ctx, "UPDATE documents SET status = 'sent', sent_at = $2 WHERE id = $1", doc.ID, sentAt) //nolint:rawsql
+	dmust(t, err, "activate comment ceremony")
 
 	// Signer asks a question.
 	rc, err := signEng.LookupByRecipientID(ctx, rec.ID, org.ID)
 	dmust(t, err, "lookup")
-	_, err = signEng.SignerComment(ctx, rc, "Kan vi flytta leveransdatumet?")
+	_, err = signEng.SignerComment(ctx, rc, "Kan vi flytta leveransdatumet?", sign.ParticipantResponseEvidence{
+		Notice: testArticle13NoticeEvidence(t, rc),
+	})
 	dmust(t, err, "signer comment")
 
 	// Sender answers.
@@ -74,22 +78,5 @@ func TestCommentThread(t *testing.T) {
 		t.Fatalf("unexpected order/sides: %s then %s", thread[0].AuthorSide, thread[1].AuthorSide)
 	}
 
-	// Email-reply path: a recipient replies by id (as the one-click link does).
-	_, err = signEng.CommentAsRecipient(ctx, org.ID, doc.ID, rec.ID, "Tack, det fungerar.")
-	dmust(t, err, "comment as recipient")
-	thread2, err := q.ListComments(ctx, doc.ID)
-	dmust(t, err, "list comments 2")
-	if len(thread2) != 3 || thread2[2].AuthorSide != "signer" || thread2[2].RecipientID.Bytes != rec.ID {
-		t.Fatalf("expected a 3rd signer comment from the recipient, got %d", len(thread2))
-	}
-
-	// If the server secret is present, mint a real reply URL to exercise the
-	// live /a/comment endpoint by hand.
-	if secret := os.Getenv("HASH_SIGNER_TOKEN_KEY"); secret != "" {
-		url := "http://localhost:8080/a/comment?t=" + actiontoken.Mint(secret, actiontoken.Claims{
-			Kind: "comment", OrgID: org.ID.String(), DocID: doc.ID.String(), TargetID: rec.ID.String(), Action: "reply",
-		}, time.Now(), time.Hour)
-		t.Logf("REPLY_URL=%s", url)
-	}
-	t.Log("comment thread OK: signer + sender + email-reply posts")
+	t.Log("comment thread OK: notice-gated signer + sender posts")
 }

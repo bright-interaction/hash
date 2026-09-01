@@ -15,7 +15,7 @@
     {
       title: 'Developer',
       items: [
-        { href: '/settings/api-keys', label: 'API keys', desc: 'Mint MCP + REST agent keys.', icon: KeyRound },
+        { href: '/settings/api-keys', label: 'API keys', desc: 'Mint automation + MCP keys.', icon: KeyRound },
         { href: '/settings/webhooks', label: 'Webhooks', desc: 'Outbound HMAC-signed delivery.', icon: Webhook },
       ],
     },
@@ -39,7 +39,7 @@
       title: 'Compliance',
       items: [
         { href: '/settings/compliance', label: 'Compliance kit', desc: 'DPA, RoPA, EDPB flags.', icon: ShieldCheck },
-        { href: '/settings/eidas-rules', label: 'eIDAS routing', desc: 'SES / AES / QES tier rules.', icon: Scale },
+        { href: '/settings/eidas-rules', label: 'eIDAS routing', desc: 'SES active; AES / QES unavailable.', icon: Scale },
         { href: '/settings/dsr', label: 'Data subject rights', desc: 'Articles 15 - 22 inbox.', icon: UserSearch },
         { href: '/settings/audit-chain', label: 'Audit chain verify', desc: 'Walk the hash chain end-to-end.', icon: ShieldCheck },
       ],

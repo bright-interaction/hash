@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/ai"
@@ -171,26 +172,32 @@ func (s *Server) handleSetOrgAIProvider(w http.ResponseWriter, r *http.Request) 
 		last4 = existing.KeyLast4
 	}
 
-	row, err := s.Queries.UpsertOrgAISettings(r.Context(), generated.UpsertOrgAISettingsParams{
-		OrgID:    u.OrgID,
-		Provider: in.Provider,
-		BaseUrl:  in.BaseURL,
-		Model:    in.Model,
-		ApiKeyCt: ct,
-		KeyLast4: last4,
-		Enabled:  enabled,
-	})
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.OrgAiSetting, error) {
+			return q.UpsertOrgAISettings(r.Context(), generated.UpsertOrgAISettingsParams{
+				OrgID:    u.OrgID,
+				Provider: in.Provider,
+				BaseUrl:  in.BaseURL,
+				Model:    in.Model,
+				ApiKeyCt: ct,
+				KeyLast4: last4,
+				Enabled:  enabled,
+			})
+		},
+		func(row *generated.OrgAiSetting) audit.Entry {
+			return audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID,
+				Kind: "ai_provider.updated",
+				IP:   clientIP(r),
+				// Never log key material; provider + model + enabled only.
+				Payload: map[string]any{"provider": row.Provider, "model": row.Model, "enabled": row.Enabled},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: u.OrgID, ActorUserID: &u.UserID,
-		Kind: "ai_provider.updated",
-		IP:   clientIP(r),
-		// Never log key material; provider + model + enabled only.
-		Payload: map[string]any{"provider": row.Provider, "model": row.Model, "enabled": row.Enabled},
-	})
 	writeJSON(w, http.StatusOK, orgAIProviderResponse{
 		Configured:     true,
 		ByoaiAvailable: true,
@@ -208,15 +215,22 @@ func (s *Server) handleDeleteOrgAIProvider(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if err := s.Queries.DeleteOrgAISettings(r.Context(), u.OrgID); err != nil {
+	_, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (uuid.UUID, error) {
+			return u.OrgID, q.DeleteOrgAISettings(r.Context(), u.OrgID)
+		},
+		func(uuid.UUID) audit.Entry {
+			return audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID,
+				Kind: "ai_provider.deleted",
+				IP:   clientIP(r),
+			}
+		},
+	)
+	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: u.OrgID, ActorUserID: &u.UserID,
-		Kind: "ai_provider.deleted",
-		IP:   clientIP(r),
-	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

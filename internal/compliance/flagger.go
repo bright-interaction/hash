@@ -5,11 +5,13 @@ package compliance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
@@ -36,6 +38,42 @@ func (f *Flagger) FlagRun(ctx context.Context, items []FeedItem) (int, error) {
 	if len(items) == 0 {
 		return 0, nil
 	}
+	if err := f.upsertFeedItems(ctx, items); err != nil {
+		return 0, err
+	}
+	orgIDs, err := f.Q.ListAllOrgsForCompliance(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list orgs: %w", err)
+	}
+	raised := 0
+	for _, orgID := range orgIDs {
+		n, err := f.flagRunForOrg(ctx, orgID, items)
+		if err != nil {
+			return raised, err
+		}
+		raised += n
+	}
+	return raised, nil
+}
+
+// FlagRunForOrg is the tenant-scoped form used by the authenticated manual
+// endpoint. A customer owner may refresh their own findings but must never
+// cause writes in every other organization; only the background worker calls
+// the global FlagRun method above.
+func (f *Flagger) FlagRunForOrg(ctx context.Context, orgID uuid.UUID, items []FeedItem) (int, error) {
+	if orgID == uuid.Nil {
+		return 0, errors.New("compliance flag run requires an organization")
+	}
+	if len(items) == 0 {
+		return 0, nil
+	}
+	if err := f.upsertFeedItems(ctx, items); err != nil {
+		return 0, err
+	}
+	return f.flagRunForOrg(ctx, orgID, items)
+}
+
+func (f *Flagger) upsertFeedItems(ctx context.Context, items []FeedItem) error {
 	for _, it := range items {
 		if err := f.Q.UpsertFeedItem(ctx, generated.UpsertFeedItemParams{
 			ID:          it.ID,
@@ -44,25 +82,27 @@ func (f *Flagger) FlagRun(ctx context.Context, items []FeedItem) (int, error) {
 			Topic:       it.Topic,
 			PublishedAt: pgtype.Timestamptz{Time: it.PublishedAt, Valid: true},
 		}); err != nil {
-			return 0, fmt.Errorf("upsert feed item: %w", err)
+			return fmt.Errorf("upsert feed item: %w", err)
 		}
 	}
-	// Pull baselines for every org so the walker scopes the scan to the
-	// docs the customer is actually relying on.
-	orgIDs, err := f.Q.ListAllOrgsForCompliance(ctx, 10000)
+	return nil
+}
+
+func (f *Flagger) flagRunForOrg(ctx context.Context, orgID uuid.UUID, items []FeedItem) (int, error) {
+	baseline, err := f.Q.GetComplianceBaseline(ctx, orgID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
 	if err != nil {
-		return 0, fmt.Errorf("list orgs: %w", err)
+		return 0, fmt.Errorf("load compliance baseline for org %s: %w", orgID, err)
 	}
 	raised := 0
-	for _, orgID := range orgIDs {
-		baseline, err := f.Q.GetComplianceBaseline(ctx, orgID)
+	for _, item := range items {
+		n, err := f.flagForOrg(ctx, orgID, baseline, item)
 		if err != nil {
-			continue
+			return raised, err
 		}
-		for _, item := range items {
-			n, _ := f.flagForOrg(ctx, orgID, baseline, item)
-			raised += n
-		}
+		raised += n
 	}
 	return raised, nil
 }
@@ -78,30 +118,39 @@ func (f *Flagger) flagForOrg(ctx context.Context, orgID uuid.UUID, baseline *gen
 	}
 	targets := []target{}
 	if baseline.RecordsDocID.Valid {
-		if doc, err := f.Q.GetDocument(ctx, generated.GetDocumentParams{
+		doc, err := f.Q.GetDocument(ctx, generated.GetDocumentParams{
 			ID: uuid.UUID(baseline.RecordsDocID.Bytes), OrgID: orgID,
-		}); err == nil {
+		})
+		if err == nil {
 			targets = append(targets, target{
 				docID: baseline.RecordsDocID, title: doc.Name, body: doc.BlocksJson,
 			})
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("load compliance records document: %w", err)
 		}
 	}
 	if baseline.PrivacyNoticeID.Valid {
-		if doc, err := f.Q.GetDocument(ctx, generated.GetDocumentParams{
+		doc, err := f.Q.GetDocument(ctx, generated.GetDocumentParams{
 			ID: uuid.UUID(baseline.PrivacyNoticeID.Bytes), OrgID: orgID,
-		}); err == nil {
+		})
+		if err == nil {
 			targets = append(targets, target{
 				docID: baseline.PrivacyNoticeID, title: doc.Name, body: doc.BlocksJson,
 			})
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("load compliance privacy document: %w", err)
 		}
 	}
 	if baseline.DpaTemplateID.Valid {
-		if tpl, err := f.Q.GetTemplate(ctx, generated.GetTemplateParams{
+		tpl, err := f.Q.GetTemplate(ctx, generated.GetTemplateParams{
 			ID: uuid.UUID(baseline.DpaTemplateID.Bytes), OrgID: orgID,
-		}); err == nil {
+		})
+		if err == nil {
 			targets = append(targets, target{
 				templateID: baseline.DpaTemplateID, title: tpl.Name, body: tpl.BlocksJson,
 			})
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("load compliance DPA template: %w", err)
 		}
 	}
 	for _, t := range targets {
@@ -119,8 +168,13 @@ func (f *Flagger) flagForOrg(ctx context.Context, orgID uuid.UUID, baseline *gen
 			Severity:        severityForTopic(item.Topic),
 			SuggestedAction: suggestionForTopic(item.Topic),
 		})
-		if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// The database uniqueness invariant makes feed replay and concurrent
+			// worker/manual runs idempotent.
 			continue
+		}
+		if err != nil {
+			return raised, fmt.Errorf("insert compliance flag: %w", err)
 		}
 		raised++
 	}

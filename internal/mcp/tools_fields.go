@@ -72,6 +72,9 @@ func registerFieldTools(s *Server, d Deps) {
 				}
 				return nil, err
 			}
+			if doc.Status != "draft" {
+				return nil, errors.New("document not in draft state")
+			}
 			switch p.Type {
 			case "text", "date", "checkbox", "dropdown", "initial":
 			case "signature":
@@ -100,32 +103,39 @@ func registerFieldTools(s *Server, d Deps) {
 			if page < 1 {
 				page = 1
 			}
-			row, err := d.Queries.CreateField(r.Context(), generated.CreateFieldParams{
-				DocumentID:  docID,
-				RecipientID: recipientID,
-				Type:        p.Type,
-				Page:        int32(page),
-				XPct:        bpToNumeric(p.XPct),
-				YPct:        bpToNumeric(p.YPct),
-				WPct:        bpToNumeric(p.WPct),
-				HPct:        bpToNumeric(p.HPct),
-				Required:    required,
-				Label:       pgtype.Text{String: p.Label, Valid: p.Label != ""},
-				OptionsJson: []byte(`{}`),
-			})
+			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
+				func(q *generated.Queries) (*generated.DocumentField, error) {
+					return q.CreateDraftField(r.Context(), generated.CreateDraftFieldParams{
+						DocumentID:  docID,
+						RecipientID: recipientID,
+						Type:        p.Type,
+						Page:        int32(page),
+						XPct:        bpToNumeric(p.XPct),
+						YPct:        bpToNumeric(p.YPct),
+						WPct:        bpToNumeric(p.WPct),
+						HPct:        bpToNumeric(p.HPct),
+						Required:    required,
+						Label:       pgtype.Text{String: p.Label, Valid: p.Label != ""},
+						OptionsJson: []byte(`{}`),
+					})
+				},
+				func(row *generated.DocumentField) audit.Entry {
+					return audit.Entry{
+						OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID,
+						Kind: "document.field_added",
+						Payload: map[string]any{
+							"field_id": row.ID.String(),
+							"type":     p.Type,
+							"via":      "mcp",
+						},
+					}
+				},
+			)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errors.New("document not in draft state or recipient does not belong to document")
+			}
 			if err != nil {
 				return nil, err
-			}
-			if d.Audit != nil {
-				_, _ = d.Audit.Log(r.Context(), audit.Entry{
-					OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &docID,
-					Kind: "document.field_added",
-					Payload: map[string]any{
-						"field_id": row.ID.String(),
-						"type":     p.Type,
-						"via":      "mcp",
-					},
-				})
 			}
 			return fieldRowToMCP(row), nil
 		},
@@ -201,9 +211,22 @@ func registerFieldTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), ownerDoc); err != nil {
 				return nil, err
 			}
-			if err := d.Queries.DeleteFieldByID(r.Context(), generated.DeleteFieldByIDParams{
+			doc, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: ownerDoc, OrgID: u.OrgID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, errors.New("document not found")
+			}
+			if err != nil {
+				return nil, err
+			}
+			if doc.Status != "draft" {
+				return nil, errors.New("document not in draft state")
+			}
+			if _, err := d.Queries.DeleteFieldByID(r.Context(), generated.DeleteFieldByIDParams{
 				ID: id, OrgID: u.OrgID,
 			}); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, errors.New("document not in draft state")
+				}
 				return nil, err
 			}
 			return map[string]any{"deleted": id.String()}, nil

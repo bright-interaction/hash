@@ -137,13 +137,20 @@ test.describe('document versioning (Phase 8.1)', () => {
     const doc = await tool(request, 'create_document', {
       name: 'Restore guard',
       source_kind: 'blocks',
-      blocks_json: { version: 1, blocks: [] }
+      blocks_json: {
+        version: 1,
+        blocks: [{ id: 's', type: 'signature_field', attrs: { recipient_role: 'signer' } }]
+      }
     });
-    // Void it (transitions to 'voided' status).
-    await rpcRaw(request, 'tools/call', {
-      name: 'void_document',
-      arguments: { document_id: doc.id, reason: 'unit test' }
+    // Reach a non-draft through the supported lifecycle; draft -> voided is
+    // intentionally rejected by the production state machine.
+    await tool(request, 'add_recipient', {
+      document_id: doc.id,
+      role: 'signer',
+      email: `restore-guard-${Date.now()}@example.com`,
+      name: 'Restore Guard'
     });
+    await tool(request, 'send_document', { document_id: doc.id, lawful_basis: 'contract' });
     const res = await rpcRaw(request, 'tools/call', {
       name: 'restore_document_version',
       arguments: { document_id: doc.id, target_version: 1 }

@@ -14,7 +14,6 @@ import (
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/evidence"
-	"github.com/bright-interaction/hash/internal/qes"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/storage"
 	"github.com/bright-interaction/hash/internal/versions"
@@ -30,7 +29,7 @@ func TestDocScopeSafeToolsMembership(t *testing.T) {
 		"search_documents", "send_document", "void_document", "run_risk_analysis",
 		"resolve_document_branding", "set_document_routing_tier",
 		"list_envelope_children", "get_envelope_manifest", "download_final_pdf",
-		"download_audit_cert", "start_qes_session", "add_document_field",
+		"download_audit_cert", "get_qes_session", "add_document_field",
 	}
 	mustDeny := []string{
 		"set_org_branding", "create_eidas_rule", "delete_eidas_rule",
@@ -92,7 +91,6 @@ func TestDocScopeSafeToolsAreRegistered(t *testing.T) {
 		Versions:     &versions.Engine{},
 		Envelopes:    &envelopes.Engine{},
 		EIDAS:        &eidas.Engine{},
-		QES:          &qes.Engine{},
 		Resolver:     &resolver.Resolver{},
 		Clarifier:    &aiapps.Clarifier{},
 		Negotiator:   &aiapps.Negotiator{},

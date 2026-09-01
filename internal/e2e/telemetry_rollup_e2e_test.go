@@ -8,7 +8,6 @@ package e2e
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -37,7 +36,9 @@ import (
 //     true 40 read as 180 after 8 ticks.
 //  2. Migration 00041 REPAIRS rows the old code already corrupted, including
 //     on documents that have gone quiet and would never be revisited by a
-//     forward-only fix, and it keeps a verbatim copy of every pre-fix row.
+//     forward-only fix. Its temporary verbatim repair snapshot is present at
+//     that migration boundary and migration 00057 then deletes it so the
+//     90-day analytics limit has no permanent unpruned side copy.
 //  3. Totals do not DECAY when the 90-day prune deletes the raw rows that
 //     produced them. A recompute-and-replace rollup sitting next to the prune
 //     turned total_views into a shrinking 90-day counter and destroyed the
@@ -67,8 +68,8 @@ func TestTelemetryRollupExactlyOnce(t *testing.T) {
 	// ---------------------------------------------------------------- seed
 	// Schema as it stood BEFORE the repair migration, so the corrupted rows
 	// can be seeded exactly as the broken worker would have left them.
-	docA := seedDocument(t, ctx, q, "Active AB")
-	docB := seedDocument(t, ctx, q, "Dormant AB")
+	docA := seedDocument(t, ctx, pool, "Active AB")
+	docB := seedDocument(t, ctx, pool, "Dormant AB")
 
 	// docA: 5 honest views of blk-a at 1000ms, plus one event whose
 	// recipient-supplied dwell_ms is a string. True lifetime: 6 views, 5000ms.
@@ -91,8 +92,7 @@ func TestTelemetryRollupExactlyOnce(t *testing.T) {
 
 	// ------------------------------------------------------------- backfill
 	migConn := stdlibConn(t, pool)
-	must(t, mdb.RunMigrations(migConn), "run migrations (00041 backfill)")
-	_ = migConn.Close()
+	must(t, mdb.RunMigrationsUpTo(migConn, 41), "run migration 00041 backfill")
 
 	views, dwell := readSummary(t, ctx, pool, docA, "blk-a")
 	if views != 6 || dwell != 5000 {
@@ -110,6 +110,21 @@ func TestTelemetryRollupExactlyOnce(t *testing.T) {
 	}
 	if !exists(t, ctx, pool, `SELECT 1 FROM document_engagement_summary_h1_backup WHERE document_id = $1 AND block_id = 'blk-a' AND total_views = 180`, docA) {
 		t.Fatalf("pre-fix value of a repaired row was not preserved in the backup table")
+	}
+
+	// The backup was a migration repair aid, not an independently lawful
+	// analytics archive. Apply the remaining migrations and prove the release
+	// removes that unpruned copy while adding the bounded live-summary index.
+	must(t, mdb.RunMigrations(migConn), "run migrations through telemetry snapshot cleanup")
+	_ = migConn.Close()
+	var backupTable, retentionIndex pgtype.Text
+	must(t, pool.QueryRow(ctx, `SELECT to_regclass('public.document_engagement_summary_h1_backup')::text`).Scan(&backupTable), "inspect H1 backup relation")
+	must(t, pool.QueryRow(ctx, `SELECT to_regclass('public.idx_engagement_summary_retention')::text`).Scan(&retentionIndex), "inspect summary retention index")
+	if backupTable.Valid {
+		t.Fatalf("unpruned telemetry repair snapshot survived migration 00057 as %q", backupTable.String)
+	}
+	if !retentionIndex.Valid {
+		t.Fatal("bounded engagement-summary retention index is missing after migration 00057")
 	}
 
 	// ------------------------------------------------------- no double count
@@ -142,34 +157,20 @@ func TestTelemetryRollupExactlyOnce(t *testing.T) {
 		t.Fatalf("replaying the tick re-counted the new events: got %d views / %d ms, want 10 / 11000", views, dwell)
 	}
 
-	// ----------------------------------------------------- prune does not eat
-	// 7 views that are already past the 90-day retention edge. The tick must
-	// count them on the way out and must not revise the total downward on the
-	// next tick once the raw rows are gone.
+	// ------------------------------------------------ bounded summary retention
+	// Events already past the 90-day edge are claimed before raw pruning, then
+	// both the raw rows and the now-expired recipient-linked summary are
+	// removed. Optional analytics must not leave a permanent reading profile.
 	oldEventAt := time.Now().Add(-100 * 24 * time.Hour)
 	for i := 0; i < 7; i++ {
 		insertView(t, ctx, pool, docA, "blk-old", `{"dwell_ms":100}`, oldEventAt)
 	}
 	telemetry.RunRollupOnce(ctx, q, 90*24*time.Hour)
-	views, dwell = readSummary(t, ctx, pool, docA, "blk-old")
-	if views != 7 || dwell != 700 {
-		t.Fatalf("events at the retention edge were not counted before the prune: got %d views / %d ms, want 7 / 700", views, dwell)
-	}
 	if exists(t, ctx, pool, `SELECT 1 FROM telemetry_events WHERE document_id = $1 AND block_id = 'blk-old'`, docA) {
 		t.Fatalf("prune did not delete the raw rows past retention, the decay repro is not actually exercised")
 	}
-	telemetry.RunRollupOnce(ctx, q, 90*24*time.Hour)
-	views, dwell = readSummary(t, ctx, pool, docA, "blk-old")
-	if views != 7 || dwell != 700 {
-		t.Fatalf("total DECAYED after its raw rows were pruned: got %d views / %d ms, want 7 / 700", views, dwell)
-	}
-	// The aggregate still carries evidence the raw rows can no longer supply.
-	var lastEventAt time.Time
-	if err := pool.QueryRow(ctx, `SELECT last_event_at FROM document_engagement_summary WHERE document_id = $1 AND block_id = 'blk-old'`, docA).Scan(&lastEventAt); err != nil {
-		t.Fatalf("read last_event_at: %v", err)
-	}
-	if time.Since(lastEventAt) < 90*24*time.Hour {
-		t.Fatalf("last_event_at was not carried over from the pruned rows: got %s", lastEventAt)
+	if exists(t, ctx, pool, `SELECT 1 FROM document_engagement_summary WHERE document_id = $1 AND block_id = 'blk-old'`, docA) {
+		t.Fatal("expired engagement summary survived the same 90-day analytics retention edge")
 	}
 
 	// A prune that deletes nothing must still return a row, not sql.ErrNoRows:
@@ -197,7 +198,7 @@ func TestTelemetryRollupExactlyOnce(t *testing.T) {
 	// A magic-link holder can POST any JSON. Neither a non-numeric nor an
 	// out-of-range dwell_ms may abort the statement, which would freeze this
 	// document's summary on every tick forever.
-	docC := seedDocument(t, ctx, q, "Poison AB")
+	docC := seedDocument(t, ctx, pool, "Poison AB")
 	insertView(t, ctx, pool, docC, "blk-p", `{"dwell_ms":"not-a-number"}`, time.Now())
 	insertView(t, ctx, pool, docC, "blk-p", `{"dwell_ms":9223372036854775807}`, time.Now())
 	insertView(t, ctx, pool, docC, "blk-p", `{"dwell_ms":500}`, time.Now())
@@ -249,28 +250,33 @@ func stdlibConn(t *testing.T, pool *pgxpool.Pool) *sql.DB {
 	return stdlib.OpenDB(*pool.Config().ConnConfig)
 }
 
-func seedDocument(t *testing.T, ctx context.Context, q *generated.Queries, orgName string) uuid.UUID {
+func seedDocument(t *testing.T, ctx context.Context, pool *pgxpool.Pool, orgName string) uuid.UUID {
 	t.Helper()
-	org, err := q.CreateOrg(ctx, generated.CreateOrgParams{Name: orgName, Plan: "pro"})
-	must(t, err, "create org")
-	user, err := q.CreateUser(ctx, generated.CreateUserParams{
-		OrgID: org.ID, Email: uuid.NewString() + "@e2e.example", Name: "Sender", Role: "owner",
-		ZitadelSub: pgtype.Text{String: uuid.NewString(), Valid: true},
-	})
-	must(t, err, "create user")
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{
-		OrgID: org.ID, Name: "Avtal", BlocksJson: json.RawMessage(`{"version":1,"blocks":[]}`),
-		VariablesJson: json.RawMessage(`{}`), SenderID: user.ID,
-	})
-	must(t, err, "create document")
-	_, err = q.CreateRecipient(ctx, generated.CreateRecipientParams{
-		DocumentID: doc.ID, Role: "signer", Email: "client@example.com", Name: "Client", OrderIndex: 0,
-		MagicTokenHash:      []byte(uuid.NewString()),
-		MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(72 * time.Hour), Valid: true},
-		Locale:              "sv",
-	})
+	// Seed with deliberately stable, pre-00041 SQL. Generated authoring queries
+	// target the latest schema and can acquire columns added after the migration
+	// boundary this regression test is exercising.
+	var orgID, userID, docID uuid.UUID
+	must(t, pool.QueryRow(ctx,
+		`INSERT INTO orgs (name, plan) VALUES ($1, 'pro') RETURNING id`, orgName,
+	).Scan(&orgID), "create org")
+	must(t, pool.QueryRow(ctx,
+		`INSERT INTO users (org_id, email, name, role, zitadel_sub)
+		 VALUES ($1, $2, 'Sender', 'owner', $3) RETURNING id`,
+		orgID, uuid.NewString()+"@e2e.example", uuid.NewString(),
+	).Scan(&userID), "create user")
+	must(t, pool.QueryRow(ctx,
+		`INSERT INTO documents (org_id, name, source_kind, blocks_json, variables_json, sender_id)
+		 VALUES ($1, 'Avtal', 'blocks', '{"version":1,"blocks":[]}'::jsonb, '{}'::jsonb, $2)
+		 RETURNING id`, orgID, userID,
+	).Scan(&docID), "create document")
+	_, err := pool.Exec(ctx,
+		`INSERT INTO recipients
+		 (document_id, role, email, name, order_index, magic_token_hash, magic_token_expires_at, locale)
+		 VALUES ($1, 'signer', $2, 'Client', 0, $3, $4, 'sv')`,
+		docID, uuid.NewString()+"@client.example", []byte(uuid.NewString()), time.Now().Add(72*time.Hour),
+	)
 	must(t, err, "create recipient")
-	return doc.ID
+	return docID
 }
 
 // insertView writes a raw block.viewed event with an explicit created_at,

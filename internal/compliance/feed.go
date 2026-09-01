@@ -9,8 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/bright-interaction/hash/internal/nethard"
 )
 
 // FeedItem mirrors compliance_feed_items + the wire shape of the
@@ -38,10 +43,16 @@ type HTTPFeed struct {
 	Client   *http.Client
 }
 
-func NewHTTPFeed(endpoint string) *HTTPFeed {
+const (
+	maxComplianceFeedBytes = 4 << 20
+	maxComplianceFeedItems = 1000
+)
+
+func NewHTTPFeed(endpoint string, allowPrivate ...bool) *HTTPFeed {
+	privateAllowed := len(allowPrivate) > 0 && allowPrivate[0]
 	return &HTTPFeed{
 		Endpoint: endpoint,
-		Client:   &http.Client{Timeout: 10 * time.Second},
+		Client:   nethard.Client(10*time.Second, func() bool { return privateAllowed }),
 	}
 }
 
@@ -59,12 +70,22 @@ func (f *HTTPFeed) Fetch(ctx context.Context, since time.Time) ([]FeedItem, erro
 		return nil, fmt.Errorf("feed fetch: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("feed %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || (mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json")) {
+		return nil, errors.New("feed response must use an application/json content type")
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxComplianceFeedBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > maxComplianceFeedBytes {
+		return nil, fmt.Errorf("feed response exceeds %d bytes", maxComplianceFeedBytes)
+	}
+	if !utf8.Valid(body) {
+		return nil, errors.New("feed response must be valid UTF-8")
 	}
 	var wire struct {
 		Items []FeedItem `json:"items"`
@@ -72,14 +93,39 @@ func (f *HTTPFeed) Fetch(ctx context.Context, since time.Time) ([]FeedItem, erro
 	if err := json.Unmarshal(body, &wire); err != nil {
 		return nil, fmt.Errorf("feed decode: %w", err)
 	}
+	if len(wire.Items) > maxComplianceFeedItems {
+		return nil, fmt.Errorf("feed contains more than %d items", maxComplianceFeedItems)
+	}
 	out := wire.Items[:0]
 	for _, item := range wire.Items {
+		if err := validateFeedItem(item); err != nil {
+			return nil, err
+		}
 		if item.PublishedAt.Before(since) {
 			continue
 		}
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+func validateFeedItem(item FeedItem) error {
+	if strings.TrimSpace(item.ID) == "" || item.ID != strings.TrimSpace(item.ID) || len(item.ID) > 512 {
+		return errors.New("feed item id must be non-empty, trimmed, and at most 512 bytes")
+	}
+	if strings.TrimSpace(item.Title) == "" || len(item.Title) > 2048 {
+		return fmt.Errorf("feed item %q title must be non-empty and at most 2048 bytes", item.ID)
+	}
+	if len(item.Summary) > 64*1024 {
+		return fmt.Errorf("feed item %q summary exceeds 65536 bytes", item.ID)
+	}
+	if strings.TrimSpace(item.Topic) == "" || item.Topic != strings.TrimSpace(item.Topic) || len(item.Topic) > 128 {
+		return fmt.Errorf("feed item %q topic must be non-empty, trimmed, and at most 128 bytes", item.ID)
+	}
+	if item.PublishedAt.IsZero() {
+		return fmt.Errorf("feed item %q published_at is required", item.ID)
+	}
+	return nil
 }
 
 // ErrFeedNotConfigured is returned when no endpoint is set + the worker
@@ -114,10 +160,10 @@ func (s *SyntheticFeed) Fetch(_ context.Context, since time.Time) ([]FeedItem, e
 	return out, nil
 }
 
-// SampleFeedItems returns a small starter set so a fresh deploy can
-// show the /compliance dashboard with one or two known advisories.
-// Replace by real EDPB fetches once we wire the upstream URL.
-func SampleFeedItems() []FeedItem {
+// DevelopmentSampleFeedItems returns fictional fixtures for local demos and
+// unit tests. They are not authoritative legal guidance and production wiring
+// must never ingest them or surface flags derived from them.
+func DevelopmentSampleFeedItems() []FeedItem {
 	return []FeedItem{
 		{
 			ID:          "edpb/2025/schrems-iii-supplementary-measures",

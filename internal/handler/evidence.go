@@ -15,10 +15,10 @@ import (
 	"github.com/bright-interaction/hash/internal/evidence"
 )
 
-// Phase 10.2: court-ready evidence bundle export. Returns a single PDF
+// Cryptographically verifiable evidence bundle export. Returns a single PDF
 // with the signed document as the visible body and attached files for
-// machine readers (manifest.json, events.json, versions.json,
-// public-key.pem, optional cert.ots).
+// machine readers (manifest.json, events.json, versions.json, independent
+// manifest/certificate public keys, optional cert.ots).
 
 // GET /api/v1/documents/{id}/evidence-bundle
 func (s *Server) handleEvidenceBundle(w http.ResponseWriter, r *http.Request) {
@@ -52,14 +52,22 @@ func (s *Server) handleEvidenceBundle(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.Evidence.Build(r.Context(), doc)
 	if err != nil {
-		if errors.Is(err, evidence.ErrNotTerminal) {
-			writeError(w, http.StatusConflict, "evidence bundle only available for terminal documents (completed, declined, voided, expired)")
+		switch {
+		case errors.Is(err, evidence.ErrEvidenceUnavailable):
+			writeError(w, http.StatusConflict, "evidence bundle only available for a completed top-level document or envelope")
+			return
+		case errors.Is(err, evidence.ErrUnboundLegacyQES):
+			writeError(w, http.StatusConflict, "evidence export is blocked because this document contains unverified legacy QES material")
 			return
 		}
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	if s.Audit == nil {
+		writeError(w, http.StatusServiceUnavailable, "audit logger not configured")
+		return
+	}
+	if _, err := s.Audit.Log(r.Context(), audit.Entry{
 		OrgID:       sess.OrgID,
 		ActorUserID: &sess.UserID,
 		DocumentID:  &doc.ID,
@@ -67,12 +75,16 @@ func (s *Server) handleEvidenceBundle(w http.ResponseWriter, r *http.Request) {
 		IP:          firstIPFromHeader(r),
 		UserAgent:   r.UserAgent(),
 		Payload: map[string]any{
-			"via":               "rest",
-			"tool":              "evidence_bundle_export",
-			"final_pdf_sha256":  res.Manifest.FinalPDFSHA256,
-			"manifest_anchored": res.Manifest.OpenTimestamps != nil,
+			"via":                               "rest",
+			"tool":                              "evidence_bundle_export",
+			"final_pdf_sha256":                  res.Manifest.FinalPDFSHA256,
+			"opentimestamps_attachment_present": res.Manifest.OpenTimestamps != nil,
+			"opentimestamps_verified":           false,
 		},
-	})
+	}); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, res.Filename))
 	_, _ = w.Write(res.Bytes)
@@ -86,6 +98,9 @@ func (s *Server) handleEvidenceBundle(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEvidenceManifest(w http.ResponseWriter, r *http.Request) {
 	sess, ok := requireSessionUser(w, r.Context())
 	if !ok {
+		return
+	}
+	if !s.requireFeature(w, r, sess.OrgID, "evidence_bundle") {
 		return
 	}
 	docID, ok := parseUUIDParam(w, r, "id")
@@ -107,8 +122,12 @@ func (s *Server) handleEvidenceManifest(w http.ResponseWriter, r *http.Request) 
 	}
 	res, err := s.Evidence.Build(r.Context(), doc)
 	if err != nil {
-		if errors.Is(err, evidence.ErrNotTerminal) {
-			writeError(w, http.StatusConflict, "manifest only available for terminal documents")
+		switch {
+		case errors.Is(err, evidence.ErrEvidenceUnavailable):
+			writeError(w, http.StatusConflict, "manifest only available for a completed top-level document or envelope")
+			return
+		case errors.Is(err, evidence.ErrUnboundLegacyQES):
+			writeError(w, http.StatusConflict, "evidence manifest is blocked because this document contains unverified legacy QES material")
 			return
 		}
 		writeInternalError(w, err)

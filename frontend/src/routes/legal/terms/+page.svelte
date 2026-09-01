@@ -2,20 +2,20 @@
 
 <p class="page-eyebrow">Legal</p>
 <h1>Terms of Service</h1>
-<p class="text-text-muted text-sm mb-2">Last updated: 2026-05-10</p>
+<p class="text-text-muted text-sm mb-2">Last updated: 2026-08-31</p>
 
 <div class="draft-banner">
-  <strong>Draft for Swedish-counsel review.</strong> This page is a working draft of the Hash Terms of Service.
-  Bright Interaction AB intends to have these reviewed by Swedish counsel before paid customers go live.
-  In the meantime they reflect the actual operation of the service.
+  <strong>Draft—not approved for customer launch.</strong> Swedish counsel must review these terms,
+  and the operator's complete registered identity and address must be added, before they are accepted
+  by any paid customer.
 </div>
 
 <h2>1. The service</h2>
 <p>
-  Hash is a software platform operated by <strong>Bright Interaction AB</strong> (org.no. to be filled, registered in Sweden) that lets organisations
+  Hash is a software platform operated by <strong>Bright Interaction AB</strong>, registered in Sweden, that lets organisations
   author, send, and electronically sign documents. The platform is delivered as a hosted service at
   <code>esign.brightinteraction.com</code> and is also available for self-hosted deployment under the
-  same Apache 2.0 licence as the underlying source code.
+  Hash Sustainable Use License, a fair-code licence that is not an OSI-approved open-source licence.
 </p>
 
 <h2>2. Your account</h2>
@@ -41,14 +41,14 @@
 
 <h2>4. Electronic signatures</h2>
 <p>
-  Hash produces signatures at the <strong>Simple Electronic Signature (SES)</strong> and
-  <strong>Advanced Electronic Signature (AES)</strong> tiers under EU Regulation 910/2014 (eIDAS).
-  See <a href="/legal/eidas">our eIDAS page</a> for what that means and where it applies.
+  This Hash production release supports the <strong>Simple Electronic Signature (SES)</strong>
+  path under EU Regulation 910/2014 (eIDAS). See <a href="/legal/eidas">our eIDAS page</a>
+  for what that means and where it applies.
 </p>
 <p>
-  Signatures at the <strong>Qualified Electronic Signature (QES)</strong> tier require a Qualified Trust
-  Service Provider and are provided through a separately-contracted backend (Idura, Signicat, Scrive)
-  when configured. Hash itself is not a QTSP.
+  <strong>Advanced Electronic Signature (AES)</strong> and
+  <strong>Qualified Electronic Signature (QES)</strong> are unavailable in this release and cannot
+  be selected. Hash does not silently treat an SES event as AES or QES, and Hash itself is not a QTSP.
 </p>
 <p>
   By using Hash to send a document for signature, you represent that the underlying transaction is
@@ -62,25 +62,25 @@
   <li>Send documents for signing that you do not have lawful authority to send;</li>
   <li>Send unsolicited bulk email through the platform;</li>
   <li>Reverse-engineer, abuse, or attempt to breach security boundaries of the service;</li>
-  <li>Process special categories of personal data (Art. 9 GDPR) without ensuring an appropriate
-    lawful basis and notifying us at least 14 days in advance;</li>
+  <li>Process special categories of personal data (Art. 9 GDPR) without an approved basis, safeguards,
+    customer agreement, and operator addendum in place before processing;</li>
   <li>Send documents whose subject matter would violate the laws of Sweden or the European Union.</li>
 </ul>
 
 <h2>6. Availability and support</h2>
 <p>
-  The hosted Hash service runs on Hetzner infrastructure in Falkenstein, Germany. We target 99.5%
-  monthly uptime and publish status at <code>status.brightinteraction.com</code>. Scheduled maintenance
-  is announced at least 24 hours in advance. Support is available through the contact channels listed
-  at <code>brightinteraction.com/contact</code>.
+  Hosting location, availability commitments, maintenance notice, support response times, and any
+  service credits are governed by the applicable order form or SLA. No uptime commitment applies
+  unless it is expressly included in an approved customer agreement.
 </p>
 
 <h2>7. Fees</h2>
 <p>
-  The current pricing is published at <code>brightinteraction.com/pricing</code>. Prices are quoted in
-  EUR and exclude VAT. Subscriptions auto-renew at the end of each billing period unless cancelled.
-  No refunds are issued for partial periods, but you can downgrade or cancel at any time and your
-  documents remain accessible through the end of the current period.
+  Prices, currency, VAT treatment, billing period, renewal, cancellation, refund terms, downgrade
+  effects, and post-cancellation access must be stated in the applicable executed order form and
+  approved Hash plan catalogue. This draft does not incorporate a public pricing page or create a
+  commercial commitment. Provider responses and dashboard labels do not override the executed
+  customer agreement.
 </p>
 
 <h2>8. Liability</h2>
@@ -93,9 +93,9 @@
 
 <h2>9. Termination</h2>
 <p>
-  Either party may terminate this agreement on 30 days' notice. We will provide a complete export of
-  your documents and audit certificates within 30 days of termination, after which we will delete your
-  data subject to the retention requirements in the DPA.
+  Notice, export, access, and deletion obligations on termination must be stated in the executed order
+  form and DPA and must match the production export, backup, and immutable-retention controls. This
+  draft does not promise a termination or deletion timeline that has not been approved and tested.
 </p>
 
 <h2>10. Governing law</h2>

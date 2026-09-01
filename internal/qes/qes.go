@@ -1,21 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License
 // Copyright (c) Bright Interaction
 
-// Package qes implements v1.1 Qualified Electronic Signature routing.
-//
-// When a document's routing_tier is QES (Phase 9 eIDAS escalation), the
-// signer is redirected to a QTSP (Idura BankID, Signicat, Scrive)
-// instead of the typed-name+ed25519 flow. The QTSP performs the actual
-// signature using a Qualified Certificate chained to an eIDAS trusted
-// root list (Article 26 + Article 32). We persist the resulting identity
-// assertion + signature in qes_signing_sessions so the audit cert + the
-// Phase 10.2 evidence bundle can reproduce the chain for forensic
-// review.
-//
-// This package exposes a single Provider interface so swapping QTSPs is
-// a one-line registry change. NoopProvider rejects every request (used
-// when QES is disabled). MockProvider auto-completes (used in dev +
-// e2e). IduraProvider hits the live Idura REST API.
+// Package qes retains legacy provider and session types for migration and
+// archival compatibility. Hash is SES-only in this release: no QES lifecycle
+// route or MCP mutation is registered, and Engine mutation/resume methods fail
+// closed. The legacy session design did not persist and verify the exact
+// ceremony digest or atomically consume provider proof with the legal response,
+// so its records must not be represented as a valid QES.
 package qes
 
 import (
@@ -108,15 +99,15 @@ type Provider interface {
 // Errors surfaced to handlers. Each is a sentinel so callers can match
 // with errors.Is and route to the right HTTP status code.
 var (
-	ErrDisabled        = errors.New("qes: feature disabled on this instance")
-	ErrProviderUnknown = errors.New("qes: unknown provider")
-	ErrInvalidCallback = errors.New("qes: callback signature mismatch")
-	ErrSessionExpired  = errors.New("qes: session expired")
+	ErrDisabled            = errors.New("qes: feature disabled on this instance")
+	ErrCeremonyUnavailable = errors.New("qes: ceremony unavailable in this SES-only release")
+	ErrProviderUnknown     = errors.New("qes: unknown provider")
+	ErrInvalidCallback     = errors.New("qes: callback signature mismatch")
+	ErrSessionExpired      = errors.New("qes: session expired")
 )
 
-// NoopProvider rejects every request. Wired when HASH_QES_PROVIDER is
-// empty AND the feature flag is off. Lets the surface still compile +
-// route correctly without forcing dev to set up a real QTSP.
+// NoopProvider rejects every request. It remains available to legacy callers,
+// but the current server does not wire any Provider into an HTTP/MCP surface.
 type NoopProvider struct{}
 
 func (NoopProvider) Name() string                                            { return "noop" }
@@ -125,9 +116,8 @@ func (NoopProvider) Callback(context.Context, CallbackInput) (*CallbackResult, e
 	return nil, ErrDisabled
 }
 
-// MockProvider auto-completes every signing challenge with a synthetic
-// identity assertion. Used for laptop dev, Playwright e2e, and the
-// initial production cutover before live Idura creds land.
+// MockProvider simulates the retired provider contract for isolated package
+// tests. The server never wires it, including in local development and e2e.
 type MockProvider struct {
 	// IssuedAt is overridable so tests are deterministic.
 	IssuedAt time.Time

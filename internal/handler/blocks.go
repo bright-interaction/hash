@@ -4,11 +4,9 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -272,7 +270,17 @@ func (s *Server) handlePreviewHTML(w http.ResponseWriter, r *http.Request) {
 // mutateTree loads the doc, applies fn to its block tree, persists, and
 // audits. Used by REST and MCP both so the rules stay in one place.
 func (s *Server) mutateTree(r *http.Request, orgID, userID uuid.UUID, docID uuid.UUID, toolName string, fn func(*blocks.Tree) error) (*generated.Document, error) {
-	existing, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: orgID})
+	return s.mutateTreeVia(r, orgID, userID, docID, versions.ViaHuman, toolName, fn)
+}
+
+func (s *Server) mutateTreeVia(r *http.Request, orgID, userID uuid.UUID, docID uuid.UUID, via versions.Via, toolName string, fn func(*blocks.Tree) error) (*generated.Document, error) {
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := s.Queries.WithTx(tx)
+	existing, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{ID: docID, OrgID: orgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -296,20 +304,35 @@ func (s *Server) mutateTree(r *http.Request, orgID, userID uuid.UUID, docID uuid
 	if err != nil {
 		return nil, err
 	}
-	doc, err := s.Queries.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
+	doc, err := q.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
 		ID: docID, OrgID: orgID, BlocksJson: raw, VariablesJson: existing.VariablesJson,
 	})
 	if err != nil {
 		return nil, err
 	}
-	s.snapshotAfterMutate(r.Context(), doc, &userID, versions.ViaHuman, toolName)
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	if s.Versions != nil {
+		if _, err := versions.New(q).Snapshot(r.Context(), versions.SnapshotInput{
+			DocumentID: doc.ID, OrgID: doc.OrgID, Name: doc.Name, SourceKind: doc.SourceKind,
+			BlocksJSON: doc.BlocksJson, VariablesJS: doc.VariablesJson, CreatedBy: &userID,
+			Via: via, Summary: toolName,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID: orgID, ActorUserID: &userID, DocumentID: &docID,
 		Kind:      audit.KindDocumentUpdated,
 		IP:        firstIPFromHeader(r),
 		UserAgent: r.UserAgent(),
 		Payload:   map[string]any{"via": "rest", "tool": toolName, "blocks": len(tree.Blocks)},
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		return nil, err
+	}
+	s.Audit.Publish(pending)
 	return doc, nil
 }
 
@@ -319,68 +342,10 @@ func (s *Server) replaceTree(r *http.Request, orgID, userID uuid.UUID, docID uui
 	if err := blocks.Validate(tree); err != nil {
 		return nil, fmt.Errorf("validation: %w", err)
 	}
-	raw, err := json.Marshal(tree)
-	if err != nil {
-		return nil, err
-	}
-	existing, err := s.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: docID, OrgID: orgID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	if existing.Status != "draft" || existing.SourceKind != "blocks" {
-		return nil, errors.New("document not editable (must be draft + blocks-source)")
-	}
-	doc, err := s.Queries.UpdateDocumentBlocks(r.Context(), generated.UpdateDocumentBlocksParams{
-		ID: docID, OrgID: orgID, BlocksJson: raw, VariablesJson: existing.VariablesJson,
+	return s.mutateTreeVia(r, orgID, userID, docID, versions.ViaImport, toolName, func(current *blocks.Tree) error {
+		*current = *tree
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	s.snapshotAfterMutate(r.Context(), doc, &userID, versions.ViaImport, toolName)
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: orgID, ActorUserID: &userID, DocumentID: &docID,
-		Kind:      audit.KindDocumentUpdated,
-		IP:        firstIPFromHeader(r),
-		UserAgent: r.UserAgent(),
-		Payload:   map[string]any{"via": "rest", "tool": toolName, "blocks": len(tree.Blocks)},
-	})
-	return doc, nil
-}
-
-// snapshotAfterMutate persists a document_versions row reflecting the
-// just-completed mutation. Called from mutateTree + replaceTree + restore so
-// every state-changing edit produces exactly one new version. Best-effort:
-// snapshot failures are logged but do not unwind the mutation; the audit log
-// still captures the action.
-func (s *Server) snapshotAfterMutate(ctx context.Context, doc *generated.Document, actor *uuid.UUID, via versions.Via, toolName string) {
-	if s.Versions == nil || doc == nil {
-		return
-	}
-	summary := toolName
-	if summary == "" {
-		summary = "edit"
-	}
-	_, err := s.Versions.Snapshot(ctx, versions.SnapshotInput{
-		DocumentID:  doc.ID,
-		OrgID:       doc.OrgID,
-		Name:        doc.Name,
-		SourceKind:  doc.SourceKind,
-		BlocksJSON:  doc.BlocksJson,
-		VariablesJS: doc.VariablesJson,
-		CreatedBy:   actor,
-		Via:         via,
-		Summary:     summary,
-	})
-	if err != nil {
-		// Don't fail the request: the snapshot is supplementary; the audit
-		// log is the legal record. We surface failures via slog so the
-		// telemetry pipeline can flag persistent breakages.
-		slog.Default().Warn("versions: snapshot failed",
-			"document_id", doc.ID, "error", err)
-	}
 }
 
 // mapMutationStatus turns errors back into HTTP statuses.
@@ -418,24 +383,8 @@ func chiURLParam(r *http.Request, name string) string {
 }
 
 func firstIPFromHeader(r *http.Request) string {
-	h := r.Header.Get("X-Forwarded-For")
-	if h != "" {
-		for i := 0; i < len(h); i++ {
-			if h[i] == ',' {
-				return strSpaceTrim(h[:i])
-			}
-		}
-		return strSpaceTrim(h)
-	}
-	return r.RemoteAddr
-}
-
-func strSpaceTrim(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	return s
+	// The outermost production middleware has already resolved Caddy's
+	// authenticated single client address into RemoteAddr and stripped all
+	// forwarding headers. Re-reading a raw header here would undo that boundary.
+	return clientIP(r)
 }

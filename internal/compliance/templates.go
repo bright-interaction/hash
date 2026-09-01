@@ -58,10 +58,8 @@ type Templates struct {
 	RecordsBody        string
 	PrivacyNoticeTitle string
 	PrivacyNoticeBody  string
-	// EIDAS hints: list of extra rule names the seeder should consider
-	// installing for this business type. The Phase 9.2 SeedSwedishDefaults
-	// always runs first; these augment for healthcare / fintech /
-	// law-firm-specific thresholds.
+	// EIDAS hints are retained as non-operative migration metadata. The seeder
+	// does not install them while AES/QES ceremonies are unavailable.
 	ExtraEIDASHints []string
 }
 

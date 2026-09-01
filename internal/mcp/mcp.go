@@ -31,6 +31,9 @@ import (
 // this an agent would see SQLSTATE + column/constraint names or "dial tcp
 // host:port" internal hostnames in result.content on any DB fault.
 func sanitizeToolError(err error) string {
+	if errors.Is(err, billing.ErrEntitlementUnavailable) {
+		return "billing entitlement check temporarily unavailable; retry later"
+	}
 	var pgErr *pgconn.PgError
 	var connErr *pgconn.ConnectError
 	msg := err.Error()
@@ -215,7 +218,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case "tools/call":
 		s.handleToolsCall(w, r, req)
 	case "resources/list":
-		s.handleResourcesList(w, req)
+		s.handleResourcesList(w, r, req)
 	case "resources/read":
 		s.handleResourcesRead(w, r, req)
 	case "prompts/list":
@@ -287,11 +290,29 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req req
 		})
 		return
 	}
-	// Write tools require the "write" scope. A read-only API token (or a
-	// scoped token without write) can call read tools but is refused here.
-	if tool.Write && !auth.HasWriteScope(r.Context()) {
+	// Scope is a separate authorization axis from role and document boundary.
+	// Every registered tool must have one explicit central classification; a
+	// new/unreviewed tool fails closed. Granular org credentials cannot cross
+	// from authoring into outward workflow actions (or vice versa), and read
+	// operations require an actual read capability.
+	requiredScope, scopeClassified := mcpToolRequiredScopes[p.Name]
+	if !scopeClassified || !validMCPRequiredScope(requiredScope) {
 		writeRPCResult(w, req.ID, ToolResult{
-			Content: []ToolContent{{Type: "text", Text: "this token is read-only; the '" + p.Name + "' tool requires a write scope"}},
+			Content: []ToolContent{{Type: "text", Text: "the '" + p.Name + "' tool has no reviewed scope policy"}},
+			IsError: true,
+		})
+		return
+	}
+	if tool.Write != (requiredScope != mcpScopeRead) {
+		writeRPCResult(w, req.ID, ToolResult{
+			Content: []ToolContent{{Type: "text", Text: "the '" + p.Name + "' tool has an inconsistent scope policy"}},
+			IsError: true,
+		})
+		return
+	}
+	if !hasMCPRequiredScope(r.Context(), requiredScope) {
+		writeRPCResult(w, req.ID, ToolResult{
+			Content: []ToolContent{{Type: "text", Text: "the '" + p.Name + "' tool requires the '" + requiredScope + "' scope"}},
 			IsError: true,
 		})
 		return
@@ -301,7 +322,7 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req req
 	// the registration forgot to set MinRole; this closes the demoted-viewer-with-
 	// write-token bypass that let a viewer send/void/remind over MCP.
 	minRole := tool.MinRole
-	if minRole == "" && tool.Write {
+	if minRole == "" && requiredScope != mcpScopeRead {
 		minRole = auth.RoleSender
 	}
 	if minRole != "" && !auth.RoleAtLeast(r.Context(), minRole) {
@@ -341,10 +362,13 @@ func (s *Server) handleToolsCall(w http.ResponseWriter, r *http.Request, req req
 	})
 }
 
-func (s *Server) handleResourcesList(w http.ResponseWriter, req request) {
+func (s *Server) handleResourcesList(w http.ResponseWriter, r *http.Request, req request) {
 	out := make([]Resource, 0, len(s.resources))
-	for _, r := range s.resources {
-		out = append(out, r)
+	for _, resource := range s.resources {
+		if !docTokenAllowsResource(r.Context(), resource.URI) {
+			continue
+		}
+		out = append(out, resource)
 	}
 	writeRPCResult(w, req.ID, map[string]any{"resources": out})
 }
@@ -364,6 +388,23 @@ func (s *Server) handleResourcesRead(w http.ResponseWriter, r *http.Request, req
 	}
 	if _, ok := auth.FromContext(r.Context()); !ok {
 		writeRPCError(w, req.ID, codeUnauthorized, "no session in context", nil)
+		return
+	}
+	requiredScope, scopeClassified := mcpResourceRequiredScopes[p.URI]
+	if !scopeClassified || requiredScope != mcpScopeRead {
+		writeRPCError(w, req.ID, codeUnauthorized, "resource has no reviewed scope policy", nil)
+		return
+	}
+	if !hasMCPRequiredScope(r.Context(), requiredScope) {
+		writeRPCError(w, req.ID, codeUnauthorized, "resource requires the 'read' scope", nil)
+		return
+	}
+	// A document-scoped credential must not use an argument-less org resource
+	// as a side door around the per-tool document boundary. In particular,
+	// hash://documents/recent and hash://events/recent contain sibling records.
+	// The resource allow-list is fail closed for all future registrations.
+	if !docTokenAllowsResource(r.Context(), p.URI) {
+		writeRPCError(w, req.ID, codeUnauthorized, "this token is scoped to a single document and cannot read the org-level resource", nil)
 		return
 	}
 	body, err := res.Loader(r)

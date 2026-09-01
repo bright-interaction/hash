@@ -60,6 +60,8 @@ type SMTPMailer struct {
 	cfg SMTPConfig
 }
 
+const smtpOperationTimeout = 30 * time.Second
+
 // NewSMTPMailer returns a real Postal/mailhog client. Returns an error if
 // the configuration is incomplete enough that sending is guaranteed to
 // fail (no host or no from).
@@ -73,11 +75,22 @@ func NewSMTPMailer(cfg SMTPConfig) (*SMTPMailer, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 587
 	}
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		return nil, errors.New("smtp port must be between 1 and 65535")
+	}
+	if (cfg.User == "") != (cfg.Password == "") {
+		return nil, errors.New("smtp user and password must either both be set or both be empty")
+	}
+	from, err := mail.ParseAddress(cfg.From)
+	if err != nil || from.Address == "" {
+		return nil, errors.New("smtp from must be a valid RFC-5322 address")
+	}
 	return &SMTPMailer{cfg: cfg}, nil
 }
 
-// Send delivers msg via the configured server. STARTTLS is attempted on
-// any non-1025 port; mailhog uses 1025 plain so we let that case through.
+// Send delivers msg via the configured server. STARTTLS is required on
+// every non-1025 port; mailhog uses 1025 plain so local development can use
+// that explicitly reserved exception.
 // AUTH PLAIN is sent only if the config has a user + password set.
 func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 	if msg.To == "" {
@@ -88,22 +101,43 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("smtp dial: %w", err)
+		return smtpOperationError(ctx, "smtp dial", err)
 	}
+	// DialContext only bounds the TCP connect. The SMTP greeting, EHLO, TLS,
+	// AUTH, and DATA exchanges would otherwise be allowed to stall forever
+	// after a peer accepts the socket. Bound the whole transaction and close
+	// the connection promptly when the caller cancels a context without a
+	// deadline. The worker's 30-second send context remains the outer bound.
+	deadline := time.Now().Add(smtpOperationTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return smtpOperationError(ctx, "smtp set connection deadline", err)
+	}
+	stopContextClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopContextClose()
 	c, err := smtp.NewClient(conn, m.cfg.Host)
 	if err != nil {
-		conn.Close()
-		return fmt.Errorf("smtp new client: %w", err)
+		_ = conn.Close()
+		return smtpOperationError(ctx, "smtp new client", err)
 	}
 	defer c.Close()
 
-	// STARTTLS for any reasonably-secure port. Mailhog and other dev sinks
-	// listen on 1025 plain, so we skip there.
+	// STARTTLS is mandatory outside the reserved local MailHog port. Merely
+	// attempting it when advertised permits a stripping attacker to remove the
+	// capability and receive both the message and AUTH PLAIN credentials.
+	// Production config rejects port 1025; that exception is dev/e2e only.
 	if m.cfg.Port != 1025 {
-		if ok, _ := c.Extension("STARTTLS"); ok {
-			if err := c.StartTLS(&tls.Config{ServerName: m.cfg.Host}); err != nil {
-				return fmt.Errorf("smtp starttls: %w", err)
+		if ok, _ := c.Extension("STARTTLS"); !ok {
+			if ctxErr := smtpContextError(ctx); ctxErr != nil {
+				return fmt.Errorf("smtp hello: %w", ctxErr)
 			}
+			return errors.New("smtp: STARTTLS is required but the server did not advertise it")
+		}
+		if err := c.StartTLS(&tls.Config{ServerName: m.cfg.Host, MinVersion: tls.VersionTLS12}); err != nil {
+			return smtpOperationError(ctx, "smtp starttls", err)
 		}
 	}
 
@@ -111,15 +145,15 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 	if m.cfg.User != "" && m.cfg.Password != "" {
 		auth := smtp.PlainAuth("", m.cfg.User, m.cfg.Password, m.cfg.Host)
 		if err := c.Auth(auth); err != nil {
-			return fmt.Errorf("smtp auth: %w", err)
+			return smtpOperationError(ctx, "smtp auth", err)
 		}
 	}
 
 	if err := c.Mail(extractAddress(m.cfg.From)); err != nil {
-		return fmt.Errorf("smtp mail from: %w", err)
+		return smtpOperationError(ctx, "smtp mail from", err)
 	}
 	if err := c.Rcpt(extractAddress(msg.To)); err != nil {
-		return fmt.Errorf("smtp rcpt: %w", err)
+		return smtpOperationError(ctx, "smtp rcpt", err)
 	}
 
 	body, err := buildMIME(m.cfg.From, msg)
@@ -128,16 +162,44 @@ func (m *SMTPMailer) Send(ctx context.Context, msg Message) error {
 	}
 	wc, err := c.Data()
 	if err != nil {
-		return fmt.Errorf("smtp data open: %w", err)
+		return smtpOperationError(ctx, "smtp data open", err)
 	}
 	if _, err := wc.Write([]byte(body)); err != nil {
 		_ = wc.Close()
-		return fmt.Errorf("smtp data write: %w", err)
+		return smtpOperationError(ctx, "smtp data write", err)
 	}
 	if err := wc.Close(); err != nil {
-		return fmt.Errorf("smtp data close: %w", err)
+		return smtpOperationError(ctx, "smtp data close", err)
 	}
-	return c.Quit()
+	if err := c.Quit(); err != nil {
+		return smtpOperationError(ctx, "smtp quit", err)
+	}
+	return nil
+}
+
+// smtpContextError closes the small scheduling gap between a socket deadline
+// firing and the context timer goroutine publishing ctx.Err(). Without the
+// deadline check, the same caller deadline can nondeterministically surface as
+// a raw net.Error under race/load, which makes retry and shutdown policy unable
+// to distinguish provider failure from caller cancellation.
+func smtpContextError(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func smtpOperationError(ctx context.Context, operation string, err error) error {
+	if ctxErr := smtpContextError(ctx); ctxErr != nil {
+		return fmt.Errorf("%s: %w", operation, ctxErr)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 // sanitizeHeaderValue removes CR/LF (and other control chars) from a header

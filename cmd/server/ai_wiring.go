@@ -18,7 +18,7 @@ import (
 
 // signerPEM returns the ed25519 public key in PEM form for the evidence
 // bundle. Returns "" if no signer is configured so the bundle still
-// produces but the public-key.pem attachment is empty.
+// produces but the manifest/certificate public-key attachments are empty.
 func signerPEM(s *sign.CertSigner) string {
 	if s == nil {
 		return ""

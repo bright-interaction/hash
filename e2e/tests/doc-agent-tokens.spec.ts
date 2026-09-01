@@ -29,13 +29,14 @@ test.describe('per-document agent tokens (v1.1)', () => {
     // Mint a token bound to docA via the session-authed REST endpoint.
     const mintRes = await request.post(`/api/v1/documents/${docA.id}/agent-tokens`, {
       headers: { Cookie: SESSION_COOKIE, 'Content-Type': 'application/json' },
-      data: { name: 'e2e-test', ttl_hours: 1, max_uses: 50 }
+      data: { name: 'e2e-test', ttl_days: 1, max_uses: 50 }
     });
     expect(mintRes.status()).toBe(201);
     const minted = await mintRes.json();
     expect(typeof minted.token).toBe('string');
     expect(minted.token.startsWith('mth_')).toBe(true);
-    expect(minted.prefix.length).toBe(8);
+    expect(minted.prefix).toMatch(/^d[0-9a-f]{32}$/);
+    expect(minted.scopes).toEqual(['read']);
 
     // Using the doc-scoped token, reading docA should succeed.
     const readBoundRes = await request.post('/mcp', {
@@ -101,7 +102,7 @@ test.describe('per-document agent tokens (v1.1)', () => {
     });
     const mintRes = await request.post(`/api/v1/documents/${doc.id}/agent-tokens`, {
       headers: { Cookie: SESSION_COOKIE, 'Content-Type': 'application/json' },
-      data: { name: 'list-test', ttl_hours: 1 }
+      data: { name: 'list-test', ttl_days: 1 }
     });
     expect(mintRes.status()).toBe(201);
     const minted = await mintRes.json();

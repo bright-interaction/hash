@@ -320,12 +320,12 @@ export function previewURL(docID: string): string {
 
 // --- Recipients -----------------------------------------------------------
 
-export type RecipientRole = 'signer' | 'approver' | 'viewer' | 'cc';
 export type RecipientStatus =
   | 'pending'
   | 'sent'
   | 'viewed'
   | 'signed'
+  | 'accepted'
   | 'declined'
   | 'bounced';
 
@@ -383,6 +383,69 @@ export async function deleteRecipient(docID: string, recipientID: string): Promi
   await request('DELETE', `/api/v1/documents/${docID}/recipients/${recipientID}`);
 }
 
+// --- Billing --------------------------------------------------------------
+
+export interface BillingPlan {
+  id: string;
+  slug: string;
+  name: string;
+  monthly_price_cents: number;
+  yearly_price_cents: number;
+  currency: string;
+  document_quota_monthly: number;
+  recipient_quota_monthly: number;
+  features?: Record<string, boolean>;
+}
+
+export interface BillingSubscription {
+  id?: string;
+  status?: string;
+  provider?: string;
+  current_period_end?: string | null;
+  cancel_at_period_end?: boolean;
+}
+
+export interface BillingInvoice {
+  id: string;
+  status: string;
+  amount_cents: number;
+  currency: string;
+  hosted_invoice_url?: string;
+  paid_at?: string | null;
+  created_at: string;
+}
+
+export async function listBillingPlans(): Promise<{
+  plans: BillingPlan[];
+  billing_enabled: boolean;
+  provider?: string;
+}> {
+  return request('GET', '/api/v1/billing/plans');
+}
+
+export async function getBillingSubscription(): Promise<{
+  plan?: BillingPlan;
+  subscription?: BillingSubscription;
+  billing_enabled: boolean;
+}> {
+  return request('GET', '/api/v1/billing/subscription');
+}
+
+export async function listBillingInvoices(): Promise<{ invoices: BillingInvoice[] }> {
+  return request('GET', '/api/v1/billing/invoices');
+}
+
+export async function startBillingCheckout(
+  planSlug: string,
+  interval: 'monthly' | 'yearly',
+): Promise<{ checkout_url: string }> {
+  return request('POST', '/api/v1/billing/checkout', { plan_slug: planSlug, interval });
+}
+
+export async function cancelBillingSubscription(): Promise<void> {
+  await request('POST', '/api/v1/billing/cancel');
+}
+
 // --- Lifecycle: send / remind / void --------------------------------------
 
 export interface SignerLink {
@@ -418,11 +481,14 @@ export class SendError extends Error {
   }
 }
 
-export async function sendDocument(docID: string): Promise<SendResult> {
+export type LawfulBasis = 'contract';
+
+export async function sendDocument(docID: string, lawfulBasis: LawfulBasis): Promise<SendResult> {
   const res = await fetch(`/api/v1/documents/${docID}/send`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lawful_basis: lawfulBasis }),
   });
   if (res.ok) {
     return (await res.json()) as SendResult;
@@ -836,12 +902,15 @@ export async function exportSubjectData(email: string): Promise<unknown> {
 
 export interface DocAgentToken {
   id: string;
-  token_prefix: string;
+  prefix: string;
+  name: string;
   scopes: string[];
-  created_by: string | null;
+  max_uses: number;
+  used_count: number;
   created_at: string;
   expires_at: string | null;
-  used_count: number;
+  last_used_at?: string;
+  revoked_at?: string;
   /** Returned ONCE on mint; subsequent reads omit it. */
   token?: string;
 }
@@ -858,8 +927,8 @@ export async function mintDocAgentToken(
   return request('POST', `/api/v1/documents/${docID}/agent-tokens`, { scopes, ttl_days });
 }
 
-export async function revokeDocAgentToken(docID: string, tokenID: string): Promise<void> {
-  return request('DELETE', `/api/v1/documents/${docID}/agent-tokens/${tokenID}`);
+export async function revokeDocAgentToken(tokenID: string): Promise<void> {
+  return request('DELETE', `/api/v1/agent-tokens/${tokenID}`);
 }
 
 // --- Audit hash-chain verifier ---------------------------------------
@@ -933,8 +1002,7 @@ export interface EnvelopeManifest {
     title: string;
     position: number;
     status: string;
-    final_pdf_sha256: string;
-    final_pdf_key: string;
+    content_snapshot_sha256: string;
   }>;
 }
 

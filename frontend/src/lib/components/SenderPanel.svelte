@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import {
     listRecipients,
     createRecipient,
@@ -13,8 +13,14 @@
     SendError,
     type Recipient,
     type SignerLink,
+    type LawfulBasis,
   } from '$lib/api/client';
   import { LOCALES } from '$lib/i18n';
+  import {
+    ceremonyModeCopy,
+    hasCeremonyParticipant,
+    recipientRoleOptions,
+  } from './senderMode';
   import {
     Send,
     Bell,
@@ -34,6 +40,7 @@
   type Props = {
     documentID: string;
     status: string;
+    requiresSignature?: boolean;
     defaultLocale?: string;
     signatureFields?: { role: string; label: string }[];
     onStatusChange?: (next: string) => void;
@@ -43,6 +50,7 @@
   let {
     documentID,
     status,
+    requiresSignature = true,
     defaultLocale = 'en',
     signatureFields = [],
     onStatusChange,
@@ -50,15 +58,23 @@
   }: Props = $props();
 
   // Distinct roles that have a signature field; each needs a recipient to sign.
-  const signerRoles = $derived([...new Set(signatureFields.map((f) => f.role))]);
+  const signerRoles = $derived([
+    ...new Set(signatureFields.map((field) => field.role.trim().toLowerCase()).filter(Boolean)),
+  ]);
   const missingRoles = $derived(
-    signerRoles.filter((role) => !recipients.some((r) => r.role === role)),
+    requiresSignature
+      ? signerRoles.filter((role) => !recipients.some((r) => r.role === role))
+      : [],
   );
+  const modeCopy = $derived(ceremonyModeCopy(requiresSignature));
+  const roleOptions = $derived(recipientRoleOptions(signatureFields));
 
-  // Document-level default signing language. The sender dictates this before
+  // Document-level default ceremony language. The sender dictates this before
   // sending; every new recipient inherits it (see openAdd) and the whole
   // ceremony (email + signing page + rendered document) opens in it.
-  let docLocale = $state(defaultLocale || 'en');
+  // This is deliberately an initial value, not a live mirror of the prop:
+  // subsequent changes come from the select and are persisted explicitly.
+  let docLocale = $state(untrack(() => defaultLocale || 'en'));
   let savingLocale = $state(false);
 
   async function changeDocLocale(e: Event) {
@@ -89,6 +105,7 @@
   // Lifecycle action state.
   let busy = $state<'send' | 'remind' | 'void' | null>(null);
   let links = $state<SignerLink[] | null>(null);
+	let lawfulBasis = $state<LawfulBasis | ''>('');
   let remindedFlash = $state<number | null>(null);
   let copiedID = $state<string | null>(null);
 
@@ -98,7 +115,13 @@
   const isTerminal = $derived(
     status === 'voided' || status === 'declined' || status === 'expired',
   );
-  const hasSigner = $derived(recipients.some((r) => r.role === 'signer'));
+  const hasParticipant = $derived(
+    hasCeremonyParticipant(
+      requiresSignature,
+      recipients.map((recipient) => recipient.role),
+      signerRoles,
+    ),
+  );
 
   async function refresh() {
     loading = true;
@@ -117,8 +140,11 @@
     editingId = null;
     fName = '';
     fEmail = '';
-    fRole = 'signer';
-    fLocale = docLocale || 'en';
+    const firstSupportedRequiredRole = roleOptions.find((option) =>
+      signerRoles.includes(option.value),
+    );
+    fRole = requiresSignature ? (firstSupportedRequiredRole?.value ?? 'signer') : 'approver';
+    fLocale = requiresSignature ? (docLocale || 'en') : 'en';
     showForm = true;
   }
 
@@ -127,7 +153,7 @@
     fName = r.name;
     fEmail = r.email;
     fRole = r.role;
-    fLocale = r.locale || 'en';
+    fLocale = requiresSignature ? (r.locale || 'en') : 'en';
     showForm = true;
   }
 
@@ -186,7 +212,11 @@
     error = null;
     sendErr = null;
     try {
-      const res = await sendDocument(documentID);
+		if (!lawfulBasis) {
+			error = 'Select and confirm the controller\'s GDPR Article 6 lawful basis before sending.';
+			return;
+		}
+		const res = await sendDocument(documentID, lawfulBasis);
       links = res.links;
       onStatusChange?.(res.status || 'sent');
       await refresh();
@@ -247,6 +277,7 @@
   function pill(s: string): string {
     switch (s) {
       case 'signed':
+      case 'accepted':
         return 'text-success border-success';
       case 'viewed':
       case 'sent':
@@ -259,12 +290,9 @@
     }
   }
 
-  const roleOptions = [
-    { value: 'signer', label: 'Signer' },
-    { value: 'approver', label: 'Approver' },
-    { value: 'viewer', label: 'Viewer' },
-    { value: 'cc', label: 'CC' },
-  ];
+	const lawfulBasisOptions: { value: LawfulBasis; label: string }[] = [
+		{ value: 'contract', label: 'Art. 6(1)(b) — contract or requested pre-contractual steps' },
+	];
 
   function ts(value?: string): string {
     return value ? new Date(value).toLocaleString() : '';
@@ -274,7 +302,7 @@
 <section class="card p-5 mb-6">
   <div class="flex items-center justify-between mb-3">
     <h2 class="font-display font-extralight text-lg flex items-center gap-2">
-      <Users class="size-4" /> Recipients &amp; sending
+      <Users class="size-4" /> {modeCopy.sectionTitle}
     </h2>
     {#if editable}
       <button class="btn btn-secondary text-xs" onclick={openAdd}>
@@ -285,49 +313,52 @@
 
   {#if editable}
     <div class="flex flex-wrap items-center gap-2 mb-4 pb-4 border-b border-border-light">
-      <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Default language</span>
-      <select
-        bind:value={docLocale}
-        onchange={changeDocLocale}
-        disabled={savingLocale}
-        class="px-3 py-1.5 rounded-md border border-border-light bg-bg-elevated text-sm"
-      >
-        {#each LOCALES as l (l.code)}
-          <option value={l.code}>{l.name}</option>
-        {/each}
-      </select>
+      <span class="text-xs uppercase tracking-widest text-text-muted font-mono">
+        {requiresSignature ? 'Default email language' : 'Ceremony language'}
+      </span>
+      {#if requiresSignature}
+        <select
+          bind:value={docLocale}
+          onchange={changeDocLocale}
+          disabled={savingLocale}
+          class="px-3 py-1.5 rounded-md border border-border-light bg-bg-elevated text-sm"
+        >
+          {#each LOCALES as l (l.code)}
+            <option value={l.code}>{l.name}</option>
+          {/each}
+        </select>
+      {:else}
+        <span class="px-3 py-1.5 rounded-md border border-border-light bg-bg-elevated text-sm">English</span>
+      {/if}
       <span class="text-xs text-text-muted">
-        {savingLocale ? 'Saving...' : 'New recipients, their emails and the signing page open in this language.'}
+        {savingLocale ? 'Saving...' : modeCopy.defaultLanguageHelp}
       </span>
     </div>
   {/if}
 
   <p class="text-sm text-text-secondary mb-4 leading-relaxed">
     {#if editable}
-      Add the people who must sign, approve, or receive this document, then send
-      it for signature. Each signer gets a single-use magic link by email.
+      {modeCopy.editableDescription}
     {:else if isLive}
-      This document is out for signature. You can send a reminder or void it.
-      Recipients are locked while signing is in progress.
+      {modeCopy.liveDescription}
     {:else if isCompleted}
-      Every signer has completed. Download the signed PDF and the tamper-evident
-      audit certificate below.
+      {modeCopy.completedDescription}
     {:else}
       This document is {status}. No further sending actions are available.
     {/if}
   </p>
 
-  {#if editable && signerRoles.length > 0}
+  {#if editable && requiresSignature && signerRoles.length > 0}
     <div class="rounded-md border border-border-light bg-bg-elevated p-3 mb-4 text-sm">
-      <p class="text-xs uppercase tracking-widest text-text-muted font-mono mb-2">Signaturer som krävs</p>
+      <p class="text-xs uppercase tracking-widest text-text-muted font-mono mb-2">Required signature fields</p>
       <ul class="space-y-1">
         {#each signatureFields as f (f.role + f.label)}
-          {@const filled = recipients.some((r) => r.role === f.role)}
+          {@const filled = recipients.some((r) => r.role === f.role.trim().toLowerCase())}
           <li class="flex items-center gap-2">
             <span class="inline-block size-1.5 rounded-full {filled ? 'bg-success' : 'bg-warning'}"></span>
             <span>{f.label}</span>
-            <span class="text-text-muted text-xs">· roll: {f.role}</span>
-            {#if !filled}<span class="text-warning text-xs">saknar mottagare med denna roll</span>{/if}
+            <span class="text-text-muted text-xs">· role: {f.role}</span>
+            {#if !filled}<span class="text-warning text-xs">missing a recipient with this role</span>{/if}
           </li>
         {/each}
       </ul>
@@ -354,11 +385,18 @@
     {:else if sendErr.status === 409 && sendErr.requiredTier}
       <div class="card p-4 mb-4 border-l-4 border-warning">
         <h3 class="font-display font-extralight text-base mb-1 flex items-center gap-2">
-          <ShieldAlert class="size-4" /> eIDAS level required
+          <ShieldAlert class="size-4" /> {requiresSignature ? 'Signature tier unavailable' : 'Ceremony assurance tier unavailable'}
         </h3>
         <p class="text-sm text-text-secondary mb-2 leading-relaxed">
-          This document requires <strong>{sendErr.requiredTier}</strong> signing, but
-          your org is configured for <strong>{sendErr.currentTier || 'a lower tier'}</strong>.
+          {#if requiresSignature}
+            This document requires <strong>{sendErr.requiredTier}</strong> signing.
+            Hash currently supports production signing at SES only, so this send is blocked
+            and will not be silently downgraded.
+          {:else}
+            This document requires <strong>{sendErr.requiredTier}</strong> assurance.
+            Hash currently supports production acknowledgement ceremonies at SES only, so this
+            send is blocked and will not be silently downgraded.
+          {/if}
         </p>
         {#if sendErr.matchedRules && sendErr.matchedRules.length}
           <p class="text-xs uppercase tracking-widest text-text-muted font-mono mb-1">
@@ -370,7 +408,7 @@
             {/each}
           </ul>
         {/if}
-        <a class="btn btn-secondary text-xs" href="/settings/eidas-rules">Review signing rules</a>
+        <a class="btn btn-secondary text-xs" href="/settings/eidas-rules">Review unavailable-tier rules</a>
       </div>
     {:else}
       <div class="p-3 rounded-md border border-danger bg-bg-elevated text-danger text-sm mb-3">
@@ -414,18 +452,22 @@
             {/each}
           </select>
         </label>
-        <label class="text-sm">
+        <div class="text-sm">
           <span class="text-xs uppercase tracking-widest text-text-muted font-mono">Language</span>
-          <select
-            bind:value={fLocale}
-            class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
-          >
-            {#each LOCALES as l (l.code)}
-              <option value={l.code}>{l.name}</option>
-            {/each}
-          </select>
-          <span class="text-xs text-text-muted">Email + signing page open in this language.</span>
-        </label>
+          {#if requiresSignature}
+            <select
+              bind:value={fLocale}
+              class="block w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm"
+            >
+              {#each LOCALES as l (l.code)}
+                <option value={l.code}>{l.name}</option>
+              {/each}
+            </select>
+          {:else}
+            <div class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm">English</div>
+          {/if}
+          <span class="text-xs text-text-muted">{modeCopy.recipientLanguageHelp}</span>
+        </div>
       </div>
       <div class="flex gap-2">
         <button class="btn btn-primary" onclick={submitForm} disabled={saving}>
@@ -440,7 +482,7 @@
     <p class="text-text-muted text-sm">Loading...</p>
   {:else if recipients.length === 0}
     <p class="text-text-muted text-sm mb-4">
-      No recipients yet.{#if editable}{' '}Add at least one signer to send this document.{/if}
+      No recipients yet.{#if editable}{' '}{modeCopy.emptyRecipients}{/if}
     </p>
   {:else}
     <table class="w-full text-sm mb-4">
@@ -465,8 +507,10 @@
             <td>
               <span
                 class="inline-block text-xs px-2 py-0.5 rounded-full border capitalize {pill(r.status)}"
-                title={r.signed_at
-                  ? `Signed ${ts(r.signed_at)}`
+                title={r.status === 'accepted'
+                  ? 'Acknowledged'
+                  : r.signed_at
+                    ? `Signed ${ts(r.signed_at)}`
                   : r.first_viewed_at
                     ? `First viewed ${ts(r.first_viewed_at)}`
                     : r.sent_at
@@ -493,13 +537,34 @@
   {/if}
 
   <!-- Action bar -->
+	{#if editable}
+		<div class="mb-4 rounded-md border border-border-light bg-bg-elevated p-3 space-y-2">
+			<label class="block text-sm" for="lawful-basis">
+				<span class="text-xs uppercase tracking-widest text-text-muted font-mono">{modeCopy.lawfulBasisLabel}</span>
+				<select
+					id="lawful-basis"
+					bind:value={lawfulBasis}
+					class="mt-1 block w-full px-3 py-2 rounded-md border border-border-light bg-bg text-sm"
+					required
+				>
+					<option value="" disabled>Select the controller-approved basis…</option>
+					{#each lawfulBasisOptions as option (option.value)}
+						<option value={option.value}>{option.label}</option>
+					{/each}
+				</select>
+			</label>
+			<p class="text-xs text-text-muted">
+				Your organisation is the controller and must confirm that Art. 6(1)(b) actually applies to this document. Hash currently blocks ceremonies requiring another basis; it does not determine legal effect or choose a basis for you.
+			</p>
+		</div>
+	{/if}
   <div class="flex flex-wrap items-center gap-3 pt-2 border-t border-border-light">
     {#if editable}
-      <button class="btn btn-primary" onclick={send} disabled={busy === 'send' || !hasSigner || missingRoles.length > 0}>
-        <Send class="size-4" /> {busy === 'send' ? 'Sending...' : 'Send for signature'}
+      <button class="btn btn-primary" onclick={send} disabled={busy === 'send' || !hasParticipant || missingRoles.length > 0 || !lawfulBasis}>
+        <Send class="size-4" /> {busy === 'send' ? modeCopy.sendingAction : modeCopy.sendAction}
       </button>
-      {#if !hasSigner}
-        <span class="text-xs text-text-muted">Add at least one signer to enable sending.</span>
+      {#if !hasParticipant}
+        <span class="text-xs text-text-muted">{modeCopy.missingParticipant}</span>
       {:else if missingRoles.length > 0}
         <span class="text-xs text-warning">Add a recipient for: {missingRoles.join(', ')}.</span>
       {/if}
@@ -517,10 +582,10 @@
       {/if}
     {:else if isCompleted}
       <a class="btn btn-primary" href={finalPdfURL(documentID)} download>
-        <Download class="size-4" /> Signed PDF
+        <Download class="size-4" /> {modeCopy.completedPDF}
       </a>
       <a class="btn btn-secondary" href={auditCertURL(documentID)} download>
-        <FileCheck class="size-4" /> Audit certificate
+        <FileCheck class="size-4" /> {modeCopy.auditCertificate}
       </a>
     {:else if isTerminal}
       <span class="text-sm text-text-muted capitalize">Document {status}.</span>
@@ -529,11 +594,9 @@
 
   {#if links && links.length}
     <div class="card p-4 mt-4 border-l-4 border-warning">
-      <h3 class="font-display font-extralight text-base mb-1">Signing links sent</h3>
+      <h3 class="font-display font-extralight text-base mb-1">{modeCopy.linksTitle}</h3>
       <p class="text-xs text-text-secondary mb-3 leading-relaxed">
-        Each signer was emailed a single-use link. Copy a link here only if you
-        want to deliver it yourself; Hash stores it hashed and cannot show it
-        again.
+        {modeCopy.linksDescription}
       </p>
       <ul class="divide-y divide-border-light">
         {#each links as l (l.recipient_id)}

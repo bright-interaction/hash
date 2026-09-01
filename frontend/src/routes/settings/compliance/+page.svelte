@@ -77,9 +77,9 @@
   </div>
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
-    Seed your DPA, Records of Processing, Article 13 notice, and Swedish
-    eIDAS rules in one call. The EDPB feed flagger raises flags here
-    when an EDPB advisory touches a topic in your baseline.
+    The built-in DPA, Records of Processing, and Article 13 kit is an unapproved
+    development draft and cannot be seeded or sent in production. The EDPB feed
+    flagger raises flags here when an advisory touches an existing reviewed baseline.
   </p>
 
   {#if error}
@@ -88,7 +88,7 @@
 
   <section class="card p-5 mb-6">
     <h2 class="font-display font-extralight text-lg mb-3 flex items-center gap-2">
-      <ShieldCheck class="size-4" /> Seed baseline kit
+      <ShieldCheck class="size-4" /> Development-only draft kit
     </h2>
     <div class="flex flex-wrap gap-3 items-end">
       <label class="text-sm">

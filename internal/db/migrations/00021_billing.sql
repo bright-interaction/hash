@@ -75,15 +75,15 @@ VALUES
      5, 10,
      '{"qes":false,"aes":false,"branding":false,"evidence_bundle":false,"audit_timeline":true,"mcp":false}'::jsonb,
      10),
-    ('pro', 'Pro', 'Daily e-signing for one team. AES + branding + evidence bundles.',
+    ('pro', 'Pro', 'Daily e-signing for one team. Branding + evidence bundles.',
      4900, 49000, 'EUR',
      50, 200,
-     '{"qes":false,"aes":true,"branding":true,"evidence_bundle":true,"audit_timeline":true,"mcp":true}'::jsonb,
+     '{"qes":false,"aes":false,"branding":true,"evidence_bundle":true,"audit_timeline":true,"mcp":true}'::jsonb,
      20),
-    ('enterprise', 'Enterprise', 'BankID via Idura + unlimited usage + white-label.',
+    ('enterprise', 'Enterprise', 'Unlimited usage + white-label and SSO.',
      29900, 299000, 'EUR',
      0, 0,
-     '{"qes":true,"aes":true,"branding":true,"evidence_bundle":true,"audit_timeline":true,"mcp":true,"white_label":true,"sso":true}'::jsonb,
+     '{"qes":false,"aes":false,"branding":true,"evidence_bundle":true,"audit_timeline":true,"mcp":true,"white_label":true,"sso":true}'::jsonb,
      30)
 ON CONFLICT (slug) DO NOTHING;
 

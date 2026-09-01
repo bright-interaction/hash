@@ -5,6 +5,8 @@ package sanitize
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -12,6 +14,37 @@ import (
 	"strings"
 	"testing"
 )
+
+// buildObjectGraphPDF emits a small but structurally valid PDF with caller
+// supplied catalog entries and indirect objects. Computing the xref offsets in
+// the test keeps the fixtures readable while still exercising pdfcpu's real
+// parser (including indirect, otherwise-unreferenced objects).
+func buildObjectGraphPDF(t *testing.T, catalogExtra, pageExtra string, extraObjects ...string) []byte {
+	t.Helper()
+	objects := []string{
+		fmt.Sprintf(`<< /Type /Catalog /Pages 2 0 R %s >>`, catalogExtra),
+		`<< /Type /Pages /Kids [3 0 R] /Count 1 >>`,
+		fmt.Sprintf(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R %s >>`, pageExtra),
+		"<< /Length 0 >>\nstream\n\nendstream",
+	}
+	objects = append(objects, extraObjects...)
+
+	var out bytes.Buffer
+	out.WriteString("%PDF-1.7\n")
+	offsets := make([]int, len(objects)+1)
+	for i, obj := range objects {
+		offsets[i+1] = out.Len()
+		fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", i+1, obj)
+	}
+	xrefOffset := out.Len()
+	fmt.Fprintf(&out, "xref\n0 %d\n", len(objects)+1)
+	out.WriteString("0000000000 65535 f \n")
+	for i := 1; i <= len(objects); i++ {
+		fmt.Fprintf(&out, "%010d 00000 n \n", offsets[i])
+	}
+	fmt.Fprintf(&out, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xrefOffset)
+	return out.Bytes()
+}
 
 func TestClean_PassthroughForUnknownType(t *testing.T) {
 	raw := []byte("hello")
@@ -34,6 +67,83 @@ func TestClean_NilInputErrors(t *testing.T) {
 	_, err := Clean("x", "application/pdf", nil)
 	if err == nil {
 		t.Fatal("expected error for nil input")
+	}
+}
+
+func TestClean_PDFAllowsStaticDocument(t *testing.T) {
+	res, err := Clean("template-pdf", "application/pdf", buildTestPDF(t, 1))
+	if err != nil {
+		t.Fatalf("clean static PDF: %v", err)
+	}
+	if !bytes.HasPrefix(res.Bytes, []byte("%PDF-")) {
+		t.Fatalf("sanitized output is not a PDF: %q", res.Bytes[:min(8, len(res.Bytes))])
+	}
+}
+
+func TestClean_PDFRejectsActiveObjectGraph(t *testing.T) {
+	tests := []struct {
+		name         string
+		catalogExtra string
+		extraObjects []string
+		wantFeature  string
+	}{
+		{
+			name:         "catalog open-action JavaScript",
+			catalogExtra: "/OpenAction 5 0 R",
+			extraObjects: []string{`<< /Type /Action /S /JavaScript /JS (app.alert\(1\)) >>`},
+			wantFeature:  "/OpenAction",
+		},
+		{
+			name:         "document additional action",
+			catalogExtra: `/AA << /WC << /S /Launch /F (payload.exe) >> >>`,
+			wantFeature:  "/AA",
+		},
+		{
+			name:         "JavaScript name tree",
+			catalogExtra: `/Names << /JavaScript << /Names [(startup) 5 0 R] >> >>`,
+			extraObjects: []string{`<< /S /JavaScript /JS (this.print\(\)) >>`},
+			wantFeature:  "/JavaScript",
+		},
+		{
+			name:         "indirect launch action",
+			catalogExtra: "/Outlines 5 0 R",
+			extraObjects: []string{
+				`<< /Type /Outlines /First 6 0 R /Last 6 0 R /Count 1 >>`,
+				`<< /Title (run) /Parent 5 0 R /A 7 0 R >>`,
+				`<< /Type /Action /S /Launch /F (payload.exe) >>`,
+			},
+			wantFeature: "action:/Launch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := buildObjectGraphPDF(t, tc.catalogExtra, "", tc.extraObjects...)
+			_, err := Clean("template-pdf", "application/pdf", raw)
+			if !errors.Is(err, ErrActivePDFContent) {
+				t.Fatalf("expected ErrActivePDFContent, got %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantFeature) {
+				t.Fatalf("error %q does not identify %q", err, tc.wantFeature)
+			}
+		})
+	}
+}
+
+func TestClean_PDFRemovesOrdinaryHyperlinkAnnotation(t *testing.T) {
+	raw := buildObjectGraphPDF(t, "", "/Annots [5 0 R]",
+		`<< /Type /Annot /Subtype /Link /Rect [10 10 100 30] /Border [0 0 0] /A << /S /URI /URI (https://example.com) >> >>`,
+	)
+	res, err := Clean("template-pdf", "application/pdf", raw)
+	if err != nil {
+		t.Fatalf("ordinary hyperlink should be removable, got %v", err)
+	}
+	active, err := activePDFFeatures(res.Bytes)
+	if err != nil {
+		t.Fatalf("inspect cleaned PDF: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active hyperlink constructs survived annotation removal: %v", active)
 	}
 }
 

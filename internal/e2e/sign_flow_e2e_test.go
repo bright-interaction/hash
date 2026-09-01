@@ -127,7 +127,7 @@ func TestSendSignStampE2E(t *testing.T) {
 
 	// Send (draft -> sent).
 	sendRes, err := sendEng.Send(ctx, send.Actor{
-		UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "worker",
+		UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "worker", LawfulBasis: "contract",
 	}, doc.ID)
 	must(t, err, "send")
 	if sendRes.Status != "sent" {
@@ -140,6 +140,7 @@ func TestSendSignStampE2E(t *testing.T) {
 	must(t, err, "lookup recipient context")
 	signRes, err := signEng.Sign(ctx, rc, sign.SignInput{
 		TypedName: "Jane Signer", Font: "Caveat", IP: "127.0.0.1", UserAgent: "e2e",
+		Notice: testArticle13NoticeEvidence(t, rc),
 	})
 	must(t, err, "sign")
 	if !signRes.Completed {

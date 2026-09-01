@@ -48,7 +48,7 @@
       if (scopes.sign) scopeList.push('write:workflow');
       const t = await mintDocAgentToken(documentID, scopeList, ttlDays);
       if (t.token) {
-        revealed = { token: t.token, prefix: t.token_prefix };
+        revealed = { token: t.token, prefix: t.prefix };
         copied = false;
       }
       showCreate = false;
@@ -63,7 +63,7 @@
   async function revoke(id: string) {
     if (!confirm('Revoke this token? Any in-flight agent call using it will fail with 401.')) return;
     try {
-      await revokeDocAgentToken(documentID, id);
+      await revokeDocAgentToken(id);
       await refresh();
     } catch (e) {
       error = (e as Error).message;
@@ -167,7 +167,7 @@
       <tbody class="divide-y divide-border-light">
         {#each tokens as t (t.id)}
           <tr>
-            <td class="py-2 font-mono text-xs">{t.token_prefix}</td>
+            <td class="py-2 font-mono text-xs">{t.prefix}</td>
             <td class="text-xs">{(t.scopes || []).join(', ')}</td>
             <td class="font-mono text-xs">{t.used_count}</td>
             <td class="text-xs text-text-muted">

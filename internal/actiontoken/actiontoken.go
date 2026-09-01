@@ -82,7 +82,9 @@ func Verify(secret, token string, now time.Time) (Claims, error) {
 	if err != nil {
 		return Claims{}, ErrMalformed
 	}
-	if now.Unix() > exp {
+	// exp is an exclusive boundary, matching the conventional JWT meaning:
+	// the token is no longer valid once the expiry second begins.
+	if now.Unix() >= exp {
 		return Claims{}, ErrExpired
 	}
 	return Claims{Kind: parts[0], OrgID: parts[1], DocID: parts[2], TargetID: parts[3], Action: parts[4], Exp: exp}, nil

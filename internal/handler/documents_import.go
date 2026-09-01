@@ -122,7 +122,21 @@ func (s *Server) importDocumentFromHTML(w http.ResponseWriter, r *http.Request, 
 // finishPDFDocument runs the shared clean+store+create intake, then does the
 // HTTP + audit bookkeeping.
 func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID, name string, data []byte) {
-	d, pageCount, err := docintake.CreatePDFSourceDocument(r.Context(), s.Queries, s.Storage, orgID, userID, name, data)
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		writeInternalErrorMsg(w, "begin document import", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := s.Queries.WithTx(tx)
+	if err := s.Billing.LockDocumentQuotaMutation(r.Context(), q, orgID); err != nil {
+		if s.writeAuthoringQuotaError(w, err) {
+			return
+		}
+		writeInternalErrorMsg(w, "lock document quota", err)
+		return
+	}
+	d, pageCount, err := docintake.CreatePDFSourceDocument(r.Context(), q, s.Storage, orgID, userID, name, data)
 	if err != nil {
 		if errors.Is(err, docintake.ErrSanitizePDF) {
 			writeError(w, http.StatusBadRequest, "sanitize PDF: "+err.Error())
@@ -135,11 +149,34 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 		writeInternalErrorMsg(w, "create document failed", err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	if err := s.Billing.EnforceDocumentQuotaMutation(r.Context(), q, orgID); err != nil {
+		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, d.PdfStorageKey.String)
+		if cleanupErr != nil {
+			writeInternalErrorMsg(w, "create document failed; orphan cleanup failed", errors.Join(err, cleanupErr))
+			return
+		}
+		if s.writeAuthoringQuotaError(w, err) {
+			return
+		}
+		writeInternalErrorMsg(w, "create document failed", err)
+		return
+	}
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID: orgID, ActorUserID: &userID, DocumentID: &d.ID,
 		Kind:    audit.KindDocumentCreated,
 		Payload: map[string]any{"name": name, "source_kind": "pdf", "intake": "import"},
 	})
+	if err != nil {
+		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, d.PdfStorageKey.String)
+		writeInternalErrorMsg(w, "audit document import failed", errors.Join(err, cleanupErr))
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, d.PdfStorageKey.String)
+		writeInternalErrorMsg(w, "commit document import failed", errors.Join(err, cleanupErr))
+		return
+	}
+	s.Audit.Publish(pending)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"document":   toDocumentResponse(d),
 		"page_count": pageCount,

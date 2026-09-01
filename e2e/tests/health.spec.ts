@@ -11,7 +11,7 @@ test('security headers present on every response', async ({ request }) => {
   const res = await request.get('/health');
   expect(res.headers()['x-content-type-options']).toBe('nosniff');
   expect(res.headers()['x-frame-options']).toBe('DENY');
-  expect(res.headers()['referrer-policy']).toBe('strict-origin-when-cross-origin');
+  expect(res.headers()['referrer-policy']).toBe('no-referrer');
   expect(res.headers()['content-security-policy']).toContain("frame-ancestors 'none'");
 });
 

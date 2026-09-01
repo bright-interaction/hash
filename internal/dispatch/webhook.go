@@ -49,7 +49,7 @@ func ValidateWebhookURL(raw string, allowPrivate bool) error {
 		return errors.New("webhook host does not resolve")
 	}
 	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		if nethard.IsBlockedIP(ip) {
 			return errors.New("webhook url resolves to a disallowed (private/loopback/link-local) address")
 		}
 	}
@@ -60,13 +60,14 @@ func ValidateWebhookURL(raw string, allowPrivate bool) error {
 // the brightcrm + atomicsite payload shape so existing receivers can be
 // repointed at us with minimal code changes.
 type WebhookEvent struct {
-	EventID    string         `json:"event_id"`
-	Kind       string         `json:"kind"`
-	OccurredAt time.Time      `json:"occurred_at"`
-	OrgID      string         `json:"org_id"`
-	Document   map[string]any `json:"document,omitempty"`
-	Recipient  map[string]any `json:"recipient,omitempty"`
-	Payload    map[string]any `json:"payload,omitempty"`
+	EventID             string         `json:"event_id"`
+	Kind                string         `json:"kind"`
+	OccurredAt          time.Time      `json:"occurred_at"`
+	OrgID               string         `json:"org_id"`
+	AutomationRequestID string         `json:"automation_request_id,omitempty"`
+	Document            map[string]any `json:"document,omitempty"`
+	Recipient           map[string]any `json:"recipient,omitempty"`
+	Payload             map[string]any `json:"payload,omitempty"`
 }
 
 // SignaturePair holds the secret pair the rotation engine writes to us.

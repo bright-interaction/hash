@@ -5,7 +5,13 @@ package eidas
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
 
 func TestTier_CmpAndValid(t *testing.T) {
@@ -26,6 +32,20 @@ func TestTier_CmpAndValid(t *testing.T) {
 	}
 	if Tier("Invalid").Valid() {
 		t.Fatal("garbage tier should not be valid")
+	}
+}
+
+func TestValidateRuleActivationAllowsOnlyActiveSES(t *testing.T) {
+	if err := ValidateRuleActivation(TierSES, true); err != nil {
+		t.Fatalf("active SES rejected: %v", err)
+	}
+	for _, tier := range []Tier{TierAES, TierQES} {
+		if err := ValidateRuleActivation(tier, false); err != nil {
+			t.Fatalf("inactive migration-only %s rule rejected: %v", tier, err)
+		}
+		if !errors.Is(ValidateRuleActivation(tier, true), ErrHigherTierUnavailable) {
+			t.Fatalf("active %s rule did not fail closed", tier)
+		}
 	}
 }
 
@@ -136,6 +156,74 @@ func TestMatchPredicate_UnknownOp(t *testing.T) {
 	_, err := matchPredicate(json.RawMessage(`{"field":"amount","op":"~","value":1}`), in)
 	if err == nil {
 		t.Fatal("unknown op should error")
+	}
+}
+
+func TestValidateRuleRejectsCorruptPredicatesAndTiers(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		predicate string
+		tier      Tier
+	}{
+		{"invalid json", `{"field":`, TierAES},
+		{"unknown field", `{"field":"currency","op":"==","value":"SEK"}`, TierAES},
+		{"unknown operator", `{"field":"amount","op":"~","value":1}`, TierAES},
+		{"numeric op string value", `{"field":"amount","op":">=","value":"100"}`, TierAES},
+		{"empty in array", `{"field":"country","op":"in","value":[]}`, TierAES},
+		{"empty composite", `{"all":[]}`, TierAES},
+		{"mixed composite and leaf", `{"all":[{"field":"amount","op":">","value":1}],"field":"amount"}`, TierAES},
+		{"invalid tier", `{"field":"amount","op":">","value":1}`, Tier("typo")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateRule(json.RawMessage(tc.predicate), tc.tier); err == nil {
+				t.Fatal("corrupt rule should be rejected")
+			}
+		})
+	}
+
+	for _, predicate := range []string{
+		`{"field":"amount","op":">=","value":100000}`,
+		`{"field":"variables.segment","op":"in","value":["enterprise","public"]}`,
+		`{"any":[{"field":"country","op":"==","value":"SE"},{"field":"amount","op":">","value":1000}]}`,
+	} {
+		if err := ValidateRule(json.RawMessage(predicate), TierAES); err != nil {
+			t.Errorf("valid rule %s rejected: %v", predicate, err)
+		}
+	}
+}
+
+func TestEvaluateActiveRulesFailsClosedOnCorruptActiveRule(t *testing.T) {
+	for _, rule := range []*generated.EidasRoutingRule{
+		{
+			ID: uuid.New(), Name: "typo predicate", RequiredTier: string(TierAES),
+			PredicateJson: json.RawMessage(`{"field":"amount","op":"typo","value":100}`), Active: true,
+		},
+		{
+			ID: uuid.New(), Name: "typo tier", RequiredTier: "AESS",
+			PredicateJson: json.RawMessage(`{"field":"amount","op":">=","value":100}`), Active: true,
+		},
+	} {
+		_, err := evaluateActiveRules([]*generated.EidasRoutingRule{rule}, EvaluateInput{Amount: 1_000_000})
+		if err == nil || !strings.Contains(err.Error(), rule.Name) {
+			t.Fatalf("rule %q error = %v, want named fail-closed error", rule.Name, err)
+		}
+	}
+}
+
+func TestEvaluateActiveRulesNoMatchesEncodesEmptyArray(t *testing.T) {
+	decision, err := evaluateActiveRules(nil, EvaluateInput{})
+	if err != nil {
+		t.Fatalf("evaluate empty rules: %v", err)
+	}
+	if decision.MatchedRules == nil || len(decision.MatchedRules) != 0 {
+		t.Fatalf("matched rules = %#v, want non-nil empty slice", decision.MatchedRules)
+	}
+	body, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatalf("marshal decision: %v", err)
+	}
+	if !strings.Contains(string(body), `"matched_rules":[]`) {
+		t.Fatalf("decision JSON = %s, want matched_rules array", body)
 	}
 }
 

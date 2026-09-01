@@ -6,10 +6,11 @@ package mcp
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
@@ -28,6 +29,7 @@ func registerEIDASTools(s *Server, d Deps) {
 
 	s.RegisterTool(ToolDef{
 		Name:        "list_eidas_rules",
+		MinRole:     auth.RoleOwner,
 		Description: "Return every eIDAS routing rule for the caller's org (active + inactive), sorted by active then priority.",
 		InputSchema: schemaObject(map[string]any{}, nil),
 		Handler: func(r *http.Request, _ json.RawMessage) (any, error) {
@@ -48,7 +50,7 @@ func registerEIDASTools(s *Server, d Deps) {
 		Name:        "create_eidas_rule",
 		Write:       true,
 		MinRole:     auth.RoleOwner, // REST eIDAS rule writes are owner-only; a permissive/deleted rule downgrades the required signature tier (QES->SES)
-		Description: "Create a routing rule. predicate_json shape: {field, op, value} OR {all: [...]} OR {any: [...]}. Field is 'amount', 'country', 'document_type', or 'variables.<key>'. Op is >=, >, <=, <, ==, !=, in.",
+		Description: "Create a routing rule. Only SES rules may be active in this release; inactive AES/QES rules may be retained for migration or deletion. predicate_json shape: {field, op, value} OR {all: [...]} OR {any: [...]}",
 		InputSchema: schemaObject(map[string]any{
 			"name":           stringSchema("display name"),
 			"priority":       intSchema("informational priority (lower = evaluated first)", 0, 1000, 100),
@@ -73,27 +75,39 @@ func registerEIDASTools(s *Server, d Deps) {
 			if !eidas.Tier(p.RequiredTier).Valid() {
 				return nil, errors.New("required_tier must be SES, AES, or QES")
 			}
+			if err := eidas.ValidateRule(p.Predicate, eidas.Tier(p.RequiredTier)); err != nil {
+				return nil, fmt.Errorf("invalid eIDAS rule: %w", err)
+			}
 			active := true
 			if p.Active != nil {
 				active = *p.Active
 			}
-			row, err := d.Queries.InsertEIDASRule(r.Context(), generated.InsertEIDASRuleParams{
-				OrgID:         u.OrgID,
-				Name:          p.Name,
-				Priority:      p.Priority,
-				PredicateJson: p.Predicate,
-				RequiredTier:  p.RequiredTier,
-				Reason:        p.Reason,
-				Active:        active,
-			})
+			if err := eidas.ValidateRuleActivation(eidas.Tier(p.RequiredTier), active); err != nil {
+				return nil, err
+			}
+			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
+				func(q *generated.Queries) (*generated.EidasRoutingRule, error) {
+					return q.InsertEIDASRule(r.Context(), generated.InsertEIDASRuleParams{
+						OrgID:         u.OrgID,
+						Name:          p.Name,
+						Priority:      p.Priority,
+						PredicateJson: p.Predicate,
+						RequiredTier:  p.RequiredTier,
+						Reason:        p.Reason,
+						Active:        active,
+					})
+				},
+				func(row *generated.EidasRoutingRule) audit.Entry {
+					return audit.Entry{
+						OrgID: u.OrgID, ActorUserID: &u.UserID,
+						Kind:    audit.KindDocumentUpdated,
+						Payload: map[string]any{"via": "mcp", "tool": "create_eidas_rule", "rule_id": row.ID.String()},
+					}
+				},
+			)
 			if err != nil {
 				return nil, err
 			}
-			_, _ = d.Audit.Log(r.Context(), audit.Entry{
-				OrgID: u.OrgID, ActorUserID: &u.UserID,
-				Kind:    audit.KindDocumentUpdated,
-				Payload: map[string]any{"via": "mcp", "tool": "create_eidas_rule", "rule_id": row.ID.String()},
-			})
 			return ruleRow(row), nil
 		},
 	})
@@ -118,7 +132,22 @@ func registerEIDASTools(s *Server, d Deps) {
 			if err != nil {
 				return nil, errors.New("rule_id must be a uuid")
 			}
-			if err := d.Queries.DeleteEIDASRule(r.Context(), generated.DeleteEIDASRuleParams{ID: id, OrgID: u.OrgID}); err != nil {
+			_, err = audit.CommitMutation(r.Context(), d.Pool, d.Audit,
+				func(q *generated.Queries) (uuid.UUID, error) {
+					if _, err := q.GetEIDASRule(r.Context(), generated.GetEIDASRuleParams{ID: id, OrgID: u.OrgID}); err != nil {
+						return uuid.Nil, err
+					}
+					return id, q.DeleteEIDASRule(r.Context(), generated.DeleteEIDASRuleParams{ID: id, OrgID: u.OrgID})
+				},
+				func(uuid.UUID) audit.Entry {
+					return audit.Entry{
+						OrgID: u.OrgID, ActorUserID: &u.UserID,
+						Kind:    audit.KindDocumentUpdated,
+						Payload: map[string]any{"via": "mcp", "tool": "delete_eidas_rule", "rule_id": id.String()},
+					}
+				},
+			)
+			if err != nil {
 				return nil, err
 			}
 			return map[string]any{"deleted": id.String()}, nil
@@ -129,13 +158,37 @@ func registerEIDASTools(s *Server, d Deps) {
 		Name:        "seed_swedish_eidas_defaults",
 		Write:       true,
 		MinRole:     auth.RoleOwner, // REST eIDAS rule writes are owner-only
-		Description: "Insert the default Swedish rule set (100k SEK -> AES, 1M SEK -> QES, healthcare -> AES). Idempotent: existing rules with the same names are left untouched.",
+		Description: "Unavailable in this SES-only release. The historic Swedish defaults require AES/QES and are retained only as an explicit fail-closed compatibility surface.",
 		InputSchema: schemaObject(map[string]any{}, nil),
 		Handler: func(r *http.Request, _ json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
-			if err := d.EIDAS.SeedSwedishDefaults(r.Context(), u.OrgID); err != nil {
+			if err := eidas.ValidateRuleActivation(eidas.TierAES, true); err != nil {
+				return nil, fmt.Errorf("Swedish defaults are unavailable: %w", err)
+			}
+			if d.Pool == nil || d.Audit == nil {
+				return nil, errors.New("atomic audit dependencies unavailable")
+			}
+			tx, err := d.Pool.Begin(r.Context())
+			if err != nil {
 				return nil, err
 			}
+			defer func() { _ = tx.Rollback(r.Context()) }()
+			q := d.Queries.WithTx(tx)
+			if err := eidas.New(q).SeedSwedishDefaults(r.Context(), u.OrgID); err != nil {
+				return nil, err
+			}
+			pending, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID,
+				Kind:    audit.KindDocumentUpdated,
+				Payload: map[string]any{"via": "mcp", "tool": "seed_swedish_eidas_defaults"},
+			})
+			if err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return nil, err
+			}
+			d.Audit.Publish(pending)
 			rules, _ := d.Queries.ListEIDASRules(r.Context(), u.OrgID)
 			out := make([]map[string]any, 0, len(rules))
 			for _, r := range rules {
@@ -147,6 +200,7 @@ func registerEIDASTools(s *Server, d Deps) {
 
 	s.RegisterTool(ToolDef{
 		Name:        "preview_eidas_rules",
+		MinRole:     auth.RoleOwner,
 		Description: "Run the eIDAS engine against a hypothetical input without committing a send. Returns required_tier + matched_rules so an agent can show 'this contract at amount=200000 would require AES'.",
 		InputSchema: schemaObject(map[string]any{
 			"amount":        map[string]any{"type": "number", "description": "deal amount (numeric)"},
@@ -197,10 +251,10 @@ func registerEIDASTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:        "set_document_routing_tier",
 		Write:       true,
-		Description: "Pin a document's routing tier (SES/AES/QES). Senders use this to pre-commit to a higher tier than the rules would require; the send guard then accepts the send instead of refusing.",
+		Description: "Pin a draft document to SES. AES/QES are rejected until those ceremony tiers are production-capable.",
 		InputSchema: schemaObject(map[string]any{
 			"document_id":  stringSchema("document uuid"),
-			"routing_tier": stringSchema("'SES' | 'AES' | 'QES'"),
+			"routing_tier": stringSchema("'SES' only in this release"),
 		}, []string{"document_id", "routing_tier"}),
 		Handler: func(r *http.Request, args json.RawMessage) (any, error) {
 			u, _ := auth.FromContext(r.Context())
@@ -218,21 +272,40 @@ func registerEIDASTools(s *Server, d Deps) {
 			if err := auth.EnforceDocScope(r.Context(), id); err != nil {
 				return nil, err
 			}
-			if !eidas.Tier(p.RoutingTier).Valid() {
-				return nil, errors.New("routing_tier must be SES, AES, or QES")
+			tier := strings.ToUpper(strings.TrimSpace(p.RoutingTier))
+			if tier != string(eidas.TierSES) {
+				return nil, errors.New("AES and QES are unavailable until identity proofs are cryptographically bound to the ceremony; routing_tier must be SES")
 			}
-			if _, err := d.Queries.GetDocument(r.Context(), generated.GetDocumentParams{ID: id, OrgID: u.OrgID}); err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return nil, errors.New("document not found")
-				}
+			tx, err := d.Pool.Begin(r.Context())
+			if err != nil {
 				return nil, err
 			}
-			if err := d.Queries.SetDocumentRoutingTier(r.Context(), generated.SetDocumentRoutingTierParams{
-				ID: id, OrgID: u.OrgID, RoutingTier: p.RoutingTier,
-			}); err != nil {
+			defer func() { _ = tx.Rollback(r.Context()) }()
+			q := d.Queries.WithTx(tx)
+			rows, err := q.SetDocumentRoutingTier(r.Context(), generated.SetDocumentRoutingTierParams{
+				ID: id, OrgID: u.OrgID, RoutingTier: tier,
+			})
+			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"document_id": id.String(), "routing_tier": p.RoutingTier}, nil
+			if rows != 1 {
+				return nil, errors.New("routing tier can only be set to SES while the document is draft")
+			}
+			pendingAudit, err := d.Audit.LogTx(r.Context(), tx, audit.Entry{
+				OrgID: u.OrgID, ActorUserID: &u.UserID, DocumentID: &id,
+				Kind: audit.KindDocumentUpdated,
+				Payload: map[string]any{
+					"via": "mcp", "tool": "set_document_routing_tier", "routing_tier": tier,
+				},
+			})
+			if err != nil {
+				return nil, err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return nil, err
+			}
+			d.Audit.Publish(pendingAudit)
+			return map[string]any{"document_id": id.String(), "routing_tier": tier}, nil
 		},
 	})
 }

@@ -26,15 +26,42 @@ import (
 //   DELETE /api/v1/agent-tokens/{token_id}       revoke
 
 const (
-	maxAgentTokenTTL = 90 * 24 * time.Hour
-	defaultTTL       = 7 * 24 * time.Hour
+	maxAgentTokenTTL     = 90 * 24 * time.Hour
+	maxAgentTokenTTLDays = 90
+	maxAgentTokenUses    = int64(1<<31 - 1)
+	defaultTTL           = 7 * 24 * time.Hour
 )
 
 type mintAgentTokenInput struct {
-	Name     string   `json:"name"`
-	TTLHours int      `json:"ttl_hours"` // optional; defaults to 7d, capped at 90d
-	MaxUses  int      `json:"max_uses"`  // 0 = unlimited until expiry
-	Scopes   []string `json:"scopes"`    // empty defaults to ['read']
+	Name    string   `json:"name"`
+	TTLDays int      `json:"ttl_days"` // optional; defaults to 7d, capped at 90d
+	MaxUses int64    `json:"max_uses"` // 0 = unlimited until expiry
+	Scopes  []string `json:"scopes"`   // empty defaults to ['read']
+}
+
+func normalizeDocAgentScopes(requested []string) ([]string, error) {
+	if len(requested) == 0 {
+		return []string{"read"}, nil
+	}
+	scopes := append([]string(nil), requested...)
+	for _, scope := range scopes {
+		switch scope {
+		case "read", "write:authoring", "write:workflow":
+		default:
+			return nil, errors.New("scopes must be a subset of [read, write:authoring, write:workflow]")
+		}
+	}
+	return scopes, nil
+}
+
+func docAgentTokenTTL(days int) time.Duration {
+	if days <= 0 {
+		return defaultTTL
+	}
+	if days > maxAgentTokenTTLDays {
+		return maxAgentTokenTTL
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
 
 func (s *Server) handleMintDocAgentToken(w http.ResponseWriter, r *http.Request) {
@@ -60,72 +87,65 @@ func (s *Server) handleMintDocAgentToken(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	ttl := time.Duration(in.TTLHours) * time.Hour
-	if ttl <= 0 {
-		ttl = defaultTTL
-	}
-	if ttl > maxAgentTokenTTL {
-		ttl = maxAgentTokenTTL
-	}
-	scopes := in.Scopes
-	if len(scopes) == 0 {
-		// Write-by-default preserves prior behaviour; pass ["read"] for a
-		// read-only doc token now that write tools enforce the scope.
-		scopes = []string{"read", "write"}
-	}
-	for _, sc := range scopes {
-		switch sc {
-		case "read", "write", "sign":
-		default:
-			writeError(w, http.StatusBadRequest, "scopes must be a subset of [read, write, sign]")
-			return
-		}
-	}
-	if in.MaxUses < 0 {
-		writeError(w, http.StatusBadRequest, "max_uses must be >= 0")
+	ttl := docAgentTokenTTL(in.TTLDays)
+	scopes, err := normalizeDocAgentScopes(in.Scopes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	minted, err := auth.MintAPIKey()
+	if in.MaxUses < 0 || in.MaxUses > maxAgentTokenUses {
+		writeError(w, http.StatusBadRequest, "max_uses must be between 0 and 2147483647")
+		return
+	}
+	minted, err := auth.MintDocumentAgentKey()
 	if err != nil {
 		writeInternalErrorMsg(w, "mint", err)
 		return
 	}
-	row, err := s.Queries.InsertDocAgentToken(r.Context(), generated.InsertDocAgentTokenParams{
-		DocumentID: docID,
-		OrgID:      sess.OrgID,
-		Name:       in.Name,
-		Prefix:     minted.Prefix,
-		KeyHash:    minted.Hash,
-		Scopes:     scopes,
-		CreatedBy:  pgtype.UUID{Bytes: sess.UserID, Valid: true},
-		ExpiresAt:  pgtype.Timestamptz{Time: time.Now().Add(ttl), Valid: true},
-		MaxUses:    int32(in.MaxUses),
-	})
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.DocumentAgentToken, error) {
+			return q.InsertDocAgentToken(r.Context(), generated.InsertDocAgentTokenParams{
+				DocumentID: docID,
+				OrgID:      sess.OrgID,
+				Name:       in.Name,
+				Prefix:     minted.Prefix,
+				KeyHash:    minted.Hash,
+				Scopes:     scopes,
+				CreatedBy:  pgtype.UUID{Bytes: sess.UserID, Valid: true},
+				ExpiresAt:  pgtype.Timestamptz{Time: time.Now().Add(ttl), Valid: true},
+				MaxUses:    int32(in.MaxUses),
+			})
+		},
+		func(created *generated.DocumentAgentToken) audit.Entry {
+			return audit.Entry{
+				OrgID:       sess.OrgID,
+				ActorUserID: &sess.UserID,
+				DocumentID:  &docID,
+				Kind:        "doc_agent_token.minted",
+				IP:          firstIPFromHeader(r),
+				UserAgent:   r.UserAgent(),
+				Payload: map[string]any{
+					"token_id": created.ID.String(),
+					"prefix":   created.Prefix,
+					"ttl_days": int(ttl.Hours() / 24),
+					"max_uses": in.MaxUses,
+					"scopes":   scopes,
+				},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID:       sess.OrgID,
-		ActorUserID: &sess.UserID,
-		DocumentID:  &docID,
-		Kind:        "doc_agent_token.minted",
-		IP:          firstIPFromHeader(r),
-		UserAgent:   r.UserAgent(),
-		Payload: map[string]any{
-			"token_id":  row.ID.String(),
-			"prefix":    row.Prefix,
-			"ttl_hours": int(ttl.Hours()),
-			"max_uses":  in.MaxUses,
-			"scopes":    scopes,
-		},
-	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         row.ID.String(),
 		"prefix":     row.Prefix,
 		"name":       row.Name,
 		"scopes":     []string(row.Scopes),
 		"max_uses":   row.MaxUses,
+		"used_count": row.UsedCount,
+		"created_at": row.CreatedAt.Time.UTC().Format(time.RFC3339),
 		"expires_at": row.ExpiresAt.Time.UTC().Format(time.RFC3339),
 		"token":      minted.Plaintext, // returned exactly once
 	})
@@ -189,10 +209,23 @@ func (s *Server) handleRevokeDocAgentToken(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	row, err := s.Queries.RevokeDocAgentToken(r.Context(), generated.RevokeDocAgentTokenParams{
-		ID:    id,
-		OrgID: sess.OrgID,
-	})
+	_, err = audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.DocumentAgentToken, error) {
+			return q.RevokeDocAgentToken(r.Context(), generated.RevokeDocAgentTokenParams{
+				ID: id, OrgID: sess.OrgID,
+			})
+		},
+		func(revoked *generated.DocumentAgentToken) audit.Entry {
+			docID := revoked.DocumentID
+			return audit.Entry{
+				OrgID:       sess.OrgID,
+				ActorUserID: &sess.UserID,
+				DocumentID:  &docID,
+				Kind:        "doc_agent_token.revoked",
+				Payload:     map[string]any{"token_id": revoked.ID.String()},
+			}
+		},
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "token not found or already revoked")
@@ -201,13 +234,5 @@ func (s *Server) handleRevokeDocAgentToken(w http.ResponseWriter, r *http.Reques
 		writeInternalError(w, err)
 		return
 	}
-	docID := row.DocumentID
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID:       sess.OrgID,
-		ActorUserID: &sess.UserID,
-		DocumentID:  &docID,
-		Kind:        "doc_agent_token.revoked",
-		Payload:     map[string]any{"token_id": id.String()},
-	})
 	w.WriteHeader(http.StatusNoContent)
 }

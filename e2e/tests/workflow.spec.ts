@@ -25,7 +25,7 @@ test.describe('MCP workflow write tools', () => {
     }
   });
 
-  test('send_document on a draft with no signers fails cleanly', async ({ request }) => {
+  test('send_document rejects a signature-required draft with no signature field', async ({ request }) => {
     const doc = await tool(request, 'create_document', {
       name: 'No-signer test',
       source_kind: 'blocks',
@@ -33,10 +33,10 @@ test.describe('MCP workflow write tools', () => {
     });
     const res = await rpcRaw(request, 'tools/call', {
       name: 'send_document',
-      arguments: { document_id: doc.id }
+      arguments: { document_id: doc.id, lawful_basis: 'contract' }
     });
     expect(res.result.isError).toBe(true);
-    expect(res.result.content[0].text).toContain('signer');
+    expect(res.result.content[0].text).toContain('at least one signature field');
   });
 
   test('full agent workflow: create -> add_recipient -> send -> mailhog has invite', async ({ request }) => {
@@ -66,7 +66,7 @@ test.describe('MCP workflow write tools', () => {
     });
 
     // Step 3: send
-    const sendResult = await tool(request, 'send_document', { document_id: doc.id });
+    const sendResult = await tool(request, 'send_document', { document_id: doc.id, lawful_basis: 'contract' });
     expect(sendResult.status).toBe('sent');
     expect(Array.isArray(sendResult.links)).toBe(true);
     expect(sendResult.links.length).toBe(1);
@@ -93,7 +93,7 @@ test.describe('MCP workflow write tools', () => {
     await tool(request, 'add_recipient', {
       document_id: doc.id, role: 'signer', email: 'void@example.com', name: 'V'
     });
-    await tool(request, 'send_document', { document_id: doc.id });
+    await tool(request, 'send_document', { document_id: doc.id, lawful_basis: 'contract' });
     const voided = await tool(request, 'void_document', {
       document_id: doc.id, reason: 'agent recall'
     });
@@ -103,22 +103,31 @@ test.describe('MCP workflow write tools', () => {
     expect(fetched.status).toBe('voided');
   });
 
-  test('void_document on an already-completed doc fails (state-machine guard)', async ({ request }) => {
-    // Drafts are voidable (sender changed their mind). The guard is for
-    // already-finalised states. Simulate by directly setting status.
+  test('void_document on an already-voided doc fails (state-machine guard)', async ({ request }) => {
+    // Reach the terminal state through the real lifecycle. Drafts are no
+    // longer voidable: only a sent/in-progress ceremony can be recalled.
     const doc = await tool(request, 'create_document', {
-      name: 'Void-completed guard',
+      name: 'Void-terminal guard',
       source_kind: 'blocks',
-      blocks_json: { version: 1, blocks: [] }
+      blocks_json: {
+        version: 1,
+        blocks: [{ id: 's', type: 'signature_field', attrs: { recipient_role: 'signer' } }]
+      }
     });
-    // Void it once (draft -> voided) so the next attempt hits the guard.
+    await tool(request, 'add_recipient', {
+      document_id: doc.id,
+      role: 'signer',
+      email: `void-terminal-${Date.now()}@example.com`,
+      name: 'Terminal Guard'
+    });
+    await tool(request, 'send_document', { document_id: doc.id, lawful_basis: 'contract' });
     await tool(request, 'void_document', { document_id: doc.id, reason: 'first' });
     const res = await rpcRaw(request, 'tools/call', {
       name: 'void_document',
       arguments: { document_id: doc.id, reason: 'second' }
     });
     expect(res.result.isError).toBe(true);
-    expect(res.result.content[0].text).toMatch(/already finalised/);
+    expect(res.result.content[0].text).toContain('only sent or in-progress documents can be voided');
   });
 
   test('attach_metadata round-trips through get_document', async ({ request }) => {

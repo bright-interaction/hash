@@ -10,7 +10,7 @@
   let showCreate = $state(false);
   let newName = $state('');
   let scopes = $state<{ read: boolean; authoring: boolean; workflow: boolean }>({
-    read: true, authoring: false, workflow: false
+    read: true, authoring: true, workflow: true
   });
   let creating = $state(false);
   let mintedPlaintext = $state<string | null>(null);
@@ -76,9 +76,10 @@
   </div>
 
   <p class="text-sm text-text-secondary mb-6 max-w-2xl leading-relaxed">
-    Hash API keys authenticate the MCP endpoint at <code class="font-mono text-xs">/mcp</code>.
-    Use <code class="font-mono text-xs">read</code> for browsing, <code class="font-mono text-xs">write:authoring</code> to let an agent create/edit documents,
-    <code class="font-mono text-xs">write:workflow</code> to let it send/void.
+    Hash API keys authenticate the standalone e-signature endpoint at
+    <code class="font-mono text-xs">/api/automation/v1/signature-requests</code> and, when your plan includes it,
+    the MCP endpoint at <code class="font-mono text-xs">/mcp</code>. Automation signature requests require both
+    <code class="font-mono text-xs">write:authoring</code> and <code class="font-mono text-xs">write:workflow</code>.
   </p>
 
   {#if error}
@@ -107,7 +108,7 @@
       <input
         type="text"
         bind:value={newName}
-        placeholder="Name (e.g. Claude Desktop)"
+        placeholder="Name (e.g. Reactor bridge)"
         class="w-full px-3 py-2 rounded-md border border-border-light bg-bg-elevated text-sm mb-4"
       />
       <div class="space-y-2 mb-4">
@@ -120,12 +121,12 @@
         <label class="flex items-center gap-2 text-sm">
           <input type="checkbox" bind:checked={scopes.authoring} />
           <span>write:authoring</span>
-          <span class="text-text-muted text-xs">(create + edit blocks via MCP)</span>
+          <span class="text-text-muted text-xs">(create documents; required for automation)</span>
         </label>
         <label class="flex items-center gap-2 text-sm">
           <input type="checkbox" bind:checked={scopes.workflow} />
           <span>write:workflow</span>
-          <span class="text-text-muted text-xs">(send / void / remind)</span>
+          <span class="text-text-muted text-xs">(send documents; required for automation)</span>
         </label>
       </div>
       <div class="flex gap-2">
@@ -143,7 +144,7 @@
     <div class="card p-12 text-center">
       <Key class="size-8 mx-auto text-text-muted mb-3" />
       <p class="font-display text-xl font-extralight">No API keys yet</p>
-      <p class="text-text-secondary text-sm mt-2">Mint your first key to enable MCP access.</p>
+      <p class="text-text-secondary text-sm mt-2">Mint your first key for automation or MCP access.</p>
     </div>
   {:else}
     <div class="card overflow-hidden">

@@ -15,15 +15,16 @@ import (
 func TestMockProvider_CreateCheckoutReturnsRedirect(t *testing.T) {
 	p := MockProvider{}
 	res, err := p.CreateCheckout(context.Background(), CheckoutInput{
-		OrgID:      uuid.New(),
-		OrgEmail:   "ops@example.com",
-		OrgName:    "Test Org",
-		PlanSlug:   "pro",
-		PriceCents: 4900,
-		Currency:   "EUR",
-		Interval:   "monthly",
-		ReturnURL:  "https://hash.example/settings/billing",
-		WebhookURL: "https://hash.example/webhooks/billing/secret",
+		ActivationKey: uuid.New(),
+		OrgID:         uuid.New(),
+		OrgEmail:      "ops@example.com",
+		OrgName:       "Test Org",
+		PlanSlug:      "pro",
+		PriceCents:    4900,
+		Currency:      "EUR",
+		Interval:      "monthly",
+		ReturnURL:     "https://hash.example/settings/billing",
+		WebhookURL:    "https://hash.example/webhooks/billing/secret",
 	})
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -31,8 +32,8 @@ func TestMockProvider_CreateCheckoutReturnsRedirect(t *testing.T) {
 	if !strings.HasPrefix(res.ProviderCustomerID, "mock_cust_") {
 		t.Errorf("customer id wrong: %q", res.ProviderCustomerID)
 	}
-	if !strings.HasPrefix(res.ProviderSubscriptionID, "mock_sub_") {
-		t.Errorf("subscription id wrong: %q", res.ProviderSubscriptionID)
+	if !strings.HasPrefix(res.ProviderPaymentID, "mock_pay_") {
+		t.Errorf("payment id wrong: %q", res.ProviderPaymentID)
 	}
 	if !strings.Contains(res.CheckoutURL, "plan=pro") {
 		t.Errorf("checkout url missing plan param: %s", res.CheckoutURL)

@@ -4,7 +4,10 @@
 package blocks
 
 import (
-	"strconv"
+	"fmt"
+	"math/big"
+	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -23,138 +26,286 @@ import (
 // A bare `var(name)` reads as truthy if the value is non-empty and not
 // equal to "false"/"0"/"no".
 //
-// If the expression fails to parse we return false and never raise; agents
-// should produce well-formed expressions and the editor's UX prevents bad
-// ones at author time.
+// If the expression fails to parse we return false. Validate and
+// ConditionVariableNames expose the parse error to authoring and send-time
+// gates; rendering remains fail-closed for legacy callers that only need a
+// boolean.
 func EvalCondition(expr string, vars map[string]string) bool {
-	expr = strings.TrimSpace(expr)
-	if expr == "" {
-		return false
-	}
-	v, _ := evalOr(expr, vars)
-	return v
+	value, err := EvalConditionStrict(expr, vars)
+	return err == nil && value
 }
 
-func evalOr(s string, vars map[string]string) (bool, string) {
-	left, rest := evalAnd(s, vars)
-	for {
-		rest = strings.TrimSpace(rest)
-		if !strings.HasPrefix(rest, "||") {
-			return left, rest
+// EvalConditionStrict evaluates an expression and reports malformed or
+// mistyped comparisons. Send, recovery, and finalization use this form so a
+// localized/non-numeric amount cannot silently choose a contractual branch.
+func EvalConditionStrict(expr string, vars map[string]string) (bool, error) {
+	value, _, err := parseCondition(expr, vars)
+	return value, err
+}
+
+// ConditionVariableNames strictly parses expr and returns every referenced
+// var(name), sorted and deduplicated. Callers use this before freezing a
+// document so a missing condition input cannot silently remove a clause from
+// the immutable artifact.
+func ConditionVariableNames(expr string) ([]string, error) {
+	_, names, err := parseCondition(expr, nil)
+	return names, err
+}
+
+// ValidateConditionalEvaluation proves that every conditional can be
+// evaluated against the exact frozen string values used for rendering. It is
+// intentionally separate from EvalCondition's boolean-only compatibility API
+// so immutable lifecycle gates can distinguish false from invalid.
+func ValidateConditionalEvaluation(t *Tree, vars map[string]string) error {
+	if t == nil {
+		return nil
+	}
+	var validationErr error
+	walkTree(t, func(b *Block) {
+		if validationErr != nil || b.Type != TypeConditional {
+			return
 		}
-		var right bool
-		right, rest = evalAnd(rest[2:], vars)
+		if _, err := EvalConditionStrict(b.AttrString("expression", ""), vars); err != nil {
+			validationErr = fmt.Errorf("block %q condition: %w", b.ID, err)
+		}
+	})
+	return validationErr
+}
+
+var conditionVariableNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_\.]*$`)
+
+type conditionParser struct {
+	input string
+	pos   int
+	vars  map[string]string
+	names map[string]struct{}
+}
+
+type conditionAtomKind uint8
+
+const (
+	conditionAtomVariable conditionAtomKind = iota
+	conditionAtomString
+	conditionAtomNumber
+	conditionAtomBoolean
+)
+
+type conditionAtom struct {
+	value string
+	kind  conditionAtomKind
+}
+
+var strictDecimalPattern = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
+
+func parseCondition(expr string, vars map[string]string) (bool, []string, error) {
+	p := &conditionParser{
+		input: strings.TrimSpace(expr),
+		vars:  vars,
+		names: make(map[string]struct{}),
+	}
+	if p.input == "" {
+		return false, nil, fmt.Errorf("condition expression is empty")
+	}
+	value, err := p.parseOr()
+	if err != nil {
+		return false, nil, err
+	}
+	p.skipSpace()
+	if p.pos != len(p.input) {
+		return false, nil, p.errorf("unexpected trailing input")
+	}
+	names := make([]string, 0, len(p.names))
+	for name := range p.names {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return value, names, nil
+}
+
+func (p *conditionParser) parseOr() (bool, error) {
+	left, err := p.parseAnd()
+	if err != nil {
+		return false, err
+	}
+	for {
+		p.skipSpace()
+		if !p.consume("||") {
+			return left, nil
+		}
+		right, err := p.parseAnd()
+		if err != nil {
+			return false, err
+		}
 		left = left || right
 	}
 }
 
-func evalAnd(s string, vars map[string]string) (bool, string) {
-	left, rest := evalCmp(s, vars)
+func (p *conditionParser) parseAnd() (bool, error) {
+	left, err := p.parseComparison()
+	if err != nil {
+		return false, err
+	}
 	for {
-		rest = strings.TrimSpace(rest)
-		if !strings.HasPrefix(rest, "&&") {
-			return left, rest
+		p.skipSpace()
+		if !p.consume("&&") {
+			return left, nil
 		}
-		var right bool
-		right, rest = evalCmp(rest[2:], vars)
+		right, err := p.parseComparison()
+		if err != nil {
+			return false, err
+		}
 		left = left && right
 	}
 }
 
-func evalCmp(s string, vars map[string]string) (bool, string) {
-	leftVal, rest := evalAtom(s, vars)
-	rest = strings.TrimSpace(rest)
-	op, opLen := matchOp(rest)
-	if op == "" {
-		return truthy(leftVal), rest
+func (p *conditionParser) parseComparison() (bool, error) {
+	left, err := p.parseAtom()
+	if err != nil {
+		return false, err
 	}
-	rest = rest[opLen:]
-	rightVal, rest := evalAtom(rest, vars)
-
+	p.skipSpace()
+	op := ""
+	for _, candidate := range []string{"==", "!=", ">=", "<=", ">", "<"} {
+		if p.consume(candidate) {
+			op = candidate
+			break
+		}
+	}
+	if op == "" {
+		return truthy(left.value), nil
+	}
+	right, err := p.parseAtom()
+	if err != nil {
+		return false, err
+	}
 	switch op {
 	case "==":
-		return leftVal == rightVal, rest
+		return left.value == right.value, nil
 	case "!=":
-		return leftVal != rightVal, rest
+		return left.value != right.value, nil
+	}
+	if left.kind == conditionAtomString || left.kind == conditionAtomBoolean ||
+		right.kind == conditionAtomString || right.kind == conditionAtomBoolean {
+		return false, p.errorf("relational comparisons require numeric operands")
+	}
+	// ConditionVariableNames parses with nil vars to validate structure before
+	// values exist. Runtime callers provide a non-nil frozen map and must prove
+	// that every variable participating in a relational comparison is numeric.
+	if p.vars == nil {
+		return false, nil
+	}
+	comparison, err := numericCompare(left.value, right.value)
+	if err != nil {
+		return false, p.errorf("relational comparisons require numeric operands")
+	}
+	switch op {
 	case ">":
-		return numericCompare(leftVal, rightVal) > 0, rest
+		return comparison > 0, nil
 	case ">=":
-		return numericCompare(leftVal, rightVal) >= 0, rest
+		return comparison >= 0, nil
 	case "<":
-		return numericCompare(leftVal, rightVal) < 0, rest
+		return comparison < 0, nil
 	case "<=":
-		return numericCompare(leftVal, rightVal) <= 0, rest
+		return comparison <= 0, nil
+	default:
+		return false, p.errorf("unsupported comparison operator")
 	}
-	return false, rest
 }
 
-func matchOp(s string) (op string, length int) {
-	switch {
-	case strings.HasPrefix(s, "=="):
-		return "==", 2
-	case strings.HasPrefix(s, "!="):
-		return "!=", 2
-	case strings.HasPrefix(s, ">="):
-		return ">=", 2
-	case strings.HasPrefix(s, "<="):
-		return "<=", 2
-	case strings.HasPrefix(s, ">"):
-		return ">", 1
-	case strings.HasPrefix(s, "<"):
-		return "<", 1
-	}
-	return "", 0
-}
-
-// evalAtom parses one atom from the front of s. Returns the resolved string
-// value plus the remaining unparsed input. Supported atoms:
+// parseAtom parses one atom at the current cursor. Supported atoms:
 //   - var(name)            looks up the variable
 //   - "double-quoted"      literal string
 //   - 'single-quoted'      literal string
 //   - 123 / 1.5            numeric literal (returned as canonical string)
 //   - true / false         bool literal (as "true" / "false")
-func evalAtom(s string, vars map[string]string) (string, string) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "", ""
+func (p *conditionParser) parseAtom() (conditionAtom, error) {
+	p.skipSpace()
+	if p.pos >= len(p.input) {
+		return conditionAtom{}, p.errorf("expected condition value")
 	}
-	switch {
-	case strings.HasPrefix(s, "var("):
-		end := strings.Index(s, ")")
+	rest := p.input[p.pos:]
+	if strings.HasPrefix(rest, "var(") {
+		p.pos += len("var(")
+		end := strings.IndexByte(p.input[p.pos:], ')')
 		if end < 0 {
-			return "", ""
+			return conditionAtom{}, p.errorf("unterminated var()")
 		}
-		name := strings.TrimSpace(s[4:end])
-		return vars[name], s[end+1:]
-	case strings.HasPrefix(s, `"`):
-		return readQuoted(s[1:], '"')
-	case strings.HasPrefix(s, `'`):
-		return readQuoted(s[1:], '\'')
-	case strings.HasPrefix(s, "true"):
-		return "true", s[4:]
-	case strings.HasPrefix(s, "false"):
-		return "false", s[5:]
+		name := strings.TrimSpace(p.input[p.pos : p.pos+end])
+		p.pos += end + 1
+		if !conditionVariableNamePattern.MatchString(name) {
+			return conditionAtom{}, p.errorf("invalid variable name")
+		}
+		p.names[name] = struct{}{}
+		return conditionAtom{value: p.vars[name], kind: conditionAtomVariable}, nil
 	}
-	// Numeric literal: read until whitespace or operator.
-	end := 0
-	for end < len(s) {
-		c := s[end]
+	if rest[0] == '"' || rest[0] == '\'' {
+		quote := rest[0]
+		p.pos++
+		start := p.pos
+		for p.pos < len(p.input) && p.input[p.pos] != quote {
+			p.pos++
+		}
+		if p.pos >= len(p.input) {
+			return conditionAtom{}, p.errorf("unterminated quoted string")
+		}
+		value := p.input[start:p.pos]
+		p.pos++
+		return conditionAtom{value: value, kind: conditionAtomString}, nil
+	}
+	for _, literal := range []string{"true", "false"} {
+		if strings.HasPrefix(rest, literal) && p.hasAtomBoundary(p.pos+len(literal)) {
+			p.pos += len(literal)
+			return conditionAtom{value: literal, kind: conditionAtomBoolean}, nil
+		}
+	}
+
+	start := p.pos
+	for p.pos < len(p.input) {
+		c := p.input[p.pos]
 		if c == ' ' || c == '\t' || c == '&' || c == '|' || c == '!' ||
-			c == '=' || c == '<' || c == '>' || c == ')' {
+			c == '=' || c == '<' || c == '>' {
 			break
 		}
-		end++
+		p.pos++
 	}
-	return s[:end], s[end:]
+	if start == p.pos {
+		return conditionAtom{}, p.errorf("expected condition value")
+	}
+	literal := p.input[start:p.pos]
+	if _, err := parseStrictDecimal(literal); err != nil {
+		return conditionAtom{}, p.errorf("expected a number, boolean, quoted string, or var(name)")
+	}
+	return conditionAtom{value: literal, kind: conditionAtomNumber}, nil
 }
 
-func readQuoted(s string, quote byte) (string, string) {
-	for i := 0; i < len(s); i++ {
-		if s[i] == quote {
-			return s[:i], s[i+1:]
-		}
+func (p *conditionParser) skipSpace() {
+	for p.pos < len(p.input) && (p.input[p.pos] == ' ' || p.input[p.pos] == '\t' || p.input[p.pos] == '\n' || p.input[p.pos] == '\r') {
+		p.pos++
 	}
-	return s, "" // unterminated; return everything
+}
+
+func (p *conditionParser) consume(token string) bool {
+	if strings.HasPrefix(p.input[p.pos:], token) {
+		p.pos += len(token)
+		return true
+	}
+	return false
+}
+
+func (p *conditionParser) hasAtomBoundary(pos int) bool {
+	if pos >= len(p.input) {
+		return true
+	}
+	switch p.input[pos] {
+	case ' ', '\t', '\n', '\r', '&', '|', '!', '=', '<', '>':
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *conditionParser) errorf(message string) error {
+	return fmt.Errorf("%s at byte %d", message, p.pos)
 }
 
 func truthy(s string) bool {
@@ -165,19 +316,25 @@ func truthy(s string) bool {
 	return true
 }
 
-func numericCompare(a, b string) int {
-	an, aErr := strconv.ParseFloat(strings.TrimSpace(a), 64)
-	bn, bErr := strconv.ParseFloat(strings.TrimSpace(b), 64)
-	if aErr == nil && bErr == nil {
-		switch {
-		case an < bn:
-			return -1
-		case an > bn:
-			return 1
-		default:
-			return 0
-		}
+func numericCompare(a, b string) (int, error) {
+	an, err := parseStrictDecimal(strings.TrimSpace(a))
+	if err != nil {
+		return 0, err
 	}
-	// Lexical fallback so string comparisons still work.
-	return strings.Compare(a, b)
+	bn, err := parseStrictDecimal(strings.TrimSpace(b))
+	if err != nil {
+		return 0, err
+	}
+	return an.Cmp(bn), nil
+}
+
+func parseStrictDecimal(value string) (*big.Rat, error) {
+	if !strictDecimalPattern.MatchString(value) {
+		return nil, fmt.Errorf("not a decimal number")
+	}
+	number, ok := new(big.Rat).SetString(value)
+	if !ok {
+		return nil, fmt.Errorf("not a decimal number")
+	}
+	return number, nil
 }

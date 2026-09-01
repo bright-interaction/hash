@@ -18,12 +18,12 @@ import (
 	"github.com/bright-interaction/hash/internal/aiapps"
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/auth"
+	"github.com/bright-interaction/hash/internal/billing"
 	"github.com/bright-interaction/hash/internal/compliance"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/eidas"
 	"github.com/bright-interaction/hash/internal/envelopes"
 	"github.com/bright-interaction/hash/internal/evidence"
-	"github.com/bright-interaction/hash/internal/qes"
 	"github.com/bright-interaction/hash/internal/resolver"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/storage"
@@ -42,10 +42,20 @@ func withSessionContext(req *http.Request, orgID, userID uuid.UUID, role, email 
 	return req.WithContext(ctx)
 }
 
+func withDocumentScope(req *http.Request, documentID uuid.UUID) *http.Request {
+	ctx := context.WithValue(req.Context(), auth.DocumentScopeKey, documentID)
+	return req.WithContext(ctx)
+}
+
+func withTokenScopes(req *http.Request, scopes ...string) *http.Request {
+	ctx := context.WithValue(req.Context(), auth.TokenScopesKey, scopes)
+	return req.WithContext(ctx)
+}
+
 func newTestServer() *Server {
 	s := NewServer()
 	s.RegisterTool(ToolDef{
-		Name:        "echo",
+		Name:        "get_document",
 		Description: "echo args back",
 		InputSchema: schemaObject(map[string]any{}, nil),
 		Handler: func(_ *http.Request, args json.RawMessage) (any, error) {
@@ -53,7 +63,7 @@ func newTestServer() *Server {
 		},
 	})
 	s.RegisterResource(Resource{
-		URI:         "test://hello",
+		URI:         "hash://schema/blocks",
 		Name:        "hello",
 		Description: "static",
 		MimeType:    "application/json",
@@ -99,6 +109,45 @@ func rpc(t *testing.T, h http.Handler, method string, params any, withAuth bool)
 	return &resp
 }
 
+func rpcToolWithScopes(t *testing.T, h http.Handler, name string, scopes []string, documentScoped bool) *response {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params":  map[string]any{"name": name, "arguments": map[string]any{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req = withSessionContext(req, uuid.New(), uuid.New(), "owner", "owner@example.test")
+	req = withTokenScopes(req, scopes...)
+	if documentScoped {
+		req = withDocumentScope(req, uuid.New())
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	var resp response
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, rr.Body.String())
+	}
+	return &resp
+}
+
+func decodedToolResult(t *testing.T, resp *response) ToolResult {
+	t.Helper()
+	raw, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result ToolResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode tool result: %v (%s)", err, raw)
+	}
+	return result
+}
+
 func TestInitialize(t *testing.T) {
 	s := newTestServer()
 	resp := rpc(t, s.Handler(), "initialize", map[string]any{}, false)
@@ -127,14 +176,14 @@ func TestToolsList(t *testing.T) {
 		t.Fatalf("tools/list error: %+v", resp.Error)
 	}
 	resBytes, _ := json.Marshal(resp.Result)
-	if !bytes.Contains(resBytes, []byte(`"name":"echo"`)) {
-		t.Errorf("missing echo tool: %s", resBytes)
+	if !bytes.Contains(resBytes, []byte(`"name":"get_document"`)) {
+		t.Errorf("missing get_document tool: %s", resBytes)
 	}
 }
 
 func TestToolsCall_Unauthenticated(t *testing.T) {
 	resp := rpc(t, newTestServer().Handler(), "tools/call",
-		map[string]any{"name": "echo", "arguments": map[string]any{"a": 1}}, false)
+		map[string]any{"name": "get_document", "arguments": map[string]any{"a": 1}}, false)
 	if resp.Error == nil || resp.Error.Code != codeUnauthorized {
 		t.Errorf("expected unauthorized, got %+v", resp)
 	}
@@ -142,7 +191,7 @@ func TestToolsCall_Unauthenticated(t *testing.T) {
 
 func TestToolsCall_Authenticated(t *testing.T) {
 	resp := rpc(t, newTestServer().Handler(), "tools/call",
-		map[string]any{"name": "echo", "arguments": map[string]any{"hi": "there"}}, true)
+		map[string]any{"name": "get_document", "arguments": map[string]any{"hi": "there"}}, true)
 	if resp.Error != nil {
 		t.Fatalf("authed call errored: %+v", resp.Error)
 	}
@@ -151,6 +200,93 @@ func TestToolsCall_Authenticated(t *testing.T) {
 	resBytes, _ := json.Marshal(resp.Result)
 	if !bytes.Contains(resBytes, []byte(`hi`)) || !bytes.Contains(resBytes, []byte(`there`)) {
 		t.Errorf("echo did not roundtrip args: %s", resBytes)
+	}
+}
+
+func TestToolsCall_GranularScopesDoNotCrossAuthorizationClasses(t *testing.T) {
+	called := map[string]int{}
+	s := NewServer()
+	for _, tool := range []ToolDef{
+		{Name: "get_document", Handler: func(_ *http.Request, _ json.RawMessage) (any, error) {
+			called["get_document"]++
+			return map[string]any{"ok": true}, nil
+		}},
+		{Name: "set_document_blocks", Write: true, Handler: func(_ *http.Request, _ json.RawMessage) (any, error) {
+			called["set_document_blocks"]++
+			return map[string]any{"ok": true}, nil
+		}},
+		{Name: "send_document", Write: true, Handler: func(_ *http.Request, _ json.RawMessage) (any, error) {
+			called["send_document"]++
+			return map[string]any{"ok": true}, nil
+		}},
+	} {
+		s.RegisterTool(tool)
+	}
+
+	tests := []struct {
+		name      string
+		tool      string
+		scopes    []string
+		wantError bool
+	}{
+		{"read permits read", "get_document", []string{"read"}, false},
+		{"authoring without read cannot read", "get_document", []string{"write:authoring"}, true},
+		{"workflow without read cannot read", "get_document", []string{"write:workflow"}, true},
+		{"authoring permits authoring", "set_document_blocks", []string{"write:authoring"}, false},
+		{"workflow cannot author", "set_document_blocks", []string{"write:workflow"}, true},
+		{"read cannot author", "set_document_blocks", []string{"read"}, true},
+		{"workflow permits send", "send_document", []string{"write:workflow"}, false},
+		{"authoring cannot send", "send_document", []string{"write:authoring"}, true},
+		{"read cannot send", "send_document", []string{"read"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := called[tc.tool]
+			resp := rpcToolWithScopes(t, s.Handler(), tc.tool, tc.scopes, false)
+			result := decodedToolResult(t, resp)
+			if result.IsError != tc.wantError {
+				t.Fatalf("isError = %v, want %v; result=%+v", result.IsError, tc.wantError, result)
+			}
+			wantCalls := before
+			if !tc.wantError {
+				wantCalls++
+			}
+			if called[tc.tool] != wantCalls {
+				t.Fatalf("handler calls = %d, want %d", called[tc.tool], wantCalls)
+			}
+		})
+	}
+}
+
+func TestToolsCall_BareWriteAliasIsDocumentTokenOnly(t *testing.T) {
+	s := NewServer()
+	s.RegisterTool(ToolDef{
+		Name: "send_document", Write: true,
+		Handler: func(_ *http.Request, _ json.RawMessage) (any, error) { return map[string]any{"ok": true}, nil },
+	})
+	orgResult := decodedToolResult(t, rpcToolWithScopes(t, s.Handler(), "send_document", []string{"write"}, false))
+	if !orgResult.IsError {
+		t.Fatal("org API key with bare write bypassed granular workflow scope")
+	}
+	docResult := decodedToolResult(t, rpcToolWithScopes(t, s.Handler(), "send_document", []string{"write"}, true))
+	if docResult.IsError {
+		t.Fatalf("legacy document token bare write was not preserved: %+v", docResult)
+	}
+}
+
+func TestToolsCall_UnclassifiedToolFailsClosed(t *testing.T) {
+	called := false
+	s := NewServer()
+	s.RegisterTool(ToolDef{
+		Name: "future_tool",
+		Handler: func(_ *http.Request, _ json.RawMessage) (any, error) {
+			called = true
+			return map[string]any{"ok": true}, nil
+		},
+	})
+	result := decodedToolResult(t, rpcToolWithScopes(t, s.Handler(), "future_tool", []string{"admin"}, false))
+	if !result.IsError || called {
+		t.Fatalf("unclassified tool did not fail closed: result=%+v called=%v", result, called)
 	}
 }
 
@@ -169,14 +305,38 @@ func TestToolsCall_UnknownTool(t *testing.T) {
 func TestResourcesList(t *testing.T) {
 	resp := rpc(t, newTestServer().Handler(), "resources/list", map[string]any{}, false)
 	resBytes, _ := json.Marshal(resp.Result)
-	if !bytes.Contains(resBytes, []byte(`"uri":"test://hello"`)) {
+	if !bytes.Contains(resBytes, []byte(`"uri":"hash://schema/blocks"`)) {
 		t.Errorf("missing test resource: %s", resBytes)
+	}
+}
+
+func TestResourcesList_DocumentTokenOnlyAdvertisesSafeResources(t *testing.T) {
+	s := newTestServer()
+	s.RegisterResource(Resource{URI: "hash://documents/recent", Name: "org documents"})
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req = withSessionContext(req, uuid.New(), uuid.New(), "sender", "agent@example.test")
+	req = withTokenScopes(req, "read")
+	req = withDocumentScope(req, uuid.New())
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if bytes.Contains(rr.Body.Bytes(), []byte("hash://documents/recent")) {
+		t.Fatalf("document token was advertised org-wide resource: %s", rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("hash://schema/blocks")) {
+		t.Fatalf("document token was not advertised reviewed static resource: %s", rr.Body.String())
 	}
 }
 
 func TestResourcesRead_Unauthenticated(t *testing.T) {
 	resp := rpc(t, newTestServer().Handler(), "resources/read",
-		map[string]any{"uri": "test://hello"}, false)
+		map[string]any{"uri": "hash://schema/blocks"}, false)
 	if resp.Error == nil || resp.Error.Code != codeUnauthorized {
 		t.Errorf("expected unauthorized, got %+v", resp)
 	}
@@ -184,9 +344,107 @@ func TestResourcesRead_Unauthenticated(t *testing.T) {
 
 func TestResourcesRead_Authenticated(t *testing.T) {
 	resp := rpc(t, newTestServer().Handler(), "resources/read",
-		map[string]any{"uri": "test://hello"}, true)
+		map[string]any{"uri": "hash://schema/blocks"}, true)
 	if resp.Error != nil {
 		t.Fatalf("read failed: %+v", resp.Error)
+	}
+}
+
+func TestResourcesRead_DocumentTokenDeniedByDefault(t *testing.T) {
+	s := newTestServer()
+	s.RegisterResource(Resource{
+		URI: "hash://documents/recent", Name: "org documents", MimeType: "application/json",
+		Loader: func(_ *http.Request) (any, error) { return map[string]any{"leak": true}, nil },
+	})
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "resources/read",
+		"params":  map[string]any{"uri": "hash://documents/recent"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req = withSessionContext(req, uuid.New(), uuid.New(), "sender", "agent@example.test")
+	req = withTokenScopes(req, "read")
+	req = withDocumentScope(req, uuid.New())
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	var resp response
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != codeUnauthorized {
+		t.Fatalf("document token read of unreviewed resource = %+v, want unauthorized", resp)
+	}
+}
+
+func TestResourcesRead_DocumentTokenAllowsReviewedStaticResource(t *testing.T) {
+	s := NewServer()
+	s.RegisterResource(Resource{
+		URI: "hash://schema/blocks", Name: "schema", MimeType: "application/json",
+		Loader: func(_ *http.Request) (any, error) { return map[string]any{"safe": true}, nil },
+	})
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "resources/read",
+		"params":  map[string]any{"uri": "hash://schema/blocks"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req = withSessionContext(req, uuid.New(), uuid.New(), "sender", "agent@example.test")
+	req = withTokenScopes(req, "read")
+	req = withDocumentScope(req, uuid.New())
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	var resp response
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("document token static resource read failed: %+v", resp.Error)
+	}
+}
+
+func TestResourcesRead_OrgTokenPreservesReviewedResourceAccess(t *testing.T) {
+	resp := rpc(t, newTestServer().Handler(), "resources/read",
+		map[string]any{"uri": "hash://schema/blocks"}, true)
+	if resp.Error != nil {
+		t.Fatalf("org token resource read failed: %+v", resp.Error)
+	}
+}
+
+func TestResourcesRead_RequiresReadScope(t *testing.T) {
+	call := func(scopes ...string) *response {
+		body, err := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": 1, "method": "resources/read",
+			"params": map[string]any{"uri": "hash://schema/blocks"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+		req = withSessionContext(req, uuid.New(), uuid.New(), "owner", "owner@example.test")
+		req = withTokenScopes(req, scopes...)
+		rr := httptest.NewRecorder()
+		newTestServer().Handler().ServeHTTP(rr, req)
+		var resp response
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return &resp
+	}
+	if resp := call("write:authoring"); resp.Error == nil || resp.Error.Code != codeUnauthorized {
+		t.Fatalf("write-only token read resource response = %+v, want unauthorized", resp)
+	}
+	if resp := call("read"); resp.Error != nil {
+		t.Fatalf("read-scoped token could not read resource: %+v", resp.Error)
 	}
 }
 
@@ -268,7 +526,7 @@ func TestRealServer_AuthoringToolsRegistered(t *testing.T) {
 // several write MCP tools mutate org-wide state whose REST twins are owner-only,
 // but an unset MinRole defaults a write tool to sender. A sender-tier API key
 // must not reach these over MCP.
-func TestWriteToolsRequireOwnerRoleParity(t *testing.T) {
+func TestMCPToolsRequireOwnerRoleParity(t *testing.T) {
 	s := NewServer()
 	// Non-nil engines so the gated eidas + compliance tools register; the tool
 	// Handlers are never invoked here, so zero-value pointers are enough.
@@ -279,8 +537,11 @@ func TestWriteToolsRequireOwnerRoleParity(t *testing.T) {
 	registerBrandingTools(s, d)
 
 	ownerOnly := []string{
+		"list_webhooks", "list_webhook_deliveries",
 		"create_webhook", "delete_webhook",
+		"list_eidas_rules", "preview_eidas_rules",
 		"create_eidas_rule", "delete_eidas_rule", "seed_swedish_eidas_defaults",
+		"get_compliance_baseline", "list_compliance_flags",
 		"seed_compliance_baseline", "set_compliance_flag_status",
 		"set_org_branding",
 	}
@@ -298,7 +559,8 @@ func TestWriteToolsRequireOwnerRoleParity(t *testing.T) {
 
 // fullServer builds a server with every register func mounted. Non-nil
 // zero-value deps satisfy the `if d.X == nil { return }` guards so the gated
-// surfaces (bindings, evidence, downloads, AI apps, QES, ...) actually register.
+// surfaces (bindings, evidence, downloads, AI apps, the historical QES reader,
+// ...) actually register.
 // Handlers are never invoked here, so the engines never need to be real.
 func fullServer() *Server {
 	return New(Deps{
@@ -316,7 +578,7 @@ func fullServer() *Server {
 		Bilingual:    &aiapps.Bilingual{},
 		RiskAnalyzer: &aiapps.RiskAnalyzer{},
 		Compliance:   &compliance.Seeder{},
-		QES:          &qes.Engine{},
+		Billing:      &billing.Engine{},
 		Send:         &send.Engine{},
 	})
 }
@@ -339,6 +601,38 @@ func TestMutatingToolsAreWriteFlagged(t *testing.T) {
 				t.Errorf("MCP tool %q looks mutating (prefix %q) but Write=false; it bypasses the write-scope + RoleSender gate in handleToolsCall", name, pre)
 				break
 			}
+		}
+	}
+}
+
+func TestMCPRequiredScopeCatalogCoversEveryRegistration(t *testing.T) {
+	s := fullServer()
+	for name, tool := range s.tools {
+		required, ok := mcpToolRequiredScopes[name]
+		if !ok {
+			t.Errorf("registered tool %q has no required-scope classification", name)
+			continue
+		}
+		if !validMCPRequiredScope(required) {
+			t.Errorf("registered tool %q has invalid required scope %q", name, required)
+		}
+		if tool.Write != (required != mcpScopeRead) {
+			t.Errorf("registered tool %q Write=%v conflicts with required scope %q", name, tool.Write, required)
+		}
+	}
+	for name := range mcpToolRequiredScopes {
+		if _, ok := s.tools[name]; !ok {
+			t.Errorf("required-scope catalog names unregistered tool %q", name)
+		}
+	}
+	for uri := range s.resources {
+		if required, ok := mcpResourceRequiredScopes[uri]; !ok || required != mcpScopeRead {
+			t.Errorf("registered resource %q lacks read-scope classification", uri)
+		}
+	}
+	for uri := range mcpResourceRequiredScopes {
+		if _, ok := s.resources[uri]; !ok {
+			t.Errorf("required-scope catalog names unregistered resource %q", uri)
 		}
 	}
 }

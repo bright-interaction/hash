@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -100,28 +101,42 @@ func (s *Server) handleCreateEIDASRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "predicate_json required")
 		return
 	}
+	if err := eidas.ValidateRule(in.Predicate, eidas.Tier(in.RequiredTier)); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid eIDAS rule: "+err.Error())
+		return
+	}
 	active := true
 	if in.Active != nil {
 		active = *in.Active
 	}
-	row, err := s.Queries.InsertEIDASRule(r.Context(), generated.InsertEIDASRuleParams{
-		OrgID:         sess.OrgID,
-		Name:          in.Name,
-		Priority:      in.Priority,
-		PredicateJson: in.Predicate,
-		RequiredTier:  in.RequiredTier,
-		Reason:        in.Reason,
-		Active:        active,
-	})
+	if err := eidas.ValidateRuleActivation(eidas.Tier(in.RequiredTier), active); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.EidasRoutingRule, error) {
+			return q.InsertEIDASRule(r.Context(), generated.InsertEIDASRuleParams{
+				OrgID:         sess.OrgID,
+				Name:          in.Name,
+				Priority:      in.Priority,
+				PredicateJson: in.Predicate,
+				RequiredTier:  in.RequiredTier,
+				Reason:        in.Reason,
+				Active:        active,
+			})
+		},
+		func(row *generated.EidasRoutingRule) audit.Entry {
+			return audit.Entry{
+				OrgID: sess.OrgID, ActorUserID: &sess.UserID,
+				Kind:    audit.KindDocumentUpdated,
+				Payload: map[string]any{"via": "rest", "tool": "create_eidas_rule", "rule_id": row.ID.String()},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: sess.OrgID, ActorUserID: &sess.UserID,
-		Kind:    audit.KindDocumentUpdated,
-		Payload: map[string]any{"via": "rest", "tool": "create_eidas_rule", "rule_id": row.ID.String()},
-	})
 	writeJSON(w, http.StatusCreated, toRuleDTO(row))
 }
 
@@ -186,25 +201,39 @@ func (s *Server) handleUpdateEIDASRule(w http.ResponseWriter, r *http.Request) {
 	if in.Active != nil {
 		active = *in.Active
 	}
-	row, err := s.Queries.UpdateEIDASRule(r.Context(), generated.UpdateEIDASRuleParams{
-		ID:            id,
-		OrgID:         sess.OrgID,
-		Name:          name,
-		Priority:      priority,
-		PredicateJson: predicate,
-		RequiredTier:  tier,
-		Reason:        reason,
-		Active:        active,
-	})
+	if err := eidas.ValidateRule(predicate, eidas.Tier(tier)); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid eIDAS rule: "+err.Error())
+		return
+	}
+	if err := eidas.ValidateRuleActivation(eidas.Tier(tier), active); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.EidasRoutingRule, error) {
+			return q.UpdateEIDASRule(r.Context(), generated.UpdateEIDASRuleParams{
+				ID:            id,
+				OrgID:         sess.OrgID,
+				Name:          name,
+				Priority:      priority,
+				PredicateJson: predicate,
+				RequiredTier:  tier,
+				Reason:        reason,
+				Active:        active,
+			})
+		},
+		func(*generated.EidasRoutingRule) audit.Entry {
+			return audit.Entry{
+				OrgID: sess.OrgID, ActorUserID: &sess.UserID,
+				Kind:    audit.KindDocumentUpdated,
+				Payload: map[string]any{"via": "rest", "tool": "update_eidas_rule", "rule_id": id.String()},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: sess.OrgID, ActorUserID: &sess.UserID,
-		Kind:    audit.KindDocumentUpdated,
-		Payload: map[string]any{"via": "rest", "tool": "update_eidas_rule", "rule_id": id.String()},
-	})
 	writeJSON(w, http.StatusOK, toRuleDTO(row))
 }
 
@@ -219,15 +248,29 @@ func (s *Server) handleDeleteEIDASRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	if err := s.Queries.DeleteEIDASRule(r.Context(), generated.DeleteEIDASRuleParams{ID: id, OrgID: sess.OrgID}); err != nil {
+	_, err = audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (uuid.UUID, error) {
+			if _, err := q.GetEIDASRule(r.Context(), generated.GetEIDASRuleParams{ID: id, OrgID: sess.OrgID}); err != nil {
+				return uuid.Nil, err
+			}
+			return id, q.DeleteEIDASRule(r.Context(), generated.DeleteEIDASRuleParams{ID: id, OrgID: sess.OrgID})
+		},
+		func(uuid.UUID) audit.Entry {
+			return audit.Entry{
+				OrgID: sess.OrgID, ActorUserID: &sess.UserID,
+				Kind:    audit.KindDocumentUpdated,
+				Payload: map[string]any{"via": "rest", "tool": "delete_eidas_rule", "rule_id": id.String()},
+			}
+		},
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "rule not found")
+		return
+	}
+	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID: sess.OrgID, ActorUserID: &sess.UserID,
-		Kind:    audit.KindDocumentUpdated,
-		Payload: map[string]any{"via": "rest", "tool": "delete_eidas_rule", "rule_id": id.String()},
-	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -240,10 +283,34 @@ func (s *Server) handleSeedSwedishEIDASRules(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	if err := s.EIDAS.SeedSwedishDefaults(r.Context(), sess.OrgID); err != nil {
+	if err := eidas.ValidateRuleActivation(eidas.TierAES, true); err != nil {
+		writeError(w, http.StatusConflict, "Swedish defaults are unavailable: "+err.Error())
+		return
+	}
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	if err := eidas.New(s.Queries.WithTx(tx)).SeedSwedishDefaults(r.Context(), sess.OrgID); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	pending, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
+		OrgID: sess.OrgID, ActorUserID: &sess.UserID,
+		Kind:    audit.KindDocumentUpdated,
+		Payload: map[string]any{"via": "rest", "tool": "seed_swedish_eidas_defaults"},
+	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	s.Audit.Publish(pending)
 	rules, _ := s.Queries.ListEIDASRules(r.Context(), sess.OrgID)
 	out := make([]ruleDTO, 0, len(rules))
 	for _, r := range rules {
@@ -319,20 +386,49 @@ func (s *Server) handleSetDocumentRoutingTier(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	if !eidas.Tier(in.RoutingTier).Valid() {
-		writeError(w, http.StatusBadRequest, "routing_tier must be SES, AES, or QES")
+	tier, err := writableRoutingTier(in.RoutingTier)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	if err := s.Queries.SetDocumentRoutingTier(r.Context(), generated.SetDocumentRoutingTierParams{
-		ID: docID, OrgID: sess.OrgID, RoutingTier: in.RoutingTier,
-	}); err != nil {
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := s.Queries.WithTx(tx)
+	rows, err := q.SetDocumentRoutingTier(r.Context(), generated.SetDocumentRoutingTierParams{
+		ID: docID, OrgID: sess.OrgID, RoutingTier: tier,
+	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if rows != 1 {
+		writeError(w, http.StatusConflict, "routing tier can only be set to SES while the document is draft")
+		return
+	}
+	pendingAudit, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 		OrgID: sess.OrgID, ActorUserID: &sess.UserID, DocumentID: &docID,
 		Kind:    audit.KindDocumentUpdated,
-		Payload: map[string]any{"via": "rest", "tool": "set_routing_tier", "routing_tier": in.RoutingTier},
+		Payload: map[string]any{"via": "rest", "tool": "set_routing_tier", "routing_tier": tier},
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"routing_tier": in.RoutingTier})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	s.Audit.Publish(pendingAudit)
+	writeJSON(w, http.StatusOK, map[string]any{"routing_tier": tier})
+}
+
+func writableRoutingTier(raw string) (string, error) {
+	if strings.EqualFold(strings.TrimSpace(raw), string(eidas.TierSES)) {
+		return string(eidas.TierSES), nil
+	}
+	return "", errors.New("AES and QES are unavailable until identity proofs are cryptographically bound to the ceremony; routing_tier must be SES")
 }

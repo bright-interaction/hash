@@ -4,11 +4,13 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -19,7 +21,10 @@ import (
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/sign"
 )
+
+const signerClarifierTimeout = 35 * time.Second
 
 // Phase 11 wires the three AI-backed features:
 //
@@ -47,11 +52,8 @@ func (s *Server) handleSignerClarify(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Don't bill the LLM for documents that can no longer change. Without this
-	// a leaked magic link is an unbounded LLM-spend primitive on a dead doc.
-	switch rc.Document.Status {
-	case "completed", "voided", "declined", "expired":
-		writeError(w, http.StatusConflict, "this document is no longer active")
+	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
+	if !ok {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
@@ -61,12 +63,76 @@ func (s *Server) handleSignerClarify(w http.ResponseWriter, r *http.Request) {
 		Question      string `json:"question"`
 		Locale        string `json:"locale"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 	if in.SelectionText == "" && in.BlockID == "" {
 		writeError(w, http.StatusBadRequest, "selection_text or block_id required")
+		return
+	}
+
+	// A SHARE row lock freezes both the document content and sent_at ceremony
+	// epoch for the complete request-audit -> provider -> answer-audit sequence.
+	// SHARE deliberately remains compatible with the KEY SHARE locks taken by
+	// the separately committed events and AI-completion audit foreign keys; a
+	// FOR UPDATE lock here would self-deadlock those durable writes.
+	lockTx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = lockTx.Rollback(rollbackCtx)
+	}()
+	lockedDoc, err := s.Queries.WithTx(lockTx).GetDocumentForShare(r.Context(), generated.GetDocumentForShareParams{
+		ID: rc.Document.ID, OrgID: rc.Document.OrgID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusConflict, "this document is no longer active")
+		return
+	}
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := sign.ValidateLockedNoticeEvidence(rc, lockedDoc, noticeEvidence); err != nil {
+		writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		return
+	}
+	// Don't bill the LLM for documents that can no longer change. The status is
+	// authoritative under the same lock that protects the notice epoch.
+	switch lockedDoc.Status {
+	case "sent", "in_progress", "changes_requested":
+	default:
+		writeError(w, http.StatusConflict, "this document is no longer active")
+		return
+	}
+
+	// Persist the notice-bound processing request before sending any signer
+	// content to the configured AI provider. Audit.Log uses its own short
+	// transaction, so this record is committed durably while the SHARE lock
+	// remains held. If the ledger is unavailable, fail closed without processing.
+	requestPayload, err := bindSignerNoticeAuditPayload(noticeEvidence, map[string]any{
+		"block_id": in.BlockID,
+		"locale":   in.Locale,
+	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if _, err := s.Audit.Log(r.Context(), audit.Entry{
+		OrgID:       lockedDoc.OrgID,
+		DocumentID:  &lockedDoc.ID,
+		RecipientID: &rc.Recipient.ID,
+		Kind:        "clarifier.requested",
+		IP:          clientIP(r),
+		UserAgent:   r.UserAgent(),
+		Payload:     requestPayload,
+	}); err != nil {
+		writeInternalError(w, err)
 		return
 	}
 	clauseText := in.SelectionText
@@ -76,7 +142,7 @@ func (s *Server) handleSignerClarify(w http.ResponseWriter, r *http.Request) {
 		// grounding context. The selection text takes priority when
 		// supplied (the signer may have highlighted a span shorter
 		// than the whole block).
-		tree, err := blocks.ParseTree(rc.Document.BlocksJson)
+		tree, err := blocks.ParseTree(lockedDoc.BlocksJson)
 		if err == nil {
 			if blk, before, after := lookupBlockWithNeighbours(tree, in.BlockID); blk != nil {
 				if clauseText == "" {
@@ -86,9 +152,11 @@ func (s *Server) handleSignerClarify(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	res, err := s.Clarifier.Clarify(r.Context(), aiapps.ClarifyInput{
-		OrgID:              rc.Document.OrgID,
-		DocumentID:         rc.Document.ID,
+	clarifyCtx, cancelClarify := context.WithTimeout(r.Context(), signerClarifierTimeout)
+	defer cancelClarify()
+	res, err := s.Clarifier.Clarify(clarifyCtx, aiapps.ClarifyInput{
+		OrgID:              lockedDoc.OrgID,
+		DocumentID:         lockedDoc.ID,
 		Locale:             in.Locale,
 		ClauseText:         clauseText,
 		SurroundingContext: surrounding,
@@ -98,22 +166,34 @@ func (s *Server) handleSignerClarify(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID:       rc.Document.OrgID,
-		DocumentID:  &rc.Document.ID,
+	answerPayload, err := bindSignerNoticeAuditPayload(noticeEvidence, map[string]any{
+		"block_id":      in.BlockID,
+		"locale":        in.Locale,
+		"shield_active": res.ShieldActive,
+		"latency_ms":    res.LatencyMs,
+		"input_tokens":  res.InputTokens,
+		"output_tokens": res.OutputTokens,
+	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if _, err := s.Audit.Log(r.Context(), audit.Entry{
+		OrgID:       lockedDoc.OrgID,
+		DocumentID:  &lockedDoc.ID,
 		RecipientID: &rc.Recipient.ID,
 		Kind:        "clarifier.answered",
 		IP:          clientIP(r),
 		UserAgent:   r.UserAgent(),
-		Payload: map[string]any{
-			"block_id":      in.BlockID,
-			"locale":        in.Locale,
-			"shield_active": res.ShieldActive,
-			"latency_ms":    res.LatencyMs,
-			"input_tokens":  res.InputTokens,
-			"output_tokens": res.OutputTokens,
-		},
-	})
+		Payload:     answerPayload,
+	}); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := lockTx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -200,36 +280,42 @@ func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
 		}
 		parent = pgtype.UUID{Bytes: id, Valid: true}
 	}
-	row, err := s.Queries.InsertProposal(r.Context(), generated.InsertProposalParams{
-		DocumentID:   doc.ID,
-		OrgID:        sess.OrgID,
-		ProposedBy:   pgtype.UUID{Bytes: sess.UserID, Valid: true},
-		BlockID:      in.BlockID,
-		ProposalKind: in.ProposalKind,
-		ProposedText: in.ProposedText,
-		Rationale:    in.Rationale,
-		DiffJson:     []byte("{}"),
-		AiAssisted:   in.AIAssisted,
-		ParentID:     parent,
-	})
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.DocumentProposal, error) {
+			return q.InsertProposal(r.Context(), generated.InsertProposalParams{
+				DocumentID:   doc.ID,
+				OrgID:        sess.OrgID,
+				ProposedBy:   pgtype.UUID{Bytes: sess.UserID, Valid: true},
+				BlockID:      in.BlockID,
+				ProposalKind: in.ProposalKind,
+				ProposedText: in.ProposedText,
+				Rationale:    in.Rationale,
+				DiffJson:     []byte("{}"),
+				AiAssisted:   in.AIAssisted,
+				ParentID:     parent,
+			})
+		},
+		func(row *generated.DocumentProposal) audit.Entry {
+			return audit.Entry{
+				OrgID:       sess.OrgID,
+				ActorUserID: &sess.UserID,
+				DocumentID:  &doc.ID,
+				Kind:        "negotiation.proposed",
+				IP:          firstIPFromHeader(r),
+				UserAgent:   r.UserAgent(),
+				Payload: map[string]any{
+					"proposal_id": row.ID.String(),
+					"block_id":    in.BlockID,
+					"kind":        in.ProposalKind,
+					"ai_assisted": in.AIAssisted,
+				},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID:       sess.OrgID,
-		ActorUserID: &sess.UserID,
-		DocumentID:  &doc.ID,
-		Kind:        "negotiation.proposed",
-		IP:          firstIPFromHeader(r),
-		UserAgent:   r.UserAgent(),
-		Payload: map[string]any{
-			"proposal_id": row.ID.String(),
-			"block_id":    in.BlockID,
-			"kind":        in.ProposalKind,
-			"ai_assisted": in.AIAssisted,
-		},
-	})
 	writeJSON(w, http.StatusCreated, proposalToDTO(row))
 }
 
@@ -293,24 +379,30 @@ func (s *Server) handleSetProposalStatus(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "status must be accepted|rejected|superseded|pending")
 		return
 	}
-	row, err := s.Queries.SetProposalStatus(r.Context(), generated.SetProposalStatusParams{
-		ID:     id,
-		OrgID:  sess.OrgID,
-		Status: in.Status,
-	})
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.DocumentProposal, error) {
+			return q.SetProposalStatus(r.Context(), generated.SetProposalStatusParams{
+				ID:     id,
+				OrgID:  sess.OrgID,
+				Status: in.Status,
+			})
+		},
+		func(row *generated.DocumentProposal) audit.Entry {
+			return audit.Entry{
+				OrgID:       sess.OrgID,
+				ActorUserID: &sess.UserID,
+				DocumentID:  &row.DocumentID,
+				Kind:        "negotiation.status_changed",
+				IP:          firstIPFromHeader(r),
+				UserAgent:   r.UserAgent(),
+				Payload:     map[string]any{"proposal_id": id.String(), "status": in.Status},
+			}
+		},
+	)
 	if err != nil {
 		writeInternalError(w, err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID:       sess.OrgID,
-		ActorUserID: &sess.UserID,
-		DocumentID:  &row.DocumentID,
-		Kind:        "negotiation.status_changed",
-		IP:          firstIPFromHeader(r),
-		UserAgent:   r.UserAgent(),
-		Payload:     map[string]any{"proposal_id": id.String(), "status": in.Status},
-	})
 	writeJSON(w, http.StatusOK, proposalToDTO(row))
 }
 

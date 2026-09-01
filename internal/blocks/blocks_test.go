@@ -6,6 +6,7 @@ package blocks
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -151,6 +152,53 @@ func TestExtractVariableNames(t *testing.T) {
 	}
 }
 
+func TestParseVariableValuesPreservesExactStringsAndRejectsOtherJSONTypes(t *testing.T) {
+	values, err := ParseVariableValues([]byte(`{"amount":"9007199254740993","rate":"1.2300"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["amount"] != "9007199254740993" || values["rate"] != "1.2300" {
+		t.Fatalf("contractual lexical values changed: %#v", values)
+	}
+
+	for _, raw := range []string{
+		`[]`, `null`, `{"amount":9007199254740993}`, `{"enabled":true}`,
+		`{"items":[]}`, `{"party":{"name":"Example"}}`, `{"bad-name":"x"}`,
+	} {
+		if _, err := ParseVariableValues([]byte(raw)); err == nil {
+			t.Errorf("ParseVariableValues accepted %s", raw)
+		}
+	}
+}
+
+func TestValidateVariablePlaceholdersRejectsEncodedOrSplitRawHTMLBraces(t *testing.T) {
+	for _, rawHTML := range []string{
+		`<p>&#123;&#123;client&#125;&#125;</p>`,
+		`<span>&#x7b;</span><span>&#x7b;client&#x7d;</span><span>&#x7d;</span>`,
+	} {
+		tree := &Tree{Version: 1, Blocks: []Block{{ID: "raw", Type: TypeRawHTML, Text: rawHTML}}}
+		if err := ValidateVariablePlaceholders(tree); err == nil {
+			t.Errorf("encoded raw-HTML braces were accepted: %s", rawHTML)
+		}
+	}
+}
+
+func TestDynamicVariableDefaultIsScopedToItsOwnBlock(t *testing.T) {
+	dynamicOnly := &Tree{Version: 1, Blocks: []Block{{
+		ID: "price", Type: TypeDynamicVar, Attrs: map[string]any{"name": "price", "default": "10.00"},
+	}}}
+	if _, err := ValidateResolvedVariableValues(dynamicOnly, json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("authored dynamic-variable default rejected: %v", err)
+	}
+
+	alsoReferenced := &Tree{Version: 1, Blocks: append(append([]Block{}, dynamicOnly.Blocks...), Block{
+		ID: "price-clause", Type: TypeParagraph, Text: "Price: {{price}}",
+	})}
+	if _, err := ValidateResolvedVariableValues(alsoReferenced, json.RawMessage(`{}`)); err == nil {
+		t.Fatal("dynamic-variable default incorrectly resolved a separate paragraph reference")
+	}
+}
+
 // ── Conditionals ──────────────────────────────────────────────────────────
 
 func TestEvalCondition_Comparisons(t *testing.T) {
@@ -185,6 +233,65 @@ func TestEvalCondition_Comparisons(t *testing.T) {
 				t.Errorf("EvalCondition(%q, %v) = %v, want %v", tc.expr, tc.vars, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestConditionVariableNamesStrictlyParsesCompleteExpression(t *testing.T) {
+	names, err := ConditionVariableNames(`var(country) == "SE" && var(amount) >= 5000 || var(country) == "NO"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"amount", "country"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("names = %v, want %v", names, want)
+	}
+
+	invalid := []string{
+		`var(country) == "SE" trailing`,
+		`var(country-name) == "SE"`,
+		`var(country`,
+		`var(country) == "SE`,
+		`var(country) &&`,
+		`var(country) ==`,
+		`trueish`,
+		``,
+	}
+	for _, expression := range invalid {
+		if _, err := ConditionVariableNames(expression); err == nil {
+			t.Errorf("ConditionVariableNames(%q) accepted malformed expression", expression)
+		}
+		if EvalCondition(expression, map[string]string{"country": "SE"}) {
+			t.Errorf("EvalCondition(%q) did not fail closed", expression)
+		}
+	}
+}
+
+func TestRelationalConditionsRequireExactDecimalOperands(t *testing.T) {
+	for _, value := range []string{"ten", "1 000", "1,000", "NaN", "Inf"} {
+		if _, err := EvalConditionStrict(`var(amount) > 9`, map[string]string{"amount": value}); err == nil {
+			t.Errorf("relational comparison accepted non-decimal %q", value)
+		}
+	}
+	got, err := EvalConditionStrict(`var(amount) > 9007199254740992`, map[string]string{"amount": "9007199254740993"})
+	if err != nil || !got {
+		t.Fatalf("exact large-integer comparison = %v, %v", got, err)
+	}
+}
+
+func TestRequiredSignerRolesForVariablesProjectsFrozenConditionals(t *testing.T) {
+	tree := &Tree{Version: 1, Blocks: []Block{
+		{ID: "signer", Type: TypeSignatureField, Attrs: map[string]any{"recipient_role": "signer"}},
+		{ID: "conditional", Type: TypeConditional, Attrs: map[string]any{"expression": `var(needs_approver) == "yes"`}, Content: []Block{
+			{ID: "approver", Type: TypeSignatureField, Attrs: map[string]any{"recipient_role": "approver"}},
+		}},
+	}}
+	roles, err := RequiredSignerRolesForVariables(tree, map[string]string{"needs_approver": "no"})
+	if err != nil || !reflect.DeepEqual(roles, []string{"signer"}) {
+		t.Fatalf("false branch roles = %v, %v", roles, err)
+	}
+	roles, err = RequiredSignerRolesForVariables(tree, map[string]string{"needs_approver": "yes"})
+	if err != nil || !reflect.DeepEqual(roles, []string{"approver", "signer"}) {
+		t.Fatalf("true branch roles = %v, %v", roles, err)
 	}
 }
 
@@ -388,5 +495,47 @@ func TestJSONRoundTrip(t *testing.T) {
 	}
 	if got.Blocks[1].AttrString("recipient_role", "") != "signer" {
 		t.Errorf("recipient_role lost in round trip")
+	}
+}
+
+func TestNormalizeTreeJSONPersistsIDsAndCanonicalParserRejectsMutableShapes(t *testing.T) {
+	normalized, err := NormalizeTreeJSON([]byte(`{"version":1,"blocks":[{"type":"paragraph","text":"hello"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := ParseCanonicalTree(normalized)
+	if err != nil {
+		t.Fatalf("normalized tree is not canonical: %v", err)
+	}
+	if len(tree.Blocks) != 1 || tree.Blocks[0].ID == "" {
+		t.Fatalf("normalized tree did not persist an ID: %s", normalized)
+	}
+	for _, raw := range []string{
+		`{"version":1,"blocks":[{"type":"paragraph","text":"hello"}]}`,
+		`{"blocks":[{"id":"p","type":"paragraph","text":"hello"}]}`,
+		`{"version":1,"blocks":[]} {}`,
+	} {
+		if _, err := ParseCanonicalTree([]byte(raw)); err == nil {
+			t.Errorf("canonical parser accepted %s", raw)
+		}
+	}
+}
+
+func TestValidateRejectsAmbiguousOrUnusedCanonicalPayload(t *testing.T) {
+	tests := []Block{
+		{ID: "conditional-text", Type: TypeConditional, Text: "ignored", Attrs: map[string]any{"expression": "true"}, Content: []Block{{ID: "p", Type: TypeParagraph, Text: "shown"}}},
+		{ID: "signature-text", Type: TypeSignatureField, Text: "ignored", Attrs: map[string]any{"recipient_role": "signer"}},
+		{ID: "optional-signature", Type: TypeSignatureField, Attrs: map[string]any{"recipient_role": "signer", "required": false}},
+		{ID: "unused-rows", Type: TypeParagraph, Text: "body", Rows: [][]string{{"ignored"}}},
+		{ID: "unknown-attribute", Type: TypeParagraph, Text: "body", Attrs: map[string]any{"label": "ignored"}},
+		{ID: "ambiguous-callout", Type: TypeCallout, Text: "one", Content: []Block{{ID: "nested", Type: TypeParagraph, Text: "two"}}},
+	}
+	for _, block := range tests {
+		t.Run(block.ID, func(t *testing.T) {
+			tree := &Tree{Version: 1, Blocks: []Block{block}}
+			if err := Validate(tree); !errors.Is(err, ErrInvalidBlock) {
+				t.Fatalf("validation error = %v, want ErrInvalidBlock", err)
+			}
+		})
 	}
 }

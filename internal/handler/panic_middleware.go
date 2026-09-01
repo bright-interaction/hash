@@ -28,7 +28,7 @@ func panicMiddleware(next http.Handler) http.Handler {
 				}
 				slog.Error("http handler panicked",
 					"err", rec,
-					"path", r.URL.Path,
+					"path", safeAccessPath(r.URL.Path),
 					"method", r.Method,
 					"request_id", middleware.GetReqID(r.Context()),
 					"stack", string(debug.Stack()),

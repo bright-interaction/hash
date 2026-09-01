@@ -264,14 +264,7 @@ func mcpDiffLookup(ctx context.Context, ve *versions.Engine, orgID uuid.UUID) ti
 		if err != nil {
 			return nil, false, err
 		}
-		var target *generated.DocumentVersion
-		for i := len(rows) - 1; i >= 0; i-- {
-			if rows[i].CreatedAt.Time.Before(eventTime) {
-				continue
-			}
-			target = rows[i]
-			break
-		}
+		target := latestVersionAtOrBefore(rows, eventTime)
 		if target == nil || target.VersionNo <= 1 {
 			return nil, false, nil
 		}
@@ -285,6 +278,21 @@ func mcpDiffLookup(ctx context.Context, ve *versions.Engine, orgID uuid.UUID) ti
 		}
 		return changes, true, nil
 	}
+}
+
+// latestVersionAtOrBefore matches the actual authoring order: persist the
+// document, snapshot its new version, then append the audit event. History is
+// returned newest-first, so the first snapshot not later than the event is the
+// version produced by that edit. Sub-second event timestamps are preserved by
+// timeline.FromEvent to disambiguate rapid create/edit sequences.
+func latestVersionAtOrBefore(rows []*generated.DocumentVersion, eventTime time.Time) *generated.DocumentVersion {
+	for _, row := range rows {
+		if row == nil || !row.CreatedAt.Valid || row.CreatedAt.Time.After(eventTime) {
+			continue
+		}
+		return row
+	}
+	return nil
 }
 
 func mcpActorEmailLookup(ctx context.Context, q *generated.Queries, orgID uuid.UUID) timeline.ActorEmailLookup {

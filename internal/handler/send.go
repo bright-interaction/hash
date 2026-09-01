@@ -32,6 +32,10 @@ type signingLink struct {
 	URL         string    `json:"url"`
 }
 
+type sendDocumentInput struct {
+	LawfulBasis string `json:"lawful_basis"`
+}
+
 func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 	u, ok := requireSessionUser(w, r.Context())
 	if !ok {
@@ -41,8 +45,18 @@ func (s *Server) handleSendDocument(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var in sendDocumentInput
+	if err := decodeJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "lawful_basis is required")
+		return
+	}
+	if err := send.ValidateLawfulBasis(in.LawfulBasis); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	res, err := s.Send.Send(r.Context(), send.Actor{
 		UserID: &u.UserID, OrgID: u.OrgID, Email: u.Email, IP: clientIP(r), Via: "rest",
+		LawfulBasis: in.LawfulBasis,
 	}, docID)
 	if err != nil {
 		s.writeSendError(w, err)
@@ -67,11 +81,36 @@ func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "document needs at least one signer recipient before send")
 	case errors.Is(err, send.ErrNoRecipients):
 		writeError(w, http.StatusBadRequest, "document needs at least one recipient before send")
+	case errors.Is(err, send.ErrMissingSignerForRole),
+		errors.Is(err, send.ErrAmbiguousSignerForRole),
+		errors.Is(err, send.ErrInvalidRecipient),
+		errors.Is(err, send.ErrUnsupportedRecipientRole),
+		errors.Is(err, send.ErrExpiryTooSoon),
+		errors.Is(err, send.ErrNoSignatureFields),
+		errors.Is(err, send.ErrUnresolvedVariables),
+		errors.Is(err, send.ErrLawfulBasisUnconfirmed),
+		errors.Is(err, send.ErrInvalidSignerDisclosure),
+		errors.Is(err, send.ErrUnsafeBuiltInLegalDraft),
+		errors.Is(err, send.ErrInvalidPDFSignatureField),
+		errors.Is(err, send.ErrEnvelopeRequiresSignature),
+		errors.Is(err, send.ErrAcknowledgementNeedsPDF),
+		errors.Is(err, send.ErrAcknowledgementFields),
+		errors.Is(err, send.ErrUnsupportedBlockEvidence):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, send.ErrDraftChangedDuringSend):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, send.ErrSignatureTierUnavailable):
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":          err.Error(),
+			"supported_tier": eidas.TierSES,
+		})
 	case errors.Is(err, billing.ErrQuotaExceeded):
 		writeJSON(w, http.StatusPaymentRequired, map[string]any{
 			"error":       err.Error(),
 			"upgrade_url": "/settings/billing",
 		})
+	case errors.Is(err, billing.ErrEntitlementUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "billing entitlement check temporarily unavailable")
 	default:
 		var guardErr *eidas.GuardError
 		if errors.As(err, &guardErr) {
@@ -111,6 +150,10 @@ func (s *Server) handleVoidDocument(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "document not found")
 		case errors.Is(err, send.ErrAlreadyFinalised):
 			writeError(w, http.StatusConflict, "document already finalised")
+		case errors.Is(err, send.ErrNotVoidable):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, send.ErrEnvelopeChildLifecycle):
+			writeError(w, http.StatusConflict, err.Error())
 		default:
 			writeInternalError(w, err)
 		}

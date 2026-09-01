@@ -33,8 +33,13 @@ SELECT * FROM eidas_routing_rules
 WHERE org_id = $1 AND active = TRUE
 ORDER BY priority ASC, created_at ASC;
 
--- name: SetDocumentRoutingTier :exec
+-- name: SetDocumentRoutingTier :execrows
+-- Higher-assurance paths are intentionally unavailable until their identity
+-- proofs are bound to and consumed with an exact ceremony digest. A tier is
+-- legal metadata, so it may only be set to SES while the document is draft.
 UPDATE documents
    SET routing_tier = $3,
        updated_at   = now()
- WHERE id = $1 AND org_id = $2;
+ WHERE id = $1 AND org_id = $2
+   AND status = 'draft'
+   AND $3 = 'SES';

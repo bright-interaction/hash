@@ -59,8 +59,10 @@
   <p class="text-sm text-text-secondary mb-3 leading-relaxed">
     Surfaces liability, IP, auto-renewal, jurisdiction, payment-terms,
     indemnification and data-protection risks across the block tree.
-    Every call goes through Shield + the EU AI provider gate, so PII
-    never leaves the EU.
+    Selected document content is transmitted to the configured AI provider. Shield applies
+    redaction and an operator-configured endpoint policy, but that hostname policy does not prove
+    provider residency. Run analysis only after the provider, location, and transfer terms are in
+    the approved sub-processor schedule.
   </p>
 
   <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr] gap-3 items-end mb-4">

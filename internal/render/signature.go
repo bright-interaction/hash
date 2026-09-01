@@ -5,8 +5,10 @@ package render
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // SupportedFonts is the curated calligraphy set the signer adoption modal
@@ -138,14 +140,47 @@ func SignatureCSS() string {
 	))
 }
 
+const (
+	// MaxSignatureNameRunes allows long international legal names while
+	// bounding every persisted/audited/rendered copy of signer-controlled text.
+	MaxSignatureNameRunes = 200
+	// MaxSignatureNameBytes independently bounds storage and HTML expansion.
+	// It accommodates MaxSignatureNameRunes four-byte Unicode code points.
+	MaxSignatureNameBytes = MaxSignatureNameRunes * utf8.UTFMax
+)
+
+// ValidateSignatureName is shared by the ceremony and terminal render paths.
+// Both limits matter: rune count is the human-facing ceiling, while byte count
+// prevents combining/multi-byte input from bypassing the resource bound.
+func ValidateSignatureName(typedName string) error {
+	if !utf8.ValidString(typedName) {
+		return errors.New("signature name must be valid UTF-8")
+	}
+	if strings.TrimSpace(typedName) == "" {
+		return errors.New("signer must type a name")
+	}
+	if len(typedName) > MaxSignatureNameBytes {
+		return fmt.Errorf("signature name must be at most %d bytes", MaxSignatureNameBytes)
+	}
+	if utf8.RuneCountInString(typedName) > MaxSignatureNameRunes {
+		return fmt.Errorf("signature name must be at most %d characters", MaxSignatureNameRunes)
+	}
+	return nil
+}
+
 // RenderSignatureSpan returns the HTML span Hash stamps in place of a
-// signature_field block once a signer adopts and signs.
-func RenderSignatureSpan(typedName, font string) string {
+// signature_field block once a signer adopts and signs. It validates again at
+// the render boundary so corrupted legacy/database values fail closed instead
+// of expanding terminal HTML/PDF evidence without bound.
+func RenderSignatureSpan(typedName, font string) (string, error) {
+	if err := ValidateSignatureName(typedName); err != nil {
+		return "", err
+	}
 	if !IsValidFont(font) {
 		font = "Caveat"
 	}
 	return fmt.Sprintf(`<span class="hash-signature" data-font="%s">%s</span>`,
-		htmlAttrEscape(font), htmlContentEscape(typedName))
+		htmlAttrEscape(font), htmlContentEscape(typedName)), nil
 }
 
 func htmlAttrEscape(s string) string {

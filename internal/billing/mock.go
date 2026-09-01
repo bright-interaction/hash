@@ -13,8 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// MockProvider is wired when HASH_BILLING_PROVIDER is empty or
-// 'mock'. Behaviour:
+// MockProvider is wired only for loopback development. Behaviour:
 //
 //   - CreateCheckout returns a redirect URL pointing back at our own
 //     webhook with a deterministic synthetic event so the checkout
@@ -36,20 +35,24 @@ func (MockProvider) CreateCheckout(_ context.Context, in CheckoutInput) (*Checko
 	if err != nil {
 		return nil, err
 	}
-	subID := "mock_sub_" + id
+	paymentID := "mock_pay_" + id
 	custID := "mock_cust_" + id
 	// Synthesize a "completed" webhook URL that the frontend can POST
 	// to right after the redirect lands so the subscription flips to
 	// active without waiting on an external service.
-	checkoutURL := in.ReturnURL + "?mock_subscription_id=" + subID + "&mock_customer_id=" + custID + "&plan=" + in.PlanSlug
+	checkoutURL := in.ReturnURL + "&mock_payment_id=" + paymentID + "&mock_customer_id=" + custID + "&activation_key=" + in.ActivationKey.String() + "&plan=" + in.PlanSlug
 	return &CheckoutResult{
-		ProviderCustomerID:     custID,
-		ProviderSubscriptionID: subID,
-		CheckoutURL:            checkoutURL,
+		ProviderCustomerID: custID,
+		ProviderPaymentID:  paymentID,
+		CheckoutURL:        checkoutURL,
 	}, nil
 }
 
-func (MockProvider) CancelSubscription(_ context.Context, _ string) error { return nil }
+func (MockProvider) CreateSubscription(_ context.Context, in SubscriptionInput) (*SubscriptionResult, error) {
+	return &SubscriptionResult{ProviderSubscriptionID: "mock_sub_" + in.ActivationKey.String()}, nil
+}
+
+func (MockProvider) CancelSubscription(_ context.Context, _, _ string) error { return nil }
 
 func (MockProvider) ParseWebhook(_ context.Context, raw []byte, _ map[string]string) (*WebhookEvent, error) {
 	// Accept three shapes for mock callbacks:
@@ -72,6 +75,12 @@ func (MockProvider) ParseWebhook(_ context.Context, raw []byte, _ map[string]str
 		PeriodEndUnix          int64  `json:"period_end_unix"`
 		HostedInvoiceURL       string `json:"hosted_invoice_url"`
 		PDFURL                 string `json:"pdf_url"`
+		ActivationKey          string `json:"activation_key"`
+		PlanSlug               string `json:"plan_slug"`
+		Interval               string `json:"interval"`
+		SequenceType           string `json:"sequence_type"`
+		MandateID              string `json:"mandate_id"`
+		PaidAtUnix             int64  `json:"paid_at_unix"`
 	}
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return &WebhookEvent{Kind: "subscription.created"}, nil
@@ -86,6 +95,13 @@ func (MockProvider) ParseWebhook(_ context.Context, raw []byte, _ map[string]str
 		Currency:               ev.Currency,
 		HostedInvoiceURL:       ev.HostedInvoiceURL,
 		PDFURL:                 ev.PDFURL,
+		PlanSlug:               ev.PlanSlug,
+		Interval:               ev.Interval,
+		SequenceType:           ev.SequenceType,
+		MandateID:              ev.MandateID,
+	}
+	if ev.ActivationKey != "" {
+		out.ActivationKey, _ = uuid.Parse(ev.ActivationKey)
 	}
 	if ev.PeriodStartUnix > 0 {
 		t := time.Unix(ev.PeriodStartUnix, 0).UTC()
@@ -94,6 +110,10 @@ func (MockProvider) ParseWebhook(_ context.Context, raw []byte, _ map[string]str
 	if ev.PeriodEndUnix > 0 {
 		t := time.Unix(ev.PeriodEndUnix, 0).UTC()
 		out.PeriodEnd = &t
+	}
+	if ev.PaidAtUnix > 0 {
+		t := time.Unix(ev.PaidAtUnix, 0).UTC()
+		out.PaidAt = &t
 	}
 	if ev.OrgID != "" {
 		if id, err := uuid.Parse(ev.OrgID); err == nil {

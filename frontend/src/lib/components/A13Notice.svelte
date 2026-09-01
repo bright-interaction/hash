@@ -1,10 +1,9 @@
 <script lang="ts">
   import { ShieldCheck, Info, ExternalLink } from 'lucide-svelte';
-  import { get } from 'svelte/store';
-  import { t } from '$lib/i18n';
 
   type Privacy = {
     controller: string;
+    controller_contact: string;
     processor: string;
     processor_email: string;
     purpose_summary: string;
@@ -13,18 +12,47 @@
     jurisdiction_dp: string;
     policy_url: string;
     dsr_endpoint: string;
+	notice_digest: string;
+    copy: {
+      title: string;
+      intro: string;
+      controller_label: string;
+      controller_contact_label: string;
+      processor_label: string;
+      purpose_label: string;
+      legal_basis_label: string;
+      retention_label: string;
+      retention_value: string;
+      authority_label: string;
+      rights_summary: string;
+      rights_body: string;
+      submit_request_label: string;
+      kind_label: string;
+      dsr_access_label: string;
+      dsr_rectification_label: string;
+      dsr_erasure_label: string;
+      dsr_restriction_label: string;
+      dsr_portability_label: string;
+      dsr_objection_label: string;
+      note_label: string;
+      note_placeholder: string;
+      send_request_label: string;
+      request_received: string;
+      read_policy_label: string;
+      acknowledgement_label: string;
+      fine_print: string;
+    };
   };
 
   type Props = {
     privacy: Privacy | null;
-    documentName: string;
-    /** Stable per-link key so the same signer doesn't see it twice. */
+    /** Stable non-credential document+recipient+notice-version key. */
     storageKey: string;
-    /** Fires after the user acknowledges; arg=true if they consented to telemetry. */
-    onAcknowledged: (telemetry: boolean) => void;
+	/** Fires after the user acknowledges the required disclosure. */
+	onAcknowledged: () => void;
   };
 
-  let { privacy, documentName, storageKey, onAcknowledged }: Props = $props();
+  let { privacy, storageKey, onAcknowledged }: Props = $props();
 
   // Default to "not yet acknowledged" so the modal blocks until the
   // user picks one of the two actions. We check localStorage once on
@@ -35,26 +63,33 @@
   let requestKind = $state('access');
   let requestNote = $state('');
   let requestStatus = $state<{ ok: boolean; message: string } | null>(null);
+  let notifiedStorageKey = '';
 
   $effect(() => {
     try {
-      if (typeof localStorage !== 'undefined' && localStorage.getItem(storageKey)) {
-        acknowledged = true;
-      }
+      acknowledged = typeof localStorage !== 'undefined' && Boolean(localStorage.getItem(storageKey));
     } catch {
       acknowledged = false;
     }
+    // A restored acknowledgement is valid only because storageKey contains the
+    // current server notice digest. Tell the parent so it can begin gated
+    // response calls (including the evidence-producing view ping).
+    if (acknowledged && notifiedStorageKey !== storageKey) {
+      notifiedStorageKey = storageKey;
+      onAcknowledged();
+    }
   });
 
-  function accept(telemetry: boolean) {
+  function accept() {
     try {
-      localStorage.setItem(storageKey, telemetry ? 'with-telemetry' : 'without-telemetry');
+	  localStorage.setItem(storageKey, 'acknowledged');
     } catch {
       // Storage disabled (Safari private mode etc.); proceed anyway,
       // worst case the user sees the banner again next visit.
     }
     acknowledged = true;
-    onAcknowledged(telemetry);
+    notifiedStorageKey = storageKey;
+	onAcknowledged();
   }
 
   async function submitDSR() {
@@ -73,7 +108,7 @@
       }
       requestStatus = {
         ok: true,
-        message: get(t)('a13.requestReceived'),
+        message: privacy.copy.request_received,
       };
       requestNote = '';
     } catch (e) {
@@ -92,66 +127,70 @@
     <div class="a13-card">
       <header class="a13-header">
         <ShieldCheck class="size-5" />
-        <h2 id="a13-title">{$t('a13.title')}</h2>
+        <h2 id="a13-title">{privacy.copy.title}</h2>
       </header>
 
-      <p class="a13-intro">{$t('a13.intro', { document: documentName })}</p>
+      <p class="a13-intro">{privacy.copy.intro}</p>
 
       <dl class="a13-facts">
         <div>
-          <dt>{$t('a13.controller')}</dt>
+          <dt>{privacy.copy.controller_label}</dt>
           <dd>{privacy.controller}</dd>
         </div>
+		<div>
+		  <dt>{privacy.copy.controller_contact_label}</dt>
+		  <dd>{privacy.controller_contact}</dd>
+		</div>
         <div>
-          <dt>{$t('a13.processor')}</dt>
+          <dt>{privacy.copy.processor_label}</dt>
           <dd>{privacy.processor} ({privacy.processor_email})</dd>
         </div>
         <div>
-          <dt>{$t('a13.purpose')}</dt>
+          <dt>{privacy.copy.purpose_label}</dt>
           <dd>{privacy.purpose_summary}</dd>
         </div>
         <div>
-          <dt>{$t('a13.legalBasis')}</dt>
+          <dt>{privacy.copy.legal_basis_label}</dt>
           <dd>{privacy.legal_basis}</dd>
         </div>
         <div>
-          <dt>{$t('a13.retention')}</dt>
-          <dd>{$t('a13.retentionValue', { years: privacy.retention_years })}</dd>
+          <dt>{privacy.copy.retention_label}</dt>
+          <dd>{privacy.copy.retention_value}</dd>
         </div>
         <div>
-          <dt>{$t('a13.authority')}</dt>
+          <dt>{privacy.copy.authority_label}</dt>
           <dd>{privacy.jurisdiction_dp}</dd>
         </div>
       </dl>
 
       <details class="a13-rights">
         <summary>
-          <Info class="size-4" /> {$t('a13.rightsSummary')}
+          <Info class="size-4" /> {privacy.copy.rights_summary}
         </summary>
-        <p>{$t('a13.rightsBody')}</p>
+        <p>{privacy.copy.rights_body}</p>
         {#if !showRequestForm}
           <button class="a13-link-btn" type="button" onclick={() => (showRequestForm = true)}
-            >{$t('a13.submitRequest')}</button
+            >{privacy.copy.submit_request_label}</button
           >
         {/if}
         {#if showRequestForm}
           <div class="a13-dsr-form">
             <label>
-              {$t('a13.kindLabel')}
+              {privacy.copy.kind_label}
               <select bind:value={requestKind}>
-                <option value="access">{$t('a13.dsr.access')} (Art. 15)</option>
-                <option value="rectification">{$t('a13.dsr.rectification')} (Art. 16)</option>
-                <option value="erasure">{$t('a13.dsr.erasure')} (Art. 17)</option>
-                <option value="restriction">{$t('a13.dsr.restriction')} (Art. 18)</option>
-                <option value="portability">{$t('a13.dsr.portability')} (Art. 20)</option>
-                <option value="objection">{$t('a13.dsr.objection')} (Art. 21)</option>
+                <option value="access">{privacy.copy.dsr_access_label}</option>
+                <option value="rectification">{privacy.copy.dsr_rectification_label}</option>
+                <option value="erasure">{privacy.copy.dsr_erasure_label}</option>
+                <option value="restriction">{privacy.copy.dsr_restriction_label}</option>
+                <option value="portability">{privacy.copy.dsr_portability_label}</option>
+                <option value="objection">{privacy.copy.dsr_objection_label}</option>
               </select>
             </label>
             <label>
-              {$t('a13.noteLabel')}
-              <textarea bind:value={requestNote} rows={2} placeholder={$t('a13.notePlaceholder')}></textarea>
+              {privacy.copy.note_label}
+              <textarea bind:value={requestNote} rows={2} placeholder={privacy.copy.note_placeholder}></textarea>
             </label>
-            <button type="button" class="a13-primary" onclick={submitDSR}>{$t('a13.sendRequest')}</button>
+            <button type="button" class="a13-primary" onclick={submitDSR}>{privacy.copy.send_request_label}</button>
             {#if requestStatus}
               <p class="a13-status {requestStatus.ok ? 'ok' : 'err'}">{requestStatus.message}</p>
             {/if}
@@ -160,18 +199,15 @@
       </details>
 
       <a class="a13-policy" href={privacy.policy_url} target="_blank" rel="noopener">
-        {$t('a13.readPolicy')} <ExternalLink class="size-3" />
+        {privacy.copy.read_policy_label} <ExternalLink class="size-3" />
       </a>
 
       <footer class="a13-actions">
-        <button type="button" class="a13-secondary" onclick={() => accept(false)}>
-          {$t('a13.continueWithout')}
-        </button>
-        <button type="button" class="a13-primary" onclick={() => accept(true)}>
-          {$t('a13.continue')}
+		<button type="button" class="a13-primary" onclick={accept}>
+          {privacy.copy.acknowledgement_label}
         </button>
       </footer>
-      <p class="a13-fineprint">{$t('a13.fineprint')}</p>
+      <p class="a13-fineprint">{privacy.copy.fine_print}</p>
     </div>
   </div>
 {/if}
@@ -302,8 +338,7 @@
     justify-content: flex-end;
     gap: 0.5rem;
   }
-  .a13-primary,
-  .a13-secondary {
+  .a13-primary {
     font: inherit;
     border: 1px solid transparent;
     border-radius: 6px;
@@ -317,14 +352,6 @@
   }
   .a13-primary:hover {
     background: #111c33;
-  }
-  .a13-secondary {
-    background: white;
-    color: #0f172a;
-    border-color: #cbd5e1;
-  }
-  .a13-secondary:hover {
-    background: #f8fafc;
   }
   .a13-fineprint {
     margin-top: 0.75rem;

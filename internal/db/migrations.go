@@ -5,16 +5,82 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"path"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/pressly/goose/v3"
 )
 
 //go:embed migrations/*.sql
 var embeddedMigrations embed.FS
+
+// EmbeddedMigrationsIdentity returns the release identity of the SQL tree
+// compiled into this exact application image. The digest intentionally uses
+// the same canonical filename-NUL-content-NUL encoding as CI' release
+// manifest, so release-only database checks can prove that the image, the
+// approved manifest, and Goose's applied state all describe one migration
+// tree. The returned versions are sorted and are a defensive copy.
+func EmbeddedMigrationsIdentity() (digest string, versions []int64, err error) {
+	var names []string
+	err = fs.WalkDir(embeddedMigrations, "migrations", func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("embedded migration %s is not a regular file", filePath)
+		}
+		name := strings.TrimPrefix(filePath, "migrations/")
+		if name == filePath || name == "" || strings.HasPrefix(name, "../") {
+			return fmt.Errorf("resolve embedded migration name")
+		}
+		names = append(names, name)
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	if len(names) == 0 {
+		return "", nil, fmt.Errorf("embedded migration tree is empty")
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	seenVersions := make(map[int64]struct{}, len(names))
+	versions = make([]int64, 0, len(names))
+	for _, name := range names {
+		prefix, _, ok := strings.Cut(path.Base(name), "_")
+		version, parseErr := strconv.ParseInt(prefix, 10, 64)
+		if !ok || parseErr != nil || version <= 0 {
+			return "", nil, fmt.Errorf("embedded migration has an invalid versioned filename")
+		}
+		if _, duplicate := seenVersions[version]; duplicate {
+			return "", nil, fmt.Errorf("embedded migration version is duplicated")
+		}
+		seenVersions[version] = struct{}{}
+		versions = append(versions, version)
+		raw, readErr := embeddedMigrations.ReadFile(path.Join("migrations", name))
+		if readErr != nil {
+			return "", nil, readErr
+		}
+		_, _ = h.Write([]byte(name))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(raw)
+		_, _ = h.Write([]byte{0})
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
+	return hex.EncodeToString(h.Sum(nil)), append([]int64(nil), versions...), nil
+}
 
 // RunMigrations applies pending Postgres migrations using goose against the
 // caller-provided *sql.DB. Every migration in this directory MUST start with

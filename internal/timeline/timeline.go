@@ -123,7 +123,10 @@ func FromEvent(e *generated.Event) Entry {
 		out.IP = e.Ip.String()
 	}
 	out.UserAgent = e.Ua.String
-	out.CreatedAt = e.CreatedAt.Time.UTC().Format(time.RFC3339)
+	// Preserve the database's sub-second ordering. Version snapshots and their
+	// audit events commonly land within the same second; truncating here made a
+	// later timeline diff lookup select the wrong snapshot (or none at all).
+	out.CreatedAt = e.CreatedAt.Time.UTC().Format(time.RFC3339Nano)
 	return out
 }
 
@@ -212,6 +215,10 @@ func AttachDiffs(entries []Entry, lookup VersionDiffLookup) ([]Entry, error) {
 			return out, fmt.Errorf("diff lookup for %s: %w", e.ID, err)
 		}
 		if !present {
+			// diff=true is also a response-shape promise. Callers can distinguish
+			// "no predecessor was available" from "diffs were not requested" by
+			// the field's presence without guessing from event timing.
+			out[i].DiffChanges = []any{}
 			continue
 		}
 		out[i].DiffChanges = changes

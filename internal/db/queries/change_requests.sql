@@ -8,6 +8,15 @@ SELECT cr.* FROM change_requests cr
 JOIN documents d ON d.id = cr.document_id
 WHERE cr.id = $1 AND d.org_id = $2;
 
+-- name: GetChangeRequestForUpdate :one
+-- ResolveChange holds the parent document lock first, then claims the request.
+-- This prevents two approve/deny calls from both observing an open request and
+-- ensures auto-apply + resolution commit (or roll back) together.
+SELECT cr.* FROM change_requests cr
+JOIN documents d ON d.id = cr.document_id
+WHERE cr.id = $1 AND d.org_id = $2
+FOR UPDATE OF cr;
+
 -- name: ResolveChangeRequest :one
 -- Approve or deny a single inline change request.
 UPDATE change_requests
@@ -33,13 +42,11 @@ SET status = 'resolved', resolved_at = now()
 WHERE document_id = $1 AND status = 'open';
 
 -- name: ResetRecipientsForRevision :exec
--- Clear prior signing progress so a revised document re-sends cleanly: every
--- recipient that has not declined returns to pending with no signed timestamp.
+-- Reset only recipients who have never produced legal evidence. Revise checks
+-- the whole ceremony first; this predicate is a second DB-level defense so a
+-- future caller can never erase a signature/acceptance timestamp in place.
 UPDATE recipients
 SET status = 'pending', signed_at = NULL
-WHERE document_id = $1 AND status <> 'declined';
-
--- name: DeleteSignaturesByDocument :exec
--- A revised document supersedes the old draft, so signatures captured against
--- the previous version are voided.
-DELETE FROM signatures WHERE document_id = $1;
+WHERE document_id = $1
+  AND status NOT IN ('declined','signed','accepted')
+  AND signed_at IS NULL;

@@ -125,6 +125,20 @@ func TestAttachDiffs_NilLookupNoop(t *testing.T) {
 	}
 }
 
+func TestAttachDiffs_ExposesEmptyFieldWhenNoPredecessor(t *testing.T) {
+	in := []Entry{mkEntry("a", "document.updated", "alice", time.Now())}
+	in[0].DocumentID = "11111111-1111-1111-1111-111111111111"
+	out, err := AttachDiffs(in, func(string, time.Time) (any, bool, error) {
+		return nil, false, nil
+	})
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if out[0].DiffChanges == nil {
+		t.Fatal("diff-requested updated entry must expose diff_changes even without a predecessor")
+	}
+}
+
 func TestAttachActorEmails_PopulatesEmailsAcrossEntries(t *testing.T) {
 	base := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	entries := []Entry{

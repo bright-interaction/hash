@@ -128,59 +128,17 @@ func (s *Server) handleChangeActionConfirm(w http.ResponseWriter, r *http.Reques
 		html.EscapeString(done), html.EscapeString(s.PublicURL), html.EscapeString(docID.String())))
 }
 
-func (s *Server) verifyCommentToken(w http.ResponseWriter, tok string) (actiontoken.Claims, bool) {
-	if s.ActionSecret == "" {
-		s.actionPage(w, http.StatusServiceUnavailable, "Unavailable", `<p class="muted">Email actions are not configured.</p>`)
-		return actiontoken.Claims{}, false
-	}
-	c, err := actiontoken.Verify(s.ActionSecret, tok, time.Now())
-	if err != nil || c.Kind != "comment" {
-		s.actionPage(w, http.StatusBadRequest, "Link not valid", `<p class="muted">This reply link is invalid or has expired.</p>`)
-		return actiontoken.Claims{}, false
-	}
-	return c, true
+// Legacy comment-reply action tokens bypassed the current Article 13 notice.
+// Keep both routes as non-mutating tombstones so already-delivered emails fail
+// safely and tell the recipient to return through their normal signing link.
+func (s *Server) handleCommentReplyPage(w http.ResponseWriter, _ *http.Request) {
+	s.retiredCommentReplyPage(w)
 }
 
-// handleCommentReplyPage (GET /a/comment) shows a reply box for a recipient.
-func (s *Server) handleCommentReplyPage(w http.ResponseWriter, r *http.Request) {
-	tok := r.URL.Query().Get("t")
-	c, ok := s.verifyCommentToken(w, tok)
-	if !ok {
-		return
-	}
-	docID, err := uuid.Parse(c.DocID)
-	if err != nil {
-		s.actionPage(w, http.StatusBadRequest, "Link not valid", `<p class="muted">This link is malformed.</p>`)
-		return
-	}
-	body := fmt.Sprintf(`<form method="POST" action="/a/comment" style="margin-top:8px">
-<input type="hidden" name="t" value="%s"/>
-<textarea name="body" rows="4" required placeholder="Write your reply..." style="width:100%%;box-sizing:border-box;padding:10px;border:1px solid #e7e5e4;border-radius:8px;font:inherit"></textarea>
-<p style="margin-top:12px"><button type="submit" class="btn" style="background:#0891B2">Send reply</button></p></form>
-<p class="muted"><a href="%s/sign" style="color:#0891B2">Open the document</a></p>`,
-		html.EscapeString(tok), html.EscapeString(s.PublicURL))
-	_ = docID
-	s.actionPage(w, http.StatusOK, "Reply to comment", body)
+func (s *Server) handleCommentReplyConfirm(w http.ResponseWriter, _ *http.Request) {
+	s.retiredCommentReplyPage(w)
 }
 
-// handleCommentReplyConfirm (POST /a/comment) posts the reply as the recipient.
-func (s *Server) handleCommentReplyConfirm(w http.ResponseWriter, r *http.Request) {
-	_ = r.ParseForm()
-	c, ok := s.verifyCommentToken(w, r.FormValue("t"))
-	if !ok {
-		return
-	}
-	orgID, err1 := uuid.Parse(c.OrgID)
-	docID, err2 := uuid.Parse(c.DocID)
-	recID, err3 := uuid.Parse(c.TargetID)
-	if err1 != nil || err2 != nil || err3 != nil {
-		s.actionPage(w, http.StatusBadRequest, "Link not valid", `<p class="muted">This link is malformed.</p>`)
-		return
-	}
-	body := r.FormValue("body")
-	if _, err := s.Sign.CommentAsRecipient(r.Context(), orgID, docID, recID, body); err != nil {
-		s.actionPage(w, http.StatusBadRequest, "Could not post", `<p class="muted">The reply was empty or could not be posted.</p>`)
-		return
-	}
-	s.actionPage(w, http.StatusOK, "Reply sent", `<p>Your reply was posted and the other party was notified.</p>`)
+func (s *Server) retiredCommentReplyPage(w http.ResponseWriter) {
+	s.actionPage(w, http.StatusGone, "Reply link retired", `<p class="muted">For privacy and evidence integrity, replies must be posted from the signing page after you review the current privacy notice. Reopen the signing link from your invitation or reminder email.</p>`)
 }

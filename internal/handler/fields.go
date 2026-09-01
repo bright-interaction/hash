@@ -19,9 +19,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -29,6 +32,7 @@ import (
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
+	"github.com/bright-interaction/hash/internal/sign"
 )
 
 // pctToNumeric encodes a 0..100 percent-of-page coordinate as a
@@ -131,9 +135,13 @@ func (s *Server) handleAddField(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w, err)
 		return
 	}
+	if doc.Status != "draft" {
+		writeError(w, http.StatusConflict, "document not editable (must be draft)")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
 	var in addFieldInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -177,35 +185,45 @@ func (s *Server) handleAddField(w http.ResponseWriter, r *http.Request) {
 			optionsJSON = raw
 		}
 	}
-	row, err := s.Queries.CreateField(r.Context(), generated.CreateFieldParams{
-		DocumentID:  docID,
-		RecipientID: recipientID,
-		Type:        in.Type,
-		Page:        int32(in.Page),
-		XPct:        pctToNumeric(in.XPct),
-		YPct:        pctToNumeric(in.YPct),
-		WPct:        pctToNumeric(in.WPct),
-		HPct:        pctToNumeric(in.HPct),
-		Required:    required,
-		Label:       textOrNull(in.Label),
-		OptionsJson: optionsJSON,
-	})
+	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
+		func(q *generated.Queries) (*generated.DocumentField, error) {
+			return q.CreateDraftField(r.Context(), generated.CreateDraftFieldParams{
+				DocumentID:  docID,
+				RecipientID: recipientID,
+				Type:        in.Type,
+				Page:        int32(in.Page),
+				XPct:        pctToNumeric(in.XPct),
+				YPct:        pctToNumeric(in.YPct),
+				WPct:        pctToNumeric(in.WPct),
+				HPct:        pctToNumeric(in.HPct),
+				Required:    required,
+				Label:       textOrNull(in.Label),
+				OptionsJson: optionsJSON,
+			})
+		},
+		func(row *generated.DocumentField) audit.Entry {
+			return audit.Entry{
+				OrgID:       sess.OrgID,
+				ActorUserID: &sess.UserID,
+				DocumentID:  &docID,
+				Kind:        "document.field_added",
+				Payload: map[string]any{
+					"field_id": row.ID.String(),
+					"type":     in.Type,
+					"page":     in.Page,
+					"required": required,
+				},
+			}
+		},
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusConflict, "document not editable or recipient does not belong to document")
+		return
+	}
 	if err != nil {
 		writeInternalErrorMsg(w, "create field", err)
 		return
 	}
-	_, _ = s.Audit.Log(r.Context(), audit.Entry{
-		OrgID:       sess.OrgID,
-		ActorUserID: &sess.UserID,
-		DocumentID:  &docID,
-		Kind:        "document.field_added",
-		Payload: map[string]any{
-			"field_id": row.ID.String(),
-			"type":     in.Type,
-			"page":     in.Page,
-			"required": required,
-		},
-	})
 	writeJSON(w, http.StatusCreated, fieldToDTO(row))
 }
 
@@ -249,9 +267,25 @@ func (s *Server) handleDeleteField(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Queries.DeleteFieldByID(r.Context(), generated.DeleteFieldByIDParams{
+	ownerDoc, err := s.Queries.GetFieldOwnerDoc(r.Context(), generated.GetFieldOwnerDocParams{ID: id, OrgID: sess.OrgID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "field not found")
+		return
+	}
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if _, ok := s.requireDraftDocument(w, r, ownerDoc, sess); !ok {
+		return
+	}
+	if _, err := s.Queries.DeleteFieldByID(r.Context(), generated.DeleteFieldByIDParams{
 		ID: id, OrgID: sess.OrgID,
 	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusConflict, "document not editable (must be draft)")
+			return
+		}
 		writeInternalError(w, err)
 		return
 	}
@@ -295,6 +329,104 @@ type submitFieldsInput struct {
 	Values []submitFieldValueInput `json:"values"`
 }
 
+type preparedSignerFieldValue struct {
+	field *generated.DocumentField
+	value string
+}
+
+type signerFieldValidationError struct {
+	status  int
+	message string
+}
+
+const maxSignerFieldValueBytes = 4096
+
+func validateSignerFieldValue(field *generated.DocumentField, value string) error {
+	if field == nil {
+		return errors.New("field is unavailable")
+	}
+	if len(value) > maxSignerFieldValueBytes || !utf8.ValidString(value) {
+		return fmt.Errorf("must be valid UTF-8 and at most %d bytes", maxSignerFieldValueBytes)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("must not contain control characters")
+		}
+	}
+	if value == "" {
+		return nil
+	}
+
+	switch field.Type {
+	case "text":
+		return nil
+	case "initial":
+		if utf8.RuneCountInString(value) > 6 {
+			return errors.New("must contain at most 6 characters")
+		}
+		return nil
+	case "date":
+		parsed, err := time.Parse("2006-01-02", value)
+		if err != nil || parsed.Format("2006-01-02") != value {
+			return errors.New("must use YYYY-MM-DD")
+		}
+		return nil
+	case "checkbox":
+		if value != "true" && value != "false" {
+			return errors.New("must be true or false")
+		}
+		return nil
+	case "dropdown":
+		var options struct {
+			Choices []string `json:"choices"`
+		}
+		if err := json.Unmarshal(field.OptionsJson, &options); err != nil {
+			return errors.New("has invalid configured choices")
+		}
+		for _, choice := range options.Choices {
+			if value == choice {
+				return nil
+			}
+		}
+		return errors.New("must match a configured choice")
+	default:
+		return errors.New("has unsupported field type")
+	}
+}
+
+func prepareSignerFieldValues(allowed []*generated.DocumentField, values []submitFieldValueInput) ([]preparedSignerFieldValue, *signerFieldValidationError) {
+	allowedSet := make(map[string]*generated.DocumentField, len(allowed))
+	for _, field := range allowed {
+		if field != nil {
+			allowedSet[field.ID.String()] = field
+		}
+	}
+	seen := make(map[string]struct{}, len(values))
+	prepared := make([]preparedSignerFieldValue, 0, len(values))
+	for _, input := range values {
+		if _, duplicate := seen[input.FieldID]; duplicate {
+			return nil, &signerFieldValidationError{status: http.StatusBadRequest, message: "duplicate field_id: " + input.FieldID}
+		}
+		seen[input.FieldID] = struct{}{}
+		field, ok := allowedSet[input.FieldID]
+		if !ok {
+			return nil, &signerFieldValidationError{status: http.StatusForbidden, message: "field_id not assigned to this recipient: " + input.FieldID}
+		}
+		if field.Type == "signature" {
+			return nil, &signerFieldValidationError{status: http.StatusBadRequest, message: "signature fields are signed, not filled: " + input.FieldID}
+		}
+		value := strings.TrimSpace(input.Value)
+		if field.Required && value == "" {
+			return nil, &signerFieldValidationError{status: http.StatusBadRequest, message: "field is required: " + input.FieldID}
+		}
+		if err := validateSignerFieldValue(field, value); err != nil {
+			return nil, &signerFieldValidationError{status: http.StatusBadRequest, message: "invalid " + field.Type + " field value: " + err.Error()}
+		}
+		prepared = append(prepared, preparedSignerFieldValue{field: field, value: value})
+	}
+	return prepared, nil
+}
+
 // POST /sign/{token}/fields
 //
 // Signer submits one or more field values. The handler validates each
@@ -303,6 +435,10 @@ type submitFieldsInput struct {
 // so the audit timeline reflects the submission.
 func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request) {
 	rc, ok := s.lookupTokenOrError(w, r)
+	if !ok {
+		return
+	}
+	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
 	if !ok {
 		return
 	}
@@ -316,7 +452,7 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
 	var in submitFieldsInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
@@ -324,7 +460,40 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "values required")
 		return
 	}
-	allowed, err := s.Queries.ListFieldsByRecipient(r.Context(), generated.ListFieldsByRecipientParams{
+	tx, err := s.Pool.Begin(r.Context())
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := s.Queries.WithTx(tx)
+	lockedDoc, err := q.GetDocumentForUpdate(r.Context(), generated.GetDocumentForUpdateParams{
+		ID: rc.Document.ID, OrgID: rc.Document.OrgID,
+	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if err := sign.ValidateLockedNoticeEvidence(rc, lockedDoc, noticeEvidence); err != nil {
+		writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		return
+	}
+	if lockedDoc.Status != "sent" && lockedDoc.Status != "in_progress" {
+		writeError(w, http.StatusConflict, "document is not accepting field updates")
+		return
+	}
+	freshRecipient, err := q.GetRecipient(r.Context(), generated.GetRecipientParams{
+		ID: rc.Recipient.ID, OrgID: rc.Document.OrgID,
+	})
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	if freshRecipient.DocumentID != lockedDoc.ID || !recipientCanFillFields(freshRecipient.Status) {
+		writeError(w, http.StatusConflict, "recipient has already completed or declined this ceremony")
+		return
+	}
+	allowed, err := q.ListFieldsByRecipient(r.Context(), generated.ListFieldsByRecipientParams{
 		DocumentID:  rc.Document.ID,
 		RecipientID: pgtype.UUID{Bytes: rc.Recipient.ID, Valid: true},
 	})
@@ -332,30 +501,19 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 		writeInternalError(w, err)
 		return
 	}
-	allowedSet := map[string]*generated.DocumentField{}
-	for _, f := range allowed {
-		allowedSet[f.ID.String()] = f
+	prepared, validationErr := prepareSignerFieldValues(allowed, in.Values)
+	if validationErr != nil {
+		writeError(w, validationErr.status, validationErr.message)
+		return
 	}
-	updated := make([]map[string]any, 0, len(in.Values))
-	for _, v := range in.Values {
-		f, ok := allowedSet[v.FieldID]
-		if !ok {
-			writeError(w, http.StatusForbidden, "field_id not assigned to this recipient: "+v.FieldID)
-			return
-		}
-		if f.Type == "signature" {
-			writeError(w, http.StatusBadRequest, "signature fields are signed, not filled: "+v.FieldID)
-			return
-		}
-		val := strings.TrimSpace(v.Value)
-		if f.Required && val == "" {
-			writeError(w, http.StatusBadRequest, "field is required: "+v.FieldID)
-			return
-		}
-		row, err := s.Queries.UpdateFieldValue(r.Context(), generated.UpdateFieldValueParams{
-			ID:         f.ID,
-			DocumentID: rc.Document.ID,
-			Value:      textOrNull(val),
+	updated := make([]map[string]any, 0, len(prepared))
+	pendingAudits := make([]audit.PendingEvent, 0, len(prepared))
+	for _, item := range prepared {
+		row, err := q.UpdateFieldValue(r.Context(), generated.UpdateFieldValueParams{
+			ID:          item.field.ID,
+			DocumentID:  rc.Document.ID,
+			Value:       textOrNull(item.value),
+			RecipientID: pgtype.UUID{Bytes: rc.Recipient.ID, Valid: true},
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			// The document went terminal between the pre-check and this write (or the
@@ -367,24 +525,50 @@ func (s *Server) handleSignerSubmitFields(w http.ResponseWriter, r *http.Request
 			writeInternalError(w, err)
 			return
 		}
-		_, _ = s.Audit.Log(r.Context(), audit.Entry{
+		fieldAuditPayload, err := bindSignerNoticeAuditPayload(noticeEvidence, map[string]any{
+			"field_id":   item.field.ID.String(),
+			"type":       item.field.Type,
+			"label":      item.field.Label.String,
+			"value_len":  len(item.value),
+			"value_hash": hashFieldValueForAudit(item.value),
+		})
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		pendingAudit, err := s.Audit.LogTx(r.Context(), tx, audit.Entry{
 			OrgID:       rc.Document.OrgID,
 			DocumentID:  &rc.Document.ID,
 			RecipientID: &rc.Recipient.ID,
 			Kind:        audit.KindDocumentFieldFill,
 			IP:          clientIP(r),
 			UserAgent:   r.UserAgent(),
-			Payload: map[string]any{
-				"field_id":   f.ID.String(),
-				"type":       f.Type,
-				"label":      f.Label.String,
-				"value_len":  len(val),
-				"value_hash": hashFieldValueForAudit(val),
-			},
+			Payload:     fieldAuditPayload,
 		})
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		pendingAudits = append(pendingAudits, pendingAudit)
 		updated = append(updated, fieldToDTO(row))
 	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	for _, pending := range pendingAudits {
+		s.Audit.Publish(pending)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"updated": updated, "count": len(updated)})
+}
+
+func recipientCanFillFields(status string) bool {
+	switch status {
+	case "pending", "sent", "viewed":
+		return true
+	default:
+		return false
+	}
 }
 
 // fieldToDTO renders one document_fields row for the JSON API. The

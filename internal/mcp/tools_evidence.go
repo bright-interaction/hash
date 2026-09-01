@@ -4,10 +4,14 @@
 package mcp
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -27,7 +31,7 @@ func registerEvidenceTools(s *Server, d Deps) {
 	// standalone audit certificate, base64-encoded. UNGATED (like the REST
 	// /final-pdf + /audit-cert routes) so an agent on ANY plan can complete the
 	// lifecycle and hand off the signed contract without a REST/UI fallback. The
-	// paid evidence_bundle gate stays reserved for the court-ready package only.
+	// paid evidence_bundle gate stays reserved for the verifiable package only.
 	if d.Storage != nil {
 		downloadTool := func(name, desc, notReady string, key func(*generated.Document) (string, bool)) ToolDef {
 			return ToolDef{
@@ -62,7 +66,20 @@ func registerEvidenceTools(s *Server, d Deps) {
 					if !ok {
 						return nil, errors.New(notReady)
 					}
-					body, err := d.Storage.Get(r.Context(), objKey)
+					expected, err := evidenceArtifactDigest(doc, objKey)
+					if err != nil {
+						return nil, err
+					}
+					versionID, pinned, err := evidenceArtifactVersion(doc, objKey)
+					if err != nil {
+						return nil, err
+					}
+					var body []byte
+					if pinned {
+						body, err = d.Storage.GetVerifiedVersion(r.Context(), objKey, versionID, expected)
+					} else {
+						body, _, err = d.Storage.ResolveVerifiedLegacy(r.Context(), objKey, expected)
+					}
 					if err != nil {
 						return nil, err
 					}
@@ -77,7 +94,7 @@ func registerEvidenceTools(s *Server, d Deps) {
 		}
 		s.RegisterTool(downloadTool(
 			"download_final_pdf",
-			"Download the executed (signed) final PDF for a completed document, base64-encoded. This is the deliverable to hand off the signed contract; available on ANY plan (unlike the court-ready evidence bundle).",
+			"Download the executed (signed) final PDF for a completed document, base64-encoded. This is the deliverable to hand off the signed contract; available on ANY plan (unlike the cryptographically verifiable evidence bundle).",
 			"final pdf not yet rendered - document is not completed",
 			func(dc *generated.Document) (string, bool) { return dc.FinalPdfKey.String, dc.FinalPdfKey.Valid },
 		))
@@ -96,7 +113,7 @@ func registerEvidenceTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:        "get_evidence_manifest",
 		MinFeature:  "evidence_bundle", // paid-feature gate, mirroring the REST evidence-bundle download
-		Description: "Return just the evidence-bundle manifest for a terminal document (completed/declined/voided/expired): SHA-256 hashes of the final PDF, audit cert, events feed, version history, public key. Cheap preview before the full bundle download.",
+		Description: "Return the signed evidence-bundle manifest for a completed top-level document or envelope: hashes of the exact final PDF, audit certificate, ceremony events, version history, and independent certificate/export keys. Documents containing unverified legacy QES records are blocked rather than relabeled as qualified signatures.",
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid"),
 		}, []string{"document_id"}),
@@ -124,8 +141,11 @@ func registerEvidenceTools(s *Server, d Deps) {
 			}
 			res, err := d.Evidence.Build(r.Context(), doc)
 			if err != nil {
-				if errors.Is(err, evidence.ErrNotTerminal) {
-					return nil, errors.New("evidence bundle only available for terminal documents")
+				switch {
+				case errors.Is(err, evidence.ErrEvidenceUnavailable):
+					return nil, errors.New("evidence bundle only available for a completed top-level document or envelope")
+				case errors.Is(err, evidence.ErrUnboundLegacyQES):
+					return nil, errors.New("evidence manifest blocked: document contains unverified legacy QES material")
 				}
 				return nil, err
 			}
@@ -136,7 +156,7 @@ func registerEvidenceTools(s *Server, d Deps) {
 	s.RegisterTool(ToolDef{
 		Name:        "export_evidence_package",
 		MinFeature:  "evidence_bundle", // paid-feature gate, mirroring the REST evidence-bundle download
-		Description: "Build the court-ready evidence PDF bundle for a terminal document and return it base64-encoded. Contains the signed final PDF as the visible body + machine-readable attachments (manifest.json, events.json, versions.json, public-key.pem, optional cert.ots). Sender-side tool only.",
+		Description: "Build a cryptographically verifiable evidence PDF bundle for a completed top-level document or envelope and return it base64-encoded. Documents containing unverified legacy QES records are blocked rather than relabeled as qualified signatures. Sender-side tool only; evidentiary sufficiency is transaction-specific.",
 		InputSchema: schemaObject(map[string]any{
 			"document_id": stringSchema("document uuid"),
 		}, []string{"document_id"}),
@@ -164,22 +184,31 @@ func registerEvidenceTools(s *Server, d Deps) {
 			}
 			res, err := d.Evidence.Build(r.Context(), doc)
 			if err != nil {
-				if errors.Is(err, evidence.ErrNotTerminal) {
-					return nil, errors.New("evidence bundle only available for terminal documents")
+				switch {
+				case errors.Is(err, evidence.ErrEvidenceUnavailable):
+					return nil, errors.New("evidence bundle only available for a completed top-level document or envelope")
+				case errors.Is(err, evidence.ErrUnboundLegacyQES):
+					return nil, errors.New("evidence export blocked: document contains unverified legacy QES material")
 				}
 				return nil, err
 			}
-			_, _ = d.Audit.Log(r.Context(), audit.Entry{
+			if d.Audit == nil {
+				return nil, errors.New("evidence export audit logger is unavailable")
+			}
+			if _, err := d.Audit.Log(r.Context(), audit.Entry{
 				OrgID:       u.OrgID,
 				ActorUserID: &u.UserID,
 				DocumentID:  &doc.ID,
 				Kind:        audit.KindDocumentUpdated,
 				Payload: map[string]any{
-					"via":               "mcp",
-					"tool":              "export_evidence_package",
-					"manifest_anchored": res.Manifest.OpenTimestamps != nil,
+					"via":                               "mcp",
+					"tool":                              "export_evidence_package",
+					"opentimestamps_attachment_present": res.Manifest.OpenTimestamps != nil,
+					"opentimestamps_verified":           false,
 				},
-			})
+			}); err != nil {
+				return nil, errors.New("could not record evidence export")
+			}
 			return map[string]any{
 				"filename":   res.Filename,
 				"pdf_base64": base64.StdEncoding.EncodeToString(res.Bytes),
@@ -188,4 +217,61 @@ func registerEvidenceTools(s *Server, d Deps) {
 			}, nil
 		},
 	})
+}
+
+func evidenceArtifactDigest(doc *generated.Document, key string) ([]byte, error) {
+	if doc == nil {
+		return nil, errors.New("document is required")
+	}
+	if doc.FinalPdfKey.Valid && key == doc.FinalPdfKey.String {
+		if len(doc.FinalPdfSha) != sha256.Size {
+			return nil, errors.New("final pdf has no valid committed SHA-256")
+		}
+		return doc.FinalPdfSha, nil
+	}
+	if doc.AuditCertKey.Valid && key == doc.AuditCertKey.String {
+		if len(doc.AuditCertSha256) == sha256.Size {
+			return doc.AuditCertSha256, nil
+		}
+		if doc.EvidenceVersionPinsRequired {
+			return nil, errors.New("audit certificate has no valid committed SHA-256")
+		}
+		name := path.Base(key)
+		if !strings.HasPrefix(name, "audit-") || !strings.HasSuffix(name, ".pdf") {
+			return nil, errors.New("audit certificate is not content-addressed")
+		}
+		raw := strings.TrimSuffix(strings.TrimPrefix(name, "audit-"), ".pdf")
+		if len(raw) != sha256.Size*2 {
+			return nil, errors.New("audit certificate key has an invalid SHA-256")
+		}
+		digest, err := hex.DecodeString(raw)
+		if err != nil {
+			return nil, errors.New("audit certificate key has an invalid SHA-256")
+		}
+		return digest, nil
+	}
+	return nil, errors.New("storage key is not a committed document artifact")
+}
+
+func evidenceArtifactVersion(doc *generated.Document, key string) (string, bool, error) {
+	if doc == nil {
+		return "", false, errors.New("document is required")
+	}
+	var versionID string
+	var valid bool
+	switch {
+	case doc.FinalPdfKey.Valid && key == doc.FinalPdfKey.String:
+		versionID, valid = doc.FinalPdfVersionID.String, doc.FinalPdfVersionID.Valid
+	case doc.AuditCertKey.Valid && key == doc.AuditCertKey.String:
+		versionID, valid = doc.AuditCertVersionID.String, doc.AuditCertVersionID.Valid
+	default:
+		return "", false, errors.New("storage key is not a committed document artifact")
+	}
+	if valid && strings.TrimSpace(versionID) != "" {
+		return versionID, true, nil
+	}
+	if doc.EvidenceVersionPinsRequired {
+		return "", false, errors.New("document artifact is missing its required object VersionId")
+	}
+	return "", false, nil
 }

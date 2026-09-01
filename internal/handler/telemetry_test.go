@@ -4,8 +4,19 @@
 package handler
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
+
+func TestSignerTelemetryFailsClosedWithoutServerEnforcedConsent(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/sign/forged-token/telemetry", nil)
+	rec := httptest.NewRecorder()
+	(&Server{}).handleSignerTelemetry(rec, req)
+	if rec.Code != http.StatusGone {
+		t.Fatalf("telemetry status = %d, want %d", rec.Code, http.StatusGone)
+	}
+}
 
 func TestClassifyUA(t *testing.T) {
 	cases := []struct {
@@ -67,5 +78,19 @@ func TestValidTelemetryKinds(t *testing.T) {
 		if validTelemetryKinds[k] {
 			t.Errorf("%q should NOT be valid", k)
 		}
+	}
+}
+
+func TestBlockViewedRequiresBlockID(t *testing.T) {
+	for _, blockID := range []string{"", " ", "\t"} {
+		if validTelemetryEvent(telemetryEvent{Kind: "block.viewed", BlockID: blockID}) {
+			t.Errorf("block.viewed with block_id %q should be rejected", blockID)
+		}
+	}
+	if !validTelemetryEvent(telemetryEvent{Kind: "block.viewed", BlockID: "block-1"}) {
+		t.Error("block.viewed with a block id should be accepted")
+	}
+	if !validTelemetryEvent(telemetryEvent{Kind: "session.start"}) {
+		t.Error("non-block events must not require a block id")
 	}
 }

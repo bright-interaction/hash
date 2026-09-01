@@ -39,7 +39,6 @@ package eidas
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -59,6 +58,21 @@ const (
 	TierAES Tier = "AES"
 	TierQES Tier = "QES"
 )
+
+var ErrHigherTierUnavailable = errors.New("active AES/QES routing rules are unavailable until those signing tiers are production-capable")
+
+// ValidateRuleActivation prevents API clients from creating or reactivating
+// a rule that makes matching documents unsendable in this SES-only release.
+// Inactive higher-tier rules may remain visible for migration or deletion.
+func ValidateRuleActivation(t Tier, active bool) error {
+	if !t.Valid() {
+		return errors.New("required tier must be SES, AES, or QES")
+	}
+	if active && t != TierSES {
+		return ErrHigherTierUnavailable
+	}
+	return nil
+}
 
 // Cmp returns negative if a is lower than b, 0 if equal, positive if
 // higher. Unknown values sort low.
@@ -131,20 +145,31 @@ func (e *Engine) Evaluate(ctx context.Context, orgID uuid.UUID, in EvaluateInput
 	if err != nil {
 		return Decision{}, fmt.Errorf("eidas: list rules: %w", err)
 	}
-	out := Decision{RequiredTier: TierSES, EvaluatedCount: len(rules)}
+	return evaluateActiveRules(rules, in)
+}
+
+func evaluateActiveRules(rules []*generated.EidasRoutingRule, in EvaluateInput) (Decision, error) {
+	// Keep the public response shape stable when no rule matches. A nil slice
+	// serializes as JSON null, which forces every API consumer to special-case
+	// the ordinary "no matches" result instead of iterating an empty array.
+	out := Decision{
+		RequiredTier:   TierSES,
+		MatchedRules:   []MatchedRule{},
+		EvaluatedCount: len(rules),
+	}
 	for _, r := range rules {
-		match, err := matchPredicate(r.PredicateJson, in)
-		if err != nil {
-			// Soft-fail a single bad predicate: log via the audit log
-			// in the caller; here we skip the rule so one typo doesn't
-			// stop a deliberate sender's send.
-			continue
-		}
-		if !match {
-			continue
+		if r == nil {
+			return Decision{}, errors.New("eidas: active rule row is nil")
 		}
 		t := Tier(r.RequiredTier)
-		if !t.Valid() {
+		if err := ValidateRule(r.PredicateJson, t); err != nil {
+			return Decision{}, fmt.Errorf("eidas: active rule %q (%s) is invalid: %w", r.Name, r.ID, err)
+		}
+		match, err := matchPredicate(r.PredicateJson, in)
+		if err != nil {
+			return Decision{}, fmt.Errorf("eidas: evaluate active rule %q (%s): %w", r.Name, r.ID, err)
+		}
+		if !match {
 			continue
 		}
 		out.MatchedRules = append(out.MatchedRules, MatchedRule{
@@ -204,66 +229,10 @@ func (e *GuardError) Error() string {
 	)
 }
 
-// SeedSwedishDefaults inserts a sensible starter rule set for a Swedish
-// org. Idempotent: skips rules whose names already exist on the org.
-// Wired into the org-onboarding path AND callable from the settings UI
-// "Restore defaults" button.
+// SeedSwedishDefaults is retained as a fail-closed compatibility surface.
+// Every historic default selected AES or QES and included legal assumptions
+// the product cannot substantiate. It must not write until those ceremonies
+// exist and the defaults receive transaction-specific legal review.
 func (e *Engine) SeedSwedishDefaults(ctx context.Context, orgID uuid.UUID) error {
-	existing, err := e.Q.ListEIDASRules(ctx, orgID)
-	if err != nil {
-		return err
-	}
-	have := map[string]bool{}
-	for _, r := range existing {
-		have[r.Name] = true
-	}
-	defaults := []struct {
-		name      string
-		priority  int32
-		predicate string
-		tier      Tier
-		reason    string
-	}{
-		{
-			name:      "Sweden: AES on contracts over 100k SEK",
-			priority:  10,
-			predicate: `{"field":"amount","op":">=","value":100000}`,
-			tier:      TierAES,
-			reason:    "Contracts at or above 100,000 SEK should be identity-bound (AES) to reduce repudiation risk.",
-		},
-		{
-			name:      "Sweden: QES on contracts over 1M SEK",
-			priority:  5,
-			predicate: `{"field":"amount","op":">=","value":1000000}`,
-			tier:      TierQES,
-			reason:    "Million-SEK contracts go through a QTSP (BankID via Idura/Signicat) for QES-grade non-repudiation.",
-		},
-		{
-			name:      "Sweden: AES on healthcare contracts",
-			priority:  20,
-			predicate: `{"field":"document_type","op":"==","value":"healthcare"}`,
-			tier:      TierAES,
-			reason:    "Healthcare contracts in Sweden routinely require BankID; AES is the floor.",
-		},
-	}
-	for _, d := range defaults {
-		if have[d.name] {
-			continue
-		}
-		if _, err := e.Q.InsertEIDASRule(ctx, generated.InsertEIDASRuleParams{
-			OrgID:         orgID,
-			Name:          d.name,
-			Priority:      d.priority,
-			PredicateJson: json.RawMessage(d.predicate),
-			RequiredTier:  string(d.tier),
-			Reason:        d.reason,
-			Active:        true,
-		}); err != nil {
-			return fmt.Errorf("seed %q: %w", d.name, err)
-		}
-	}
-	return nil
+	return ErrHigherTierUnavailable
 }
-
-// guard: keep the errors import alive while the package matures.
-var _ = errors.New

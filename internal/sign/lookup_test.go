@@ -54,6 +54,93 @@ func TestCheckMagicLinkExpiry_NilGuards(t *testing.T) {
 	}
 }
 
+func TestCheckActiveCeremonyAccess(t *testing.T) {
+	for _, status := range []string{"sent", "in_progress", "changes_requested"} {
+		t.Run(status+" is active", func(t *testing.T) {
+			if err := checkActiveCeremonyAccess(&generated.Document{Status: status}); err != nil {
+				t.Fatalf("active ceremony rejected: %v", err)
+			}
+		})
+	}
+	for _, status := range []string{"", "draft", "completed", "voided", "declined", "expired"} {
+		t.Run(status+" is rejected", func(t *testing.T) {
+			if err := checkActiveCeremonyAccess(&generated.Document{Status: status}); !errors.Is(err, ErrDocumentNotSignable) {
+				t.Fatalf("got %v, want ErrDocumentNotSignable", err)
+			}
+		})
+	}
+	if err := checkActiveCeremonyAccess(nil); !errors.Is(err, ErrDocumentNotSignable) {
+		t.Fatalf("nil document got %v, want ErrDocumentNotSignable", err)
+	}
+}
+
+func TestCheckCompletedArtifactAccess(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	completed := &generated.Document{
+		Status:      "completed",
+		FinalPdfKey: pgtype.Text{String: "org/o/documents/d/final.pdf", Valid: true},
+	}
+
+	for _, status := range []string{"signed", "accepted"} {
+		t.Run("completed "+status+" recipient may download", func(t *testing.T) {
+			row := &generated.GetRecipientByTokenHashRow{
+				Status:              status,
+				MagicTokenExpiresAt: ts(now.Add(time.Hour)),
+			}
+			if err := checkCompletedArtifactAccess(row, completed, now); err != nil {
+				t.Fatalf("completed artifact access rejected: %v", err)
+			}
+		})
+	}
+
+	cases := []struct {
+		name string
+		row  *generated.GetRecipientByTokenHashRow
+		doc  *generated.Document
+	}{
+		{"pending recipient", &generated.GetRecipientByTokenHashRow{Status: "pending"}, completed},
+		{"viewed recipient", &generated.GetRecipientByTokenHashRow{Status: "viewed"}, completed},
+		{"active document", &generated.GetRecipientByTokenHashRow{Status: "signed"}, &generated.Document{Status: "in_progress", FinalPdfKey: completed.FinalPdfKey}},
+		{"revised draft", &generated.GetRecipientByTokenHashRow{Status: "signed", MagicTokenExpiresAt: ts(now.Add(time.Hour))}, &generated.Document{Status: "draft", FinalPdfKey: completed.FinalPdfKey}},
+		{"voided document", &generated.GetRecipientByTokenHashRow{Status: "signed", MagicTokenExpiresAt: ts(now.Add(time.Hour))}, &generated.Document{Status: "voided", FinalPdfKey: completed.FinalPdfKey}},
+		{"missing artifact", &generated.GetRecipientByTokenHashRow{Status: "signed"}, &generated.Document{Status: "completed"}},
+		{"blank artifact key", &generated.GetRecipientByTokenHashRow{Status: "signed"}, &generated.Document{Status: "completed", FinalPdfKey: pgtype.Text{Valid: true}}},
+		{"missing token expiry", &generated.GetRecipientByTokenHashRow{Status: "signed"}, completed},
+		{"expired token", &generated.GetRecipientByTokenHashRow{Status: "signed", MagicTokenExpiresAt: ts(now.Add(-time.Second))}, completed},
+		{"token expiring now", &generated.GetRecipientByTokenHashRow{Status: "signed", MagicTokenExpiresAt: ts(now)}, completed},
+		{"nil recipient", nil, completed},
+		{"nil document", &generated.GetRecipientByTokenHashRow{Status: "signed"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+" is rejected", func(t *testing.T) {
+			if err := checkCompletedArtifactAccess(tc.row, tc.doc, now); !errors.Is(err, ErrCompletedArtifactUnavailable) {
+				t.Fatalf("got %v, want ErrCompletedArtifactUnavailable", err)
+			}
+		})
+	}
+}
+
+func TestCompletedRecipientTokenStillRejectsMutationAccess(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	row := &generated.GetRecipientByTokenHashRow{
+		Status:              "signed",
+		MagicTokenExpiresAt: ts(now.Add(time.Hour)),
+	}
+	doc := &generated.Document{
+		Status:      "completed",
+		FinalPdfKey: pgtype.Text{String: "org/o/documents/d/final.pdf", Valid: true},
+	}
+	if err := checkActiveCeremonyAccess(doc); !errors.Is(err, ErrDocumentNotSignable) {
+		t.Fatalf("terminal document must fail the ordinary route state gate, got %v", err)
+	}
+	if err := checkCompletedArtifactAccess(row, doc, now); err != nil {
+		t.Fatalf("the read-only completed artifact route should remain available: %v", err)
+	}
+	if err := checkCompletedArtifactAccess(row, doc, now.Add(2*time.Hour)); !errors.Is(err, ErrCompletedArtifactUnavailable) {
+		t.Fatalf("expired completed artifact credential should be rejected, got %v", err)
+	}
+}
+
 func TestEngineNow_DefaultsToTimeNow(t *testing.T) {
 	e := &Engine{}
 	before := time.Now()

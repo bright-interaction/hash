@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
@@ -68,14 +70,6 @@ func (w *worker) sendQuotaWarning(ctx context.Context, row *generated.ListSubscr
 		slog.Warn("quota_warnings: list users", "org_id", row.OrgID, "err", err)
 		return
 	}
-	if len(users) == 0 {
-		slog.Info("quota_warnings: no users on org, skipping", "org_id", row.OrgID)
-		// Still mark sent so we don't re-scan this row every tick for an
-		// org with no logins.
-		_ = w.queries.MarkQuotaWarningSent(ctx, row.SubscriptionID)
-		return
-	}
-
 	periodResetAt := ""
 	if row.CurrentPeriodEnd.Valid {
 		periodResetAt = row.CurrentPeriodEnd.Time.UTC().Format("January 2, 2006")
@@ -97,19 +91,47 @@ func (w *worker) sendQuotaWarning(ctx context.Context, row *generated.ListSubscr
 		return
 	}
 
-	for _, u := range users {
-		mctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		if err := w.mailer.Send(mctx, dispatch.Message{To: u.Email, Subject: subj, HTML: html, Text: text}); err != nil {
-			slog.Warn("quota_warnings: send", "to", u.Email, "err", err)
-		}
-		cancel()
+	if w.pool == nil || w.audit == nil {
+		slog.Warn("quota_warnings: atomic dependencies unavailable", "org_id", row.OrgID)
+		return
+	}
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		slog.Warn("quota_warnings: begin", "err", err)
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Serialize all worker replicas on the subscription and recheck the period
+	// marker under the lock. This prevents duplicate queue rows when two scans
+	// observe the same warning candidate before either marks it.
+	var lastSent, periodStart pgtype.Timestamptz
+	if err := tx.QueryRow(ctx, `
+		SELECT last_quota_warning_sent_at, current_period_start
+		FROM org_subscriptions
+		WHERE id = $1
+		FOR UPDATE`, row.SubscriptionID).Scan(&lastSent, &periodStart); err != nil {
+		slog.Warn("quota_warnings: lock subscription", "err", err)
+		return
+	}
+	if lastSent.Valid && periodStart.Valid && !lastSent.Time.Before(periodStart.Time) {
+		return
 	}
 
-	if err := w.queries.MarkQuotaWarningSent(ctx, row.SubscriptionID); err != nil {
+	q := w.queries.WithTx(tx)
+	for _, u := range users {
+		if _, err := q.EnqueueEmailDelivery(ctx, generated.EnqueueEmailDeliveryParams{
+			ToEmail: u.Email, Subject: subj, HtmlBody: html, TextBody: text, HeadersJson: []byte(`{}`),
+		}); err != nil {
+			slog.Warn("quota_warnings: enqueue", "to", dispatch.MaskEmail(u.Email), "err", dispatch.ScrubEmails(err.Error()))
+			return
+		}
+	}
+	if err := q.MarkQuotaWarningSent(ctx, row.SubscriptionID); err != nil {
 		slog.Warn("quota_warnings: mark sent", "err", err)
 		return
 	}
-	_, _ = w.audit.Log(ctx, audit.Entry{
+	pending, err := w.audit.LogTx(ctx, tx, audit.Entry{
 		OrgID: row.OrgID,
 		Kind:  audit.KindBillingQuotaWarning80,
 		Payload: map[string]any{
@@ -118,8 +140,21 @@ func (w *worker) sendQuotaWarning(ctx context.Context, row *generated.ListSubscr
 			"used":       used,
 			"limit":      limit,
 			"pct":        pct,
+			"recipients": len(users),
 		},
 	})
+	if err != nil {
+		slog.Warn("quota_warnings: audit", "err", err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		slog.Warn("quota_warnings: commit", "err", err)
+		return
+	}
+	w.audit.Publish(pending)
+	if len(users) == 0 {
+		slog.Info("quota_warnings: no users on org, marked for period", "org_id", row.OrgID)
+	}
 }
 
 // pickTrippedQuota returns whichever quota has crossed the threshold,

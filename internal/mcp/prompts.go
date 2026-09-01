@@ -49,8 +49,8 @@ Process:
      initial blocks_json containing: heading "Consulting Agreement",
      paragraphs covering parties, term, fees, scope, IP, confidentiality,
      termination, and governing law.
-  3. Call add_recipient twice (role="signer") for the client and the
-     provider.
+	  3. Call add_recipient twice: role="client" for the client and
+	     role="provider" for the provider.
   4. Call add_signature_field for each signer (recipient_role="client"
      and "provider").
   5. Call list_document_fields to confirm every signer has a signature

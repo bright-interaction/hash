@@ -97,28 +97,34 @@ func registerBrandingTools(s *Server, d Deps) {
 			merged := mergeForMCP(loadOrgBranding(r, d, u.OrgID), in.PrimaryHex, in.AccentHex,
 				in.SurfaceHex, in.TextHex, in.MutedHex, in.LogoURL, in.LogoAlt,
 				in.FontHeading, in.FontBody, in.SignatureColor)
-			row, err := d.Queries.UpsertOrgBranding(r.Context(), generated.UpsertOrgBrandingParams{
-				OrgID:          u.OrgID,
-				PrimaryHex:     merged.PrimaryHex,
-				AccentHex:      merged.AccentHex,
-				SurfaceHex:     merged.SurfaceHex,
-				TextHex:        merged.TextHex,
-				MutedHex:       merged.MutedHex,
-				LogoUrl:        merged.LogoURL,
-				LogoAlt:        merged.LogoAlt,
-				FontHeading:    merged.FontHeading,
-				FontBody:       merged.FontBody,
-				SignatureColor: merged.SignatureColor,
-			})
+			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
+				func(q *generated.Queries) (*generated.OrgBranding, error) {
+					return q.UpsertOrgBranding(r.Context(), generated.UpsertOrgBrandingParams{
+						OrgID:          u.OrgID,
+						PrimaryHex:     merged.PrimaryHex,
+						AccentHex:      merged.AccentHex,
+						SurfaceHex:     merged.SurfaceHex,
+						TextHex:        merged.TextHex,
+						MutedHex:       merged.MutedHex,
+						LogoUrl:        merged.LogoURL,
+						LogoAlt:        merged.LogoAlt,
+						FontHeading:    merged.FontHeading,
+						FontBody:       merged.FontBody,
+						SignatureColor: merged.SignatureColor,
+					})
+				},
+				func(*generated.OrgBranding) audit.Entry {
+					return audit.Entry{
+						OrgID:       u.OrgID,
+						ActorUserID: &u.UserID,
+						Kind:        audit.KindDocumentUpdated,
+						Payload:     map[string]any{"via": "mcp", "tool": "set_org_branding"},
+					}
+				},
+			)
 			if err != nil {
 				return nil, err
 			}
-			_, _ = d.Audit.Log(r.Context(), audit.Entry{
-				OrgID:       u.OrgID,
-				ActorUserID: &u.UserID,
-				Kind:        audit.KindDocumentUpdated,
-				Payload:     map[string]any{"via": "mcp", "tool": "set_org_branding"},
-			})
 			return brandingToMap(branding.Branding{
 				PrimaryHex:     row.PrimaryHex,
 				AccentHex:      row.AccentHex,

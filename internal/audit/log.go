@@ -26,29 +26,35 @@ import (
 // Event kinds are namespaced strings ,  every transition the platform reports
 // to the outside world uses one of these.
 const (
-	KindDocumentCreated   = "document.created"
-	KindDocumentUpdated   = "document.updated"
-	KindDocumentSent      = "document.sent"
-	KindDocumentOpened    = "document.opened" // email beacon hit
-	KindDocumentViewed    = "document.viewed" // signer link click
-	KindDocumentFieldFill = "document.field_filled"
-	KindDocumentSigned    = "document.signed"   // per-recipient signature captured
-	KindDocumentAccepted  = "document.accepted" // acknowledgement-mode accept (no signature)
-	KindDocumentCompleted = "document.completed"
-	KindDocumentDeclined  = "document.declined"
-	KindChangesRequested  = "document.changes_requested"
-	KindDocumentRevised   = "document.revised"
-	KindCommentPosted     = "document.comment_posted"
-	KindDocumentVoided    = "document.voided"
-	KindDocumentExpired   = "document.expired"
-	KindRecipientInvited  = "recipient.invited"
-	KindRecipientBounced  = "recipient.bounced"
-	KindReminderSent      = "reminder.sent"
-	KindWebhookDispatched = "webhook.dispatched"
-	KindWebhookFailed     = "webhook.failed"
-	KindTemplateCreated   = "template.created"
-	KindTemplateUpdated   = "template.updated"
-	KindTemplateArchived  = "template.archived"
+	KindDocumentCreated     = "document.created"
+	KindDocumentUpdated     = "document.updated"
+	KindDocumentSent        = "document.sent"
+	KindDocumentOpened      = "document.opened" // email beacon hit
+	KindDocumentViewed      = "document.viewed" // signer link click
+	KindDocumentFieldFill   = "document.field_filled"
+	KindDocumentSigned      = "document.signed"   // per-recipient signature captured
+	KindDocumentAccepted    = "document.accepted" // acknowledgement-mode accept (no signature)
+	KindDocumentCompleted   = "document.completed"
+	KindDocumentDeclined    = "document.declined"
+	KindChangesRequested    = "document.changes_requested"
+	KindDocumentRevised     = "document.revised"
+	KindCommentPosted       = "document.comment_posted"
+	KindDocumentVoided      = "document.voided"
+	KindDocumentExpired     = "document.expired"
+	KindRecipientCreated    = "recipient.created"
+	KindRecipientInvited    = "recipient.invited"
+	KindRecipientUpdated    = "recipient.updated"
+	KindRecipientDeleted    = "recipient.deleted"
+	KindRecipientBounced    = "recipient.bounced"
+	KindReminderSent        = "reminder.sent"
+	KindMemberCreated       = "member.created"
+	KindMemberIdentityBound = "member.identity_bound"
+	KindWebhookReceived     = "webhook.received"
+	KindWebhookDispatched   = "webhook.dispatched"
+	KindWebhookFailed       = "webhook.failed"
+	KindTemplateCreated     = "template.created"
+	KindTemplateUpdated     = "template.updated"
+	KindTemplateArchived    = "template.archived"
 
 	// v1.1: first-class kinds for the new feature surfaces. Previously
 	// these events piggy-backed on KindDocumentUpdated with a
@@ -119,12 +125,28 @@ type Entry struct {
 	Payload     map[string]any
 }
 
-func (l *Logger) Log(ctx context.Context, e Entry) (uuid.UUID, error) {
+// PendingEvent is an audit row appended inside a caller-owned transaction but
+// not yet published to post-commit hooks. Call Publish only after that
+// transaction commits successfully.
+type PendingEvent struct {
+	ID    uuid.UUID
+	Entry Entry
+}
+
+type preparedEntry struct {
+	entry     Entry
+	raw       []byte
+	ipAddr    *netip.Addr
+	ipString  string
+	createdAt time.Time
+}
+
+func prepareEntry(e Entry) (preparedEntry, error) {
 	if e.OrgID == uuid.Nil {
-		return uuid.Nil, errors.New("audit: org_id required")
+		return preparedEntry{}, errors.New("audit: org_id required")
 	}
 	if e.Kind == "" {
-		return uuid.Nil, errors.New("audit: kind required")
+		return preparedEntry{}, errors.New("audit: kind required")
 	}
 	payload := e.Payload
 	if payload == nil {
@@ -132,7 +154,7 @@ func (l *Logger) Log(ctx context.Context, e Entry) (uuid.UUID, error) {
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return uuid.Nil, err
+		return preparedEntry{}, err
 	}
 
 	var ipAddr *netip.Addr
@@ -147,21 +169,17 @@ func (l *Logger) Log(ctx context.Context, e Entry) (uuid.UUID, error) {
 	// hash equals the value read back (otherwise the verifier recomputes a
 	// different created_at and reports false tampering).
 	createdAt := time.Now().UTC().Truncate(time.Microsecond)
+	return preparedEntry{entry: e, raw: raw, ipAddr: ipAddr, ipString: ipStr, createdAt: createdAt}, nil
+}
 
-	// Read-head + insert run inside one transaction guarded by a per-org
-	// advisory lock so concurrent Log calls for the same org serialize and
-	// can't fork the chain. Different orgs use different lock keys.
-	tx, err := l.pool.Begin(ctx)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("audit: begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	q := l.q.WithTx(tx)
+func (l *Logger) append(ctx context.Context, q *generated.Queries, p preparedEntry) (uuid.UUID, error) {
+	e := p.entry
 
 	if err := q.AcquireOrgChainLock(ctx, e.OrgID.String()); err != nil {
 		return uuid.Nil, fmt.Errorf("audit: chain lock: %w", err)
 	}
-	prev, prevErr := q.LatestEventChainHashForOrg(ctx, e.OrgID)
+	head, prevErr := q.LatestEventChainHeadForOrg(ctx, e.OrgID)
+	var prev []byte
 	if prevErr != nil {
 		if !errors.Is(prevErr, pgx.ErrNoRows) {
 			// Fail closed: a transient head-read error must NOT silently write
@@ -171,16 +189,21 @@ func (l *Logger) Log(ctx context.Context, e Entry) (uuid.UUID, error) {
 			return uuid.Nil, fmt.Errorf("audit: read chain head: %w", prevErr)
 		}
 		prev = nil // genuine empty chain (first row in this org)
+	} else {
+		prev = head.RowHash
+		if head.CreatedAt.Valid {
+			p.createdAt = nextAuditTimestamp(p.createdAt, head.CreatedAt.Time)
+		}
 	}
 
 	hin := HashInput{
 		Prev:      prev,
 		OrgID:     e.OrgID,
 		Kind:      e.Kind,
-		IP:        ipStr,
+		IP:        p.ipString,
 		UA:        e.UserAgent,
-		CreatedAt: createdAt,
-		Payload:   raw,
+		CreatedAt: p.createdAt,
+		Payload:   p.raw,
 	}
 	if e.DocumentID != nil {
 		hin.DocID = *e.DocumentID
@@ -199,22 +222,79 @@ func (l *Logger) Log(ctx context.Context, e Entry) (uuid.UUID, error) {
 		RecipientID:   uuidToPg(e.RecipientID),
 		ActorUserID:   uuidToPg(e.ActorUserID),
 		Kind:          e.Kind,
-		Ip:            ipAddr,
+		Ip:            p.ipAddr,
 		Ua:            textOrNull(e.UserAgent),
-		PayloadJson:   raw,
-		PayloadHashed: raw,
+		PayloadJson:   p.raw,
+		PayloadHashed: p.raw,
 		PrevHash:      prev,
 		RowHash:       rowHash,
-		CreatedAt:     pgtype.Timestamptz{Time: createdAt, Valid: true},
+		CreatedAt:     pgtype.Timestamptz{Time: p.createdAt, Valid: true},
 	})
 	if err != nil {
 		slog.Error("audit log insert failed", "kind", e.Kind, "err", err)
 		return uuid.Nil, err
 	}
+	return row.ID, nil
+}
+
+// nextAuditTimestamp preserves the chain's ORDER BY created_at,id invariant
+// when several LogTx calls append inside one transaction. Postgres stores
+// microseconds; strictly increasing timestamps ensure the next head read always
+// selects the row that was just appended, independent of random UUID ordering.
+func nextAuditTimestamp(candidate, previous time.Time) time.Time {
+	candidate = candidate.UTC().Truncate(time.Microsecond)
+	previous = previous.UTC().Truncate(time.Microsecond)
+	if !candidate.After(previous) {
+		return previous.Add(time.Microsecond)
+	}
+	return candidate
+}
+
+// Log writes and commits an independent audit transaction. State-machine
+// callers that already own a transaction should use LogTx so the legal event
+// and mutation commit atomically.
+func (l *Logger) Log(ctx context.Context, e Entry) (uuid.UUID, error) {
+	p, err := prepareEntry(e)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	tx, err := l.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("audit: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	id, err := l.append(ctx, l.q.WithTx(tx), p)
+	if err != nil {
+		return uuid.Nil, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return uuid.Nil, fmt.Errorf("audit: commit: %w", err)
 	}
-	slog.Debug("audit", "kind", e.Kind, "event_id", row.ID, "org_id", e.OrgID)
+	l.Publish(PendingEvent{ID: id, Entry: e})
+	return id, nil
+}
+
+// LogTx appends an event through a caller-owned transaction. It takes the
+// per-org chain lock after the caller has taken its document row lock, which is
+// the global lock order used by signing state transitions. Hooks are deliberately
+// deferred; call Publish with the returned value only after Commit succeeds.
+func (l *Logger) LogTx(ctx context.Context, tx pgx.Tx, e Entry) (PendingEvent, error) {
+	p, err := prepareEntry(e)
+	if err != nil {
+		return PendingEvent{}, err
+	}
+	id, err := l.append(ctx, l.q.WithTx(tx), p)
+	if err != nil {
+		return PendingEvent{}, err
+	}
+	return PendingEvent{ID: id, Entry: e}, nil
+}
+
+// Publish releases post-commit subscribers for an event appended by LogTx.
+// It performs no database work and is safe to call only after commit.
+func (l *Logger) Publish(p PendingEvent) {
+	e := p.Entry
+	slog.Debug("audit", "kind", e.Kind, "event_id", p.ID, "org_id", e.OrgID)
 	for _, h := range l.hooks {
 		h := h
 		// Hooks run asynchronously with a hard per-hook timeout. The
@@ -231,10 +311,9 @@ func (l *Logger) Log(ctx context.Context, e Entry) (uuid.UUID, error) {
 			}()
 			hctx, cancel := context.WithTimeout(context.Background(), AuditHookTimeout)
 			defer cancel()
-			h(hctx, row.ID, e)
+			h(hctx, p.ID, e)
 		}()
 	}
-	return row.ID, nil
 }
 
 // AuditHookTimeout caps a single subscriber's slot. Tunable in tests via

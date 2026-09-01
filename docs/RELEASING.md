@@ -33,7 +33,7 @@ requires `git-filter-repo` and `gitleaks` on PATH.
 2. Create the public repo (outward):
    ```
    gh repo create bright-interaction/hash --public \
-     --description "EU-sovereign self-hosted e-signing: block editor, hash-chained audit trail, offline-verifiable evidence, agent-native via MCP. Fair-code."
+     --description "Deployment-controlled self-hosted e-signing: block editor, hash-chained audit trail, independently verifiable evidence, agent-native via MCP. Fair-code."
    ```
 3. Mirror and push:
    ```

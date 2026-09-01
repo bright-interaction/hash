@@ -4,18 +4,20 @@
 package handler
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/auth"
-	"github.com/bright-interaction/hash/internal/i18n"
 	"github.com/bright-interaction/hash/internal/sign"
 )
 
@@ -35,7 +37,6 @@ type signerContextResponse struct {
 	SourceKind        string    `json:"source_kind"`
 	RequiresSignature bool      `json:"requires_signature"`
 	RoutingTier       string    `json:"routing_tier"`
-	QESProvider       string    `json:"qes_provider,omitempty"`
 	Recipient         struct {
 		ID     uuid.UUID `json:"id"`
 		Email  string    `json:"email"`
@@ -55,15 +56,57 @@ type signerContextResponse struct {
 }
 
 type signerPrivacyNotice struct {
-	Controller     string `json:"controller"`      // sender org name
-	Processor      string `json:"processor"`       // Hash instance owner
-	ProcessorEmail string `json:"processor_email"` // DPO contact
-	PurposeSummary string `json:"purpose_summary"`
-	LegalBasis     string `json:"legal_basis"` // GDPR Art. 6 cite
-	RetentionYears int    `json:"retention_years"`
-	JurisdictionDP string `json:"jurisdiction_dp"` // supervisory authority
-	PolicyURL      string `json:"policy_url"`
-	DSREndpoint    string `json:"dsr_endpoint"` // POST /sign/{token}/dsr
+	Controller        string                   `json:"controller"`         // sender org name frozen at send
+	ControllerContact string                   `json:"controller_contact"` // sending controller contact frozen at send
+	Processor         string                   `json:"processor"`          // Hash instance owner
+	ProcessorEmail    string                   `json:"processor_email"`    // DPO contact
+	PurposeSummary    string                   `json:"purpose_summary"`
+	LegalBasis        string                   `json:"legal_basis"` // document-specific controller selection
+	RetentionYears    int                      `json:"retention_years"`
+	JurisdictionDP    string                   `json:"jurisdiction_dp"` // supervisory authority
+	PolicyURL         string                   `json:"policy_url"`
+	DSREndpoint       string                   `json:"dsr_endpoint"`  // POST /sign/{token}/dsr
+	NoticeDigest      string                   `json:"notice_digest"` // changes whenever material notice/ceremony context changes
+	Copy              sign.Article13NoticeCopy `json:"copy"`
+}
+
+// signerNoticeDigestHeader carries the exact server-authored notice digest on
+// each participant mutation. It is evidence metadata rather than a credential;
+// the URL token remains the sole bearer secret.
+const signerNoticeDigestHeader = "X-Hash-Notice-Digest"
+
+// requireSignerNoticeAcknowledgement closes the direct-POST bypass around the
+// signer page's Article 13 gate. The canonical server digest (not the untrusted
+// header value) and its canonical snapshot are returned for binding into the
+// resulting durable audit evidence.
+func (s *Server) requireSignerNoticeAcknowledgement(w http.ResponseWriter, r *http.Request, rc *sign.RecipientContext) (sign.Article13NoticeEvidence, bool) {
+	notice, err := s.signerPrivacyNotice(r, rc)
+	if err != nil {
+		writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		return sign.Article13NoticeEvidence{}, false
+	}
+	evidence, err := signerArticle13NoticeEvidence(rc, notice)
+	if err != nil {
+		writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		return sign.Article13NoticeEvidence{}, false
+	}
+	digest := evidence.Digest
+	values := r.Header.Values(signerNoticeDigestHeader)
+	if digest == "" || digest != notice.NoticeDigest || len(values) != 1 || subtle.ConstantTimeCompare([]byte(values[0]), []byte(digest)) != 1 {
+		writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		return sign.Article13NoticeEvidence{}, false
+	}
+	return evidence, true
+}
+
+func bindSignerNoticeAuditPayload(notice sign.Article13NoticeEvidence, payload map[string]any) (map[string]any, error) {
+	if payload == nil {
+		payload = make(map[string]any)
+	}
+	if err := notice.BindAuditPayload(payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
 // handleSignerRoot serves GET /sign/{token}. A browser navigating to the magic
@@ -109,32 +152,94 @@ func (s *Server) handleSignerContext(w http.ResponseWriter, r *http.Request) {
 		RoutingTier:       rc.Document.RoutingTier,
 		Fonts:             []string{"Caveat", "Dancing Script", "Great Vibes", "Sacramento", "Homemade Apple"},
 	}
-	if s.QES != nil && s.QES.Provider != nil && s.QES.Provider.Name() != "noop" {
-		out.QESProvider = s.QES.Provider.Name()
-	}
 	out.Recipient.ID = rc.Recipient.ID
 	out.Recipient.Email = rc.Recipient.Email
 	out.Recipient.Name = rc.Recipient.Name
 	out.Recipient.Role = rc.Recipient.Role
 	out.Recipient.Status = rc.Recipient.Status
 	out.Recipient.Locale = rc.Recipient.Locale
-	controller := s.OrgName
-	if controller == "" {
-		controller = "the sender"
+	privacy, err := s.signerPrivacyNotice(r, rc)
+	if err != nil {
+		// A valid signer token without a trustworthy customer-controller
+		// identity must not render a legally misleading Article 13 notice.
+		writeError(w, http.StatusNotFound, "invalid or expired link")
+		return
 	}
-	loc := i18n.Normalize(rc.Recipient.Locale)
-	out.Privacy = signerPrivacyNotice{
-		Controller:     controller,
-		Processor:      "Bright Interaction AB",
-		ProcessorEmail: "privacy@brightinteraction.com",
-		PurposeSummary: i18n.T(loc, "privacy.purpose", nil),
-		LegalBasis:     i18n.T(loc, "privacy.legalBasis", nil),
-		RetentionYears: 7,
-		JurisdictionDP: "Integritetsskyddsmyndigheten (IMY), Sweden",
-		PolicyURL:      "/legal/privacy",
+	out.Privacy = privacy
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) signerPrivacyNotice(r *http.Request, rc *sign.RecipientContext) (signerPrivacyNotice, error) {
+	if rc == nil || rc.Recipient == nil || rc.Document == nil || rc.ControllerOrg == nil ||
+		rc.ControllerOrg.ID != rc.Document.OrgID {
+		return signerPrivacyNotice{}, sign.ErrSignerControllerUnavailable
+	}
+	confirmation := rc.LawfulBasisConfirmation
+	if confirmation == nil || !confirmation.ConfirmedAt.Valid ||
+		confirmation.DocumentID != rc.Document.ID || confirmation.OrgID != rc.Document.OrgID ||
+		strings.TrimSpace(confirmation.LawfulBasis) != strings.TrimSpace(rc.Document.LawfulBasis) ||
+		strings.TrimSpace(confirmation.ControllerName) == "" ||
+		strings.TrimSpace(confirmation.ControllerContact) == "" {
+		return signerPrivacyNotice{}, sign.ErrSignerLawfulBasisUnavailable
+	}
+	controller := strings.TrimSpace(confirmation.ControllerName)
+	controllerContact := strings.TrimSpace(confirmation.ControllerContact)
+	legalBasis, err := article13.LegalBasisDisclosureV1(rc.Document.LawfulBasis)
+	if err != nil {
+		return signerPrivacyNotice{}, err
+	}
+	operator := strings.TrimSpace(s.OperatorName)
+	privacyContact := strings.TrimSpace(s.PrivacyContact)
+	supervisoryAuthority := strings.TrimSpace(s.SupervisoryAuthority)
+	policyURL := strings.TrimSpace(s.PrivacyPolicyURL)
+	if operator == "" || privacyContact == "" || supervisoryAuthority == "" || policyURL == "" {
+		return signerPrivacyNotice{}, errors.New("signer privacy disclosure instance identity is unavailable")
+	}
+	if !rc.Document.SentAt.Valid || rc.Document.SentAt.Time.IsZero() {
+		return signerPrivacyNotice{}, sign.ErrSignerLawfulBasisUnavailable
+	}
+	notice := signerPrivacyNotice{
+		Controller:        controller,
+		ControllerContact: controllerContact,
+		Processor:         operator,
+		ProcessorEmail:    privacyContact,
+		// The signer SPA is intentionally English-only until every legal string
+		// has received counsel-reviewed translations. Keep the server-authored
+		// disclosure in that same language so the ceremony cannot mix locales.
+		PurposeSummary: article13.PurposeSummaryV1(rc.Document.Name),
+		LegalBasis:     legalBasis,
+		RetentionYears: article13.RetentionYearsV1,
+		JurisdictionDP: supervisoryAuthority,
+		PolicyURL:      policyURL,
 		DSREndpoint:    "/sign/" + chi.URLParam(r, "token") + "/dsr",
 	}
-	writeJSON(w, http.StatusOK, out)
+	notice.Copy = article13.RenderedCopyV1(rc.Document.Name)
+	evidence, err := signerArticle13NoticeEvidence(rc, notice)
+	if err != nil {
+		return signerPrivacyNotice{}, errors.New("signer privacy disclosure digest is unavailable")
+	}
+	notice.NoticeDigest = evidence.Digest
+	return notice, nil
+}
+
+func signerArticle13NoticeEvidence(rc *sign.RecipientContext, notice signerPrivacyNotice) (sign.Article13NoticeEvidence, error) {
+	if rc == nil || rc.Document == nil || rc.Recipient == nil {
+		return sign.Article13NoticeEvidence{}, sign.ErrInvalidNoticeEvidence
+	}
+	snapshot, err := article13.NewSnapshotForSchema(rc.Document.Article13NoticeSchema, article13.Input{
+		DocumentID: rc.Document.ID, OrgID: rc.Document.OrgID, RecipientID: rc.Recipient.ID,
+		SentAt:     rc.Document.SentAt.Time,
+		Controller: notice.Controller, ControllerContact: notice.ControllerContact,
+		Processor: notice.Processor, ProcessorContact: notice.ProcessorEmail,
+		PurposeSummary: notice.PurposeSummary, LegalBasisDisclosure: notice.LegalBasis,
+		RetentionYears: notice.RetentionYears, SupervisoryAuthority: notice.JurisdictionDP,
+		PolicyURL: notice.PolicyURL, DSRCapability: article13.DSRCapabilitySignerRequest,
+		Copy: notice.Copy,
+	})
+	if err != nil {
+		return sign.Article13NoticeEvidence{}, err
+	}
+	return article13.NewEvidence(snapshot)
 }
 
 func (s *Server) handleSignerDocument(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +267,21 @@ func (s *Server) handleSignerView(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.Sign.MarkViewed(r.Context(), rc, clientIP(r), r.UserAgent()); err != nil {
+	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
+	if !ok {
+		return
+	}
+	if err := s.Sign.MarkViewed(r.Context(), rc, sign.ParticipantResponseEvidence{
+		IP: clientIP(r), UserAgent: r.UserAgent(), Notice: noticeEvidence,
+	}); err != nil {
+		if errors.Is(err, sign.ErrInvalidNoticeEvidence) {
+			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+			return
+		}
+		if errors.Is(err, sign.ErrDocumentNotSignable) {
+			writeError(w, http.StatusConflict, "this document is no longer active")
+			return
+		}
 		writeInternalError(w, err)
 		return
 	}
@@ -185,8 +304,12 @@ func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
+	if !ok {
+		return
+	}
 	var in signerSignInput
-	if err := decodeJSON(r, &in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -195,9 +318,14 @@ func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
 		Font:      in.Font,
 		IP:        clientIP(r),
 		UserAgent: r.UserAgent(),
+		Notice:    noticeEvidence,
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, sign.ErrInvalidNoticeEvidence):
+			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		case errors.Is(err, sign.ErrSignatureTierUnavailable):
+			writeError(w, http.StatusConflict, "AES and QES signing are temporarily unavailable; this document cannot be completed through the SES endpoint")
 		case errors.Is(err, sign.ErrAlreadySigned):
 			writeError(w, http.StatusConflict, "you have already signed this document")
 		case errors.Is(err, sign.ErrDocumentNotSignable):
@@ -208,32 +336,46 @@ func (s *Server) handleSignerSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := signerSignResponse{
-		Status:    res.Status,
-		Completed: res.Completed,
-	}
-	if res.Completed {
-		// 24-hour presigned download for the final PDF.
-		if u, err := s.Storage.PresignGet(r.Context(), res.FinalPDFKey, 24*time.Hour); err == nil {
-			out.FinalPDFURL = u.String()
-		}
+		Status:      res.Status,
+		Completed:   res.Completed,
+		FinalPDFURL: res.FinalPDFURL,
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 // handleSignerAccept records a recipient's acknowledgement (accept) of a
 // no-signature document. The audit event is the record; no signature is captured.
+type signerAcceptInput struct{}
+
 func (s *Server) handleSignerAccept(w http.ResponseWriter, r *http.Request) {
 	rc, ok := s.lookupTokenOrError(w, r)
 	if !ok {
 		return
 	}
-	res, err := s.Sign.Accept(r.Context(), rc, clientIP(r), r.UserAgent())
+	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
+	if !ok {
+		return
+	}
+	var in signerAcceptInput
+	if err := decodeSignerJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := s.Sign.Accept(r.Context(), rc, sign.ParticipantResponseEvidence{
+		IP: clientIP(r), UserAgent: r.UserAgent(), Notice: noticeEvidence,
+	})
 	if err != nil {
 		switch {
+		case errors.Is(err, sign.ErrInvalidNoticeEvidence):
+			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		case errors.Is(err, sign.ErrSignatureTierUnavailable):
+			writeError(w, http.StatusConflict, "AES and QES response flows are temporarily unavailable")
 		case errors.Is(err, sign.ErrAlreadyAccepted):
 			writeError(w, http.StatusConflict, "you have already accepted this document")
 		case errors.Is(err, sign.ErrNotAcknowledgement):
 			writeError(w, http.StatusBadRequest, "this document requires a signature")
+		case errors.Is(err, sign.ErrRecipientNotEligibleForResponse):
+			writeError(w, http.StatusForbidden, "this recipient role cannot acknowledge the document")
 		case errors.Is(err, sign.ErrDocumentNotSignable):
 			writeError(w, http.StatusConflict, "this document is no longer accepting responses")
 		default:
@@ -241,12 +383,7 @@ func (s *Server) handleSignerAccept(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	out := signerSignResponse{Status: res.Status, Completed: res.Completed}
-	if res.Completed && res.FinalPDFKey != "" {
-		if u, err := s.Storage.PresignGet(r.Context(), res.FinalPDFKey, 24*time.Hour); err == nil {
-			out.FinalPDFURL = u.String()
-		}
-	}
+	out := signerSignResponse{Status: res.Status, Completed: res.Completed, FinalPDFURL: res.FinalPDFURL}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -259,14 +396,31 @@ func (s *Server) handleSignerDecline(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
+	if !ok {
+		return
+	}
 	var in signerDeclineInput
-	_ = decodeJSON(r, &in)
-	if err := s.Sign.Decline(r.Context(), rc, in.Reason, clientIP(r), r.UserAgent()); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.Sign.Decline(r.Context(), rc, in.Reason, sign.ParticipantResponseEvidence{
+		IP: clientIP(r), UserAgent: r.UserAgent(), Notice: noticeEvidence,
+	}); err != nil {
 		switch {
+		case errors.Is(err, sign.ErrInvalidNoticeEvidence):
+			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		case errors.Is(err, sign.ErrEnvelopeTransitionUnsupported):
+			writeError(w, http.StatusConflict, "declining an envelope is not supported; ask the sender to void the envelope")
 		case errors.Is(err, sign.ErrDocumentNotSignable):
 			writeError(w, http.StatusConflict, "this document is no longer accepting changes")
 		case errors.Is(err, sign.ErrAlreadySigned):
 			writeError(w, http.StatusConflict, "you have already signed this document")
+		case errors.Is(err, sign.ErrAlreadyAccepted):
+			writeError(w, http.StatusConflict, "you have already acknowledged this document")
+		case errors.Is(err, sign.ErrRecipientNotEligibleForResponse):
+			writeError(w, http.StatusForbidden, "this recipient role cannot decline the document")
 		default:
 			writeInternalError(w, err)
 		}
@@ -288,8 +442,15 @@ func (s *Server) handleSignerRequestChanges(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
+	if !ok {
+		return
+	}
 	var in signerRequestChangesInput
-	_ = decodeJSON(r, &in)
+	if err := decodeSignerJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := s.Sign.RequestChanges(r.Context(), rc, sign.ChangeRequestInput{
 		Message:   in.Message,
 		BlockID:   in.BlockID,
@@ -298,8 +459,15 @@ func (s *Server) handleSignerRequestChanges(w http.ResponseWriter, r *http.Reque
 		Proposed:  in.Proposed,
 		IP:        clientIP(r),
 		UserAgent: r.UserAgent(),
+		Notice:    noticeEvidence,
 	}); err != nil {
 		switch {
+		case errors.Is(err, sign.ErrInvalidNoticeEvidence):
+			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+		case errors.Is(err, sign.ErrEnvelopeTransitionUnsupported):
+			writeError(w, http.StatusConflict, "change requests are not supported for envelopes")
+		case errors.Is(err, sign.ErrRevisionWouldDestroyEvidence):
+			writeError(w, http.StatusConflict, "changes cannot be requested after a legal response has been captured")
 		case errors.Is(err, sign.ErrDocumentNotSignable):
 			writeError(w, http.StatusConflict, "this document is no longer accepting changes")
 		default:
@@ -328,13 +496,27 @@ func (s *Server) handleSignerCreateComment(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	noticeEvidence, ok := s.requireSignerNoticeAcknowledgement(w, r, rc)
+	if !ok {
+		return
+	}
 	var in createCommentInput
-	if err := decodeJSON(r, &in); err != nil {
+	if err := decodeSignerJSON(r, &in); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	c, err := s.Sign.SignerComment(r.Context(), rc, in.Body)
+	c, err := s.Sign.SignerComment(r.Context(), rc, in.Body, sign.ParticipantResponseEvidence{
+		IP: clientIP(r), UserAgent: r.UserAgent(), Notice: noticeEvidence,
+	})
 	if err != nil {
+		if errors.Is(err, sign.ErrInvalidNoticeEvidence) {
+			writeError(w, http.StatusPreconditionRequired, "acknowledge the current privacy notice before continuing")
+			return
+		}
+		if errors.Is(err, sign.ErrDocumentNotSignable) || errors.Is(err, sign.ErrDocumentNotCommentable) {
+			writeError(w, http.StatusConflict, "this document is not accepting comments")
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -347,15 +529,20 @@ func (s *Server) handleSignerCreateComment(w http.ResponseWriter, r *http.Reques
 // route gives every signer (and anyone re-opening their link afterwards) a way
 // to retrieve their copy.
 func (s *Server) handleSignerFinalPDF(w http.ResponseWriter, r *http.Request) {
-	rc, ok := s.lookupTokenOrError(w, r)
-	if !ok {
+	tok := chi.URLParam(r, "token")
+	if tok == "" {
+		writeError(w, http.StatusBadRequest, "missing token")
 		return
 	}
-	if rc.Document.Status != "completed" || !rc.Document.FinalPdfKey.Valid {
-		writeError(w, http.StatusNotFound, "signed pdf not available yet")
+	// Completion atomically expires every mutation credential. The final PDF
+	// is the sole exception: a recipient who actually signed/accepted keeps
+	// read-only access through the same stable link shown by the ceremony UI.
+	rc, err := s.Sign.LookupCompletedArtifactByToken(r.Context(), auth.HashMagicToken(tok))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "signed pdf not available")
 		return
 	}
-	body, err := s.Storage.Get(r.Context(), rc.Document.FinalPdfKey.String)
+	body, err := readDocumentArtifact(r.Context(), s.Storage, rc.Document, rc.Document.FinalPdfKey.String, rc.Document.FinalPdfSha, rc.Document.FinalPdfVersionID)
 	if err != nil {
 		writeInternalError(w, err)
 		return
@@ -377,7 +564,7 @@ func (s *Server) handleSignerPDF(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "document has no source pdf")
 		return
 	}
-	body, err := s.Storage.Get(r.Context(), rc.Document.PdfStorageKey.String)
+	body, err := readDocumentArtifact(r.Context(), s.Storage, rc.Document, rc.Document.PdfStorageKey.String, rc.Document.PdfSha256, rc.Document.PdfStorageVersionID)
 	if err != nil {
 		writeInternalError(w, err)
 		return
@@ -430,7 +617,7 @@ func (s *Server) handleFinalPDF(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "final pdf not yet rendered")
 		return
 	}
-	body, err := s.Storage.Get(r.Context(), doc.FinalPdfKey.String)
+	body, err := readDocumentArtifact(r.Context(), s.Storage, doc, doc.FinalPdfKey.String, doc.FinalPdfSha, doc.FinalPdfVersionID)
 	if err != nil {
 		writeInternalError(w, err)
 		return
@@ -459,14 +646,67 @@ func (s *Server) handleAuditCert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "audit certificate not yet rendered")
 		return
 	}
-	body, err := s.Storage.Get(r.Context(), doc.AuditCertKey.String)
+	certDigest := doc.AuditCertSha256
+	if len(certDigest) != sha256.Size && !doc.EvidenceVersionPinsRequired {
+		certDigest = contentAddressedDigest(doc.AuditCertKey.String, "audit", ".pdf")
+	}
+	body, err := readDocumentArtifact(r.Context(), s.Storage, doc, doc.AuditCertKey.String, certDigest, doc.AuditCertVersionID)
 	if err != nil {
 		writeInternalError(w, err)
+		return
+	}
+	if !contentAddressedArtifactMatches(body, doc.AuditCertKey.String, "audit", ".pdf") {
+		writeInternalError(w, errors.New("stored audit certificate digest does not match its immutable key"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFileName(doc.Name)+`-audit.pdf"`)
 	_, _ = w.Write(body)
+}
+
+func finalPDFMatchesDigest(body, expected []byte) bool {
+	if len(expected) != sha256.Size {
+		return false
+	}
+	actual := sha256.Sum256(body)
+	return bytes.Equal(actual[:], expected)
+}
+
+// contentAddressedArtifactMatches verifies new immutable keys while preserving
+// downloads for historical rows whose legacy key did not encode a digest.
+func contentAddressedArtifactMatches(body []byte, key, prefix, suffix string) bool {
+	name := path.Base(key)
+	marker := prefix + "-"
+	if !strings.HasPrefix(name, marker) || !strings.HasSuffix(name, suffix) {
+		return true
+	}
+	rawHex := strings.TrimSuffix(strings.TrimPrefix(name, marker), suffix)
+	if len(rawHex) != sha256.Size*2 {
+		return false
+	}
+	expected, err := hex.DecodeString(rawHex)
+	if err != nil {
+		return false
+	}
+	actual := sha256.Sum256(body)
+	return bytes.Equal(actual[:], expected)
+}
+
+func contentAddressedDigest(key, prefix, suffix string) []byte {
+	name := path.Base(key)
+	marker := prefix + "-"
+	if !strings.HasPrefix(name, marker) || !strings.HasSuffix(name, suffix) {
+		return nil
+	}
+	rawHex := strings.TrimSuffix(strings.TrimPrefix(name, marker), suffix)
+	if len(rawHex) != sha256.Size*2 {
+		return nil
+	}
+	digest, err := hex.DecodeString(rawHex)
+	if err != nil || len(digest) != sha256.Size {
+		return nil
+	}
+	return digest
 }
 
 func sanitizeFileName(name string) string {
@@ -490,9 +730,3 @@ func sanitizeFileName(name string) string {
 	}
 	return string(out)
 }
-
-// guards against unused import errors when the path import is referenced
-// only inside generic helpers above.
-var _ = path.Join
-var _ = errors.New
-var _ = pgtype.Text{}

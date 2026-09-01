@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"sort"
 )
 
 // SchemaVersion is the current canonical schema version. Documents stamped
@@ -134,19 +136,75 @@ func ParseTree(raw []byte) (*Tree, error) {
 	if len(raw) == 0 {
 		return &Tree{Version: SchemaVersion}, nil
 	}
-	var t Tree
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&t); err != nil {
-		return nil, fmt.Errorf("decode tree: %w", err)
+	t, err := decodeTree(raw)
+	if err != nil {
+		return nil, err
 	}
 	if t.Version == 0 {
 		t.Version = SchemaVersion
 	}
-	if err := Validate(&t); err != nil {
+	if err := Validate(t); err != nil {
 		return nil, err
 	}
-	return &t, nil
+	return t, nil
+}
+
+// ParseCanonicalTree is the immutable-evidence parser. Unlike the authoring
+// parser it refuses omitted IDs, because generating one while rendering a
+// sent row would make field and audit identity process-dependent.
+func ParseCanonicalTree(raw []byte) (*Tree, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("decode tree: empty canonical tree")
+	}
+	tree, err := decodeTree(raw)
+	if err != nil {
+		return nil, err
+	}
+	if tree.Version == 0 {
+		return nil, fmt.Errorf("canonical tree requires an explicit schema version")
+	}
+	var missingID bool
+	walkTree(tree, func(block *Block) {
+		if block.ID == "" {
+			missingID = true
+		}
+	})
+	if missingID {
+		return nil, ErrMissingID
+	}
+	if err := Validate(tree); err != nil {
+		return nil, err
+	}
+	return tree, nil
+}
+
+func decodeTree(raw []byte) (*Tree, error) {
+	var tree Tree
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&tree); err != nil {
+		return nil, fmt.Errorf("decode tree: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("decode tree: trailing JSON content")
+	}
+	return &tree, nil
+}
+
+// NormalizeTreeJSON parses, validates, assigns any omitted block IDs, and
+// serializes the resulting canonical tree. Authoring endpoints must persist
+// this output—not the original request bytes—otherwise an omitted ID would be
+// regenerated differently on every read and break field/audit correlation.
+func NormalizeTreeJSON(raw []byte) (json.RawMessage, error) {
+	tree, err := ParseTree(raw)
+	if err != nil {
+		return nil, err
+	}
+	normalized, err := json.Marshal(tree)
+	if err != nil {
+		return nil, fmt.Errorf("encode canonical tree: %w", err)
+	}
+	return normalized, nil
 }
 
 // RequiredSignerRoles returns the distinct recipient roles that have at least
@@ -171,6 +229,52 @@ func RequiredSignerRoles(t *Tree) []string {
 		out = append(out, r)
 	}
 	return out
+}
+
+// RequiredSignerRolesForVariables projects conditional branches using the
+// exact frozen variable map, then returns the signature roles that are
+// actually present in the signer/PDF artifact. Invalid conditional evaluation
+// is an error, never an implicit false branch.
+func RequiredSignerRolesForVariables(t *Tree, vars map[string]string) ([]string, error) {
+	if t == nil {
+		return nil, nil
+	}
+	seen := map[string]struct{}{}
+	var visit func([]Block) error
+	visit = func(items []Block) error {
+		for i := range items {
+			block := &items[i]
+			if block.Type == TypeConditional {
+				included, err := EvalConditionStrict(block.AttrString("expression", ""), vars)
+				if err != nil {
+					return fmt.Errorf("block %q condition: %w", block.ID, err)
+				}
+				if !included {
+					continue
+				}
+			}
+			if block.Type == TypeSignatureField {
+				role := block.AttrString("recipient_role", "")
+				if role == "" {
+					role = "signer"
+				}
+				seen[role] = struct{}{}
+			}
+			if err := visit(block.Content); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := visit(t.Blocks); err != nil {
+		return nil, err
+	}
+	roles := make([]string, 0, len(seen))
+	for role := range seen {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	return roles, nil
 }
 
 // MustEmptyTree returns a fresh empty document at the current schema.

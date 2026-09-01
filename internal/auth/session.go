@@ -80,13 +80,12 @@ func TokenScopesFromContext(ctx context.Context) ([]string, bool) {
 }
 
 // HasScope reports whether the request's token grants the wanted scope. A
-// request with NO scope set attached (human session-cookie callers, and
-// legacy keys before the scopes column was populated) is treated as
-// full-access so the UI is never gated; only scoped API/MCP tokens are
-// constrained. The "admin" scope implies every scope.
+// request with NO scope set attached (human session-cookie callers) is treated
+// as full-access. An attached but empty token scope set fails closed. The
+// "admin" scope implies every scope.
 func HasScope(ctx context.Context, want string) bool {
 	scopes, ok := ctx.Value(TokenScopesKey).([]string)
-	if !ok || len(scopes) == 0 {
+	if !ok {
 		return true
 	}
 	for _, s := range scopes {
@@ -108,12 +107,11 @@ func EnforceScope(ctx context.Context, want string) error {
 // HasWriteScope reports whether the token may perform write operations. The
 // scope vocabulary is granular (write:authoring, write:workflow); any of them,
 // a bare "write", or "admin" grants writes. A request with no scope set
-// (session-cookie callers, legacy keys) is full-access. A token holding only
-// "read" is refused. This is the read-vs-write boundary the MCP dispatch
-// enforces for write tools.
+// (session-cookie callers) is full-access; an attached empty set is refused.
+// This is the read-vs-write boundary the MCP dispatch enforces for write tools.
 func HasWriteScope(ctx context.Context) bool {
 	scopes, ok := ctx.Value(TokenScopesKey).([]string)
-	if !ok || len(scopes) == 0 {
+	if !ok {
 		return true
 	}
 	for _, s := range scopes {
