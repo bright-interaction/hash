@@ -41,7 +41,7 @@ vet:
 	go vet ./...
 
 sqlc:
-	cd internal/db && sqlc generate
+	bash scripts/generate-sqlc.sh
 
 migrate:
 	goose -dir internal/db/migrations postgres "$$HASH_DB_URL" up

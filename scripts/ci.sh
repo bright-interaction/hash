@@ -420,9 +420,9 @@ cutover_smoke_identity_policy() {
 # and a gate that is red on the day it lands teaches everyone to ignore it. Widen the
 # list when those files are backfilled, not before.
 #
-# This also catches a regeneration papercut: `make sqlc` rewrites internal/db/generated/
-# from scratch and does NOT re-emit the SPDX prelude, so a regenerate-and-commit drops
-# the header from 31 files. This gate is what tells you.
+# This also catches a regeneration papercut: invoking sqlc directly rewrites
+# internal/db/generated/ without the SPDX prelude. `make sqlc` uses the canonical
+# wrapper that restores it; this gate catches bypasses and stale generated trees.
 license_headers() {
   local missing
   if [ "$HAVE_GIT" != "1" ]; then
@@ -450,8 +450,8 @@ license_headers() {
 # is wrong only against the database.
 #
 # `sqlc diff` regenerates in memory and prints what differs, but it can NEVER be clean
-# here: the committed files carry a two-line SPDX prelude plus a blank line that sqlc
-# does not emit (see license_headers above), so the diff always shows those three lines
+# here: the committed files carry a two-line SPDX prelude plus a blank line that the
+# canonical generation wrapper adds after sqlc runs, so the diff shows those three lines
 # removed and sqlc always exits non-zero. A newer compatible sqlc also changes only its
 # generated `//   sqlc vX.Y.Z` comment. Judging this on the exit status would make the
 # gate permanently red; judging it on "did it print anything" would make it permanently
@@ -477,6 +477,27 @@ sqlc_diff_guard_self_test() {
 		echo "sqlc diff failure classifier rejected an ordinary comparison" >&2
 		return 1
 	fi
+}
+
+sqlc_generation_entrypoint() {
+  local wrapper="scripts/generate-sqlc.sh"
+  [ -f "$wrapper" ] || {
+    echo "$wrapper is required so regenerated Go files retain their license header" >&2
+    return 1
+  }
+  grep -Fq 'bash scripts/generate-sqlc.sh' Makefile || {
+    echo "Makefile must route make sqlc through $wrapper" >&2
+    return 1
+  }
+  grep -Fq 'sqlc generate' "$wrapper" || {
+    echo "$wrapper must invoke sqlc generate" >&2
+    return 1
+  }
+  grep -Fq '// SPDX-License-Identifier: LicenseRef-Hash-Sustainable-Use-License' "$wrapper" || {
+    echo "$wrapper must restore the Hash SPDX header after sqlc generation" >&2
+    return 1
+  }
+  echo "make sqlc uses the license-preserving generation wrapper"
 }
 
 sqlc_fresh() {
@@ -510,7 +531,7 @@ sqlc_fresh() {
         -e '-// Copyright (c) Bright Interaction')"
   if [ -n "$real" ]; then
     echo "internal/db/generated/ is stale: it does not match internal/db/queries/*.sql." >&2
-    echo "Regenerate with: make sqlc   (then re-add the SPDX header, see license headers)" >&2
+    echo "Regenerate with: make sqlc" >&2
     echo "$real" | head -40 >&2
     return 1
   fi
@@ -620,6 +641,7 @@ step "recovery VersionId documentation policy" recovery_version_identity_policy
 step "production cutover smoke identity policy" cutover_smoke_identity_policy
 step "gofmt"                                   gofmt_check
 step "public workflow fail-closed prerequisites" public_workflow_fail_closed
+step "sqlc generation entrypoint"               sqlc_generation_entrypoint
 step "sqlc generated code up to date"          sqlc_fresh
 step "license headers"                         license_headers
 if [ "$IN_MIRROR" = "1" ] && [ "$HAVE_GIT" = "1" ]; then
