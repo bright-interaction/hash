@@ -12,6 +12,7 @@ umask 077
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 subject="$script_dir/storagebox-cold-backup.sh"
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/hash-storagebox-cold-test.XXXXXX")"
+fixture_root="$(cd "$fixture_root" && pwd -P)"
 cleanup() {
   case "$fixture_root" in
     "${TMPDIR:-/tmp}"/hash-storagebox-cold-test.*) rm -rf -- "$fixture_root" ;;
@@ -288,6 +289,28 @@ if run_subject "$no_metadata" preflight --config "$no_metadata/config.json" \
 fi
 [[ "$(grep -c '^stop ' "$no_metadata/docker.log" || true)" == 0 ]] \
   || fail 'failed preflight mutated a container'
+
+symlinked_env="$fixture_root/symlinked-restic-env-parent"
+setup_fixture "$symlinked_env"
+mkdir -m 0700 "$symlinked_env/volume/embedded-secrets"
+mv "$symlinked_env/restic.env" "$symlinked_env/volume/embedded-secrets/restic.env"
+ln -s "$symlinked_env/volume/embedded-secrets" "$symlinked_env/restic-env-link"
+jq --arg env_file "$symlinked_env/restic-env-link/restic.env" \
+  '.restic.env_file = $env_file' "$symlinked_env/config.json" > "$symlinked_env/config.tmp"
+mv "$symlinked_env/config.tmp" "$symlinked_env/config.json"
+chmod 0600 "$symlinked_env/config.json"
+if run_subject "$symlinked_env" preflight --config "$symlinked_env/config.json" \
+    --maintenance-receipt "$symlinked_env/maintenance.json" \
+    --key-escrow-receipt "$symlinked_env/key-escrow.json" \
+    >"$symlinked_env/output" 2>"$symlinked_env/error"; then
+  fail 'preflight accepted a Restic credential path through a symlinked parent into MinIO'
+fi
+grep -Fq 'Restic credential file must not be inside the MinIO data volume' \
+  "$symlinked_env/error" || fail 'symlinked Restic credential parent failed for the wrong reason'
+[[ "$(grep -c '^stop ' "$symlinked_env/docker.log" || true)" == 0 ]] \
+  || fail 'symlinked credential containment failure mutated a container'
+[[ "$(grep -c '^backup --json' "$symlinked_env/restic.log" || true)" == 0 ]] \
+  || fail 'symlinked credential containment failure wrote a snapshot'
 
 wrong_gotenberg="$fixture_root/wrong-gotenberg"
 setup_fixture "$wrong_gotenberg"

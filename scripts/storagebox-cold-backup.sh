@@ -309,6 +309,9 @@ load_config() {
     || die 'canonical recovery verifier does not match the pinned digest'
   bash -n "$verifier_script" || die 'canonical recovery verifier has invalid shell syntax'
   require_secure_file "$restic_env" 'Restic environment file'
+  # Resolve a symlinked parent before credentials are read. Checking only the
+  # final file component would otherwise let an apparently external path point
+  # into the MinIO volume and be captured with the cold snapshot.
   restic_env="$(cd "$(dirname "$restic_env")" && pwd -P)/$(basename "$restic_env")"
 
   path_is_within "$state_dir" "$release_dir" && die 'state directory must not be inside the Hash release directory'
