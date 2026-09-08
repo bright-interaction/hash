@@ -23,6 +23,12 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      # Hash requires SSE-S3 for every stored object. MinIO cannot serve those
+      # writes without a KMS, so the self-contained development stack enables
+      # its built-in KMS with a public deterministic fixture. Staging may
+      # override this value; production uses docker-compose.prod.yml and its
+      # separately managed KMS rather than this development default.
+      MINIO_KMS_SECRET_KEY: ${MINIO_KMS_SECRET_KEY:-hash-dev-key:qUUkXGsPxO6Vaay3hRuFTBdvO4dikHtLiin3Oy2hnV0=}
     volumes:
       - hash_minio:/data
     # Host ports are env-overridable so production (where 9000/9001 are
