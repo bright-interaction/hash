@@ -383,6 +383,53 @@ recovery_version_identity_policy() {
   echo "recovery guidance rejects logical-sync restore for exact-VersionId records"
 }
 
+# A filesystem-style Hetzner Storage Box cannot replace Hash's S3 provider, but
+# it can hold a cold whole-MinIO-volume recovery snapshot. Keep that workflow
+# explicitly operator-started and prove its failure/restart behavior with only
+# hermetic fake Docker/Restic commands; CI must never contact a live host.
+storagebox_cold_backup_policy() {
+  local workflow="scripts/storagebox-cold-backup.sh"
+  local test_script="scripts/test-storagebox-cold-backup.sh"
+  local doc="ops/BACKUP-RESTORE.md"
+  local required
+  for required in "$workflow" "$test_script" \
+      ops/storagebox-cold-backup.config.example.json \
+      ops/storagebox-maintenance-receipt.example.json \
+      ops/storagebox-key-escrow-receipt.example.json; do
+    [ -f "$required" ] || {
+      echo "$required is required for the Storage Box cold-backup contract" >&2
+      return 1
+    }
+  done
+  bash -n "$workflow" || return 1
+  bash -n "$test_script" || return 1
+  for required in \
+    'Storage Box is backup/DR only, never Hash' \
+    'including `.minio.sys`' \
+    'It offers no exclude flag' \
+    'shared_minio_consumers_quiesced' \
+    'gotenberg_container' \
+    'restic-repository-decryption' \
+    'minio-object-decryption' \
+    'covers_all_versions_at_snapshot' \
+    'material_in_snapshot:false'; do
+    grep -Fq "$required" "$workflow" || {
+      echo "$workflow lost a fail-closed cold-backup invariant: $required" >&2
+      return 1
+    }
+  done
+  for required in \
+    'Storage Box is a valid encrypted **cold backup destination**' \
+    'The ordinary Dockyard nightly backup intentionally continues to exclude' \
+    'Require exit `0`, not review exit `2`'; do
+    grep -Fq "$required" "$doc" || {
+      echo "$doc lost required Storage Box recovery guidance: $required" >&2
+      return 1
+    }
+  done
+  "$test_script"
+}
+
 # A public 200 is not enough to prove a production cutover: ingress may still
 # route to the previous healthy Hash container. Keep the internal acceptance
 # script syntactically valid and bound to the manifest-selected release plus
@@ -638,6 +685,7 @@ step "production image identity policy"        production_image_policy
 step "single-server production topology policy" single_server_topology_policy
 step "audit-key provisioning documentation"   audit_key_documentation_policy
 step "recovery VersionId documentation policy" recovery_version_identity_policy
+step "Storage Box cold-backup contract"         storagebox_cold_backup_policy
 step "production cutover smoke identity policy" cutover_smoke_identity_policy
 step "gofmt"                                   gofmt_check
 step "public workflow fail-closed prerequisites" public_workflow_fail_closed

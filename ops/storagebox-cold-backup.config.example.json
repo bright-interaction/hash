@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "compose": {
+    "project": "<verified-compose-project>",
+    "app_service": "<verified-app-service>",
+    "worker_service": "<verified-worker-service>",
+    "gotenberg_service": "<verified-gotenberg-service>"
+  },
+  "containers": {
+    "app": "<verified-app-container>",
+    "worker": "<verified-worker-container>",
+    "gotenberg": "<verified-gotenberg-container>",
+    "postgres": "<verified-postgres-container>",
+    "minio": "<verified-minio-container>"
+  },
+  "postgres": {
+    "database": "<verified-database>",
+    "user": "<verified-dump-role>"
+  },
+  "minio": {
+    "volume": "<verified-minio-volume>",
+    "data_path": "/absolute/verified/docker-volume/_data",
+    "mount_destination": "/data",
+    "expected_image_id": "sha256:<64-lowercase-hex-docker-content-id>"
+  },
+  "release_dir": "/absolute/path/to/exact/hash/release",
+  "inventory_sql": "/absolute/path/to/release-matched/recovery-object-inventory.sql",
+  "inventory_sql_sha256": "<64-lowercase-hex-sha256>",
+  "verifier_script": "/absolute/path/to/release-matched/verify-recovery-objects.sh",
+  "verifier_script_sha256": "<64-lowercase-hex-sha256>",
+  "state_dir": "/absolute/pre-created/root-only/hash-cold-backup-state",
+  "restic": {
+    "env_file": "/absolute/path/to/root-only/storage-box-restic.env",
+    "repository_variable": "RESTIC_REPOSITORY",
+    "password_variable": "RESTIC_PASSWORD",
+    "repository_sha256": "<sha256-of-exact-restic-repository-uri>",
+    "config_id": "<64-lowercase-hex-restic-config-id>",
+    "host": "<stable-restic-host-label>",
+    "stop_timeout_seconds": 90,
+    "health_timeout_seconds": 180,
+    "integrity_subset": "1%"
+  }
+}

@@ -116,6 +116,220 @@ enter an environment value or process argument. It rejects non-HTTPS custom
 endpoints and files that are not exactly 32 bytes. Never enable shell tracing
 around an SSE-C recovery job.
 
+## Dedicated Hetzner Storage Box cold recovery snapshot
+
+A Hetzner Storage Box is a valid encrypted **cold backup destination**, not a
+replacement for Hash's S3 object store. Hash depends on provider VersionIds,
+exact-version reads, versioning, SSE, and per-version COMPLIANCE Object Lock.
+SFTP, WebDAV, SMB, and a filesystem mounted below MinIO do not implement that
+contract. Keep live Hash on a tested S3 backend and use
+`scripts/storagebox-cold-backup.sh` only as an operator-started DR copy.
+
+The ordinary Dockyard nightly backup intentionally continues to exclude
+`*/minio_minio-data/**`. Removing that exclusion would race a running MinIO and
+would produce a PostgreSQL and object-store generation captured at different
+times. The dedicated workflow instead:
+
+1. validates the exact running Hash release, app/worker and Gotenberg images,
+   MinIO image, Docker volume mount, and pinned Storage Box Restic repository;
+2. requires a less-than-24-hour maintenance receipt confirming ingress is
+   drained and every consumer of the shared MinIO is quiesced;
+3. requires a fresh non-secret rotation receipt proving the Restic decryption
+   password, every MinIO object-decryption key, and the Hash audit,
+   signer-token, session, webhook-encryption, and AI-shield key sets are held in
+   a different failure domain from the Storage Box data repository;
+4. archives the exact Hash/Gotenberg release plus the exact MinIO and
+   PostgreSQL images before downtime;
+5. stops the worker and app, captures the canonical object inventory before and
+   after one custom-format PostgreSQL dump, and rejects a changed inventory;
+6. gracefully stops MinIO and rejects any remaining running volume consumer;
+7. sends the private staging set and the **entire** MinIO data root, including
+   `.minio.sys`, to one Restic `backup` invocation with no exclusions; and
+8. restarts MinIO, the app, and the worker in dependency order even when a
+   dump, snapshot, or verification fails. It then proves required paths exist
+   in the new snapshot and runs a repository data-subset check.
+
+The whole MinIO volume is necessary: `.minio.sys` contains the provider's
+versioning/Object-Lock metadata, while PostgreSQL stores the exact VersionIds
+that Hash reads. `mc mirror`, `aws s3 sync`, copying only bucket objects, or
+re-uploading bytes assigns different versions and is not a recovery mechanism
+for current records. The workflow deliberately has no exclude option. Do not
+exclude an old Restic bucket from this volume merely because its name looks
+obsolete; removal or exclusion needs separate evidence that the repository has
+already been restored from the Storage Box, is no longer referenced, and does
+not share data with Hash.
+
+### Provision and preflight
+
+Copy, fill, and lock down the three reviewed JSON templates alongside the
+existing root-only Restic environment file. Every container name, volume path,
+digest, and database identity must come from read-only inspection of the target
+host; the examples intentionally contain invalid placeholders. The state
+directory must already exist, be owned by the invoking operator, and have mode
+`0700`. All four JSON/env files must be regular non-symlink files owned by that
+operator with no group/other permissions.
+
+```bash
+install -d -m 0700 /var/lib/hash-storagebox-cold-backup /etc/hash-backup
+install -m 0600 ops/storagebox-cold-backup.config.example.json \
+  /etc/hash-backup/storagebox-cold-backup.json
+install -m 0600 ops/storagebox-maintenance-receipt.example.json \
+  /etc/hash-backup/maintenance.json
+install -m 0600 ops/storagebox-key-escrow-receipt.example.json \
+  /etc/hash-backup/key-escrow.json
+```
+
+The configuration accepts either the direct `RESTIC_REPOSITORY` /
+`RESTIC_PASSWORD` pair or the matching `OFFSITE_RESTIC_REPOSITORY` /
+`OFFSITE_RESTIC_PASSWORD` pair from the existing root-only env file. It parses
+only those selected literal assignments; it never sources the file. The
+repository must be an `sftp:` URL under `*.your-storagebox.de`, must already be
+initialised, and must match the configured SHA-256 fingerprint. Compute the
+fingerprint without printing the repository URI:
+
+```bash
+repo_uri="$(sed -n 's/^RESTIC_REPOSITORY=//p' /etc/dockyard-backup/restic.env)"
+test -n "$repo_uri"
+printf %s "$repo_uri" | sha256sum
+unset repo_uri
+```
+
+In the same trace-disabled root shell, export the URI and password only as
+environment variables, run `restic cat config | jq -er .id`, record the
+64-character ID in `restic.config_id`, and immediately unset both values. The
+script will neither initialise a repository nor accept a different config ID.
+
+Pin the SHA-256 of the exact `recovery-object-inventory.sql` and
+`verify-recovery-objects.sh` installed with the deployed release. Never point
+the configuration at a mutable checkout without updating and reviewing both
+digests. Likewise, derive the MinIO content ID from `docker inspect`; a tag is
+not accepted. If `/opt/hash/current/manifest.json` is absent, the release store
+is incomplete and this workflow correctly refuses to run rather than guessing
+which source, schema, or image belongs to the data.
+
+The key-escrow receipt contains versioned key-set/manifest references only,
+never key values. Its `data_repository_sha256` must equal the configured
+Storage Box repository fingerprint; `escrow_system_identity_sha256` must be
+different. Its review must be less than 24 hours old and attest that rotation
+state was reviewed and every key version needed by this snapshot is covered.
+That includes the non-reissuable Restic repository password, every MinIO KMS or
+historical SSE-C key needed to decrypt retained object versions, and
+`HASH_WEBHOOK_ENCRYPTION_KEY_PREVIOUS` while retained rows still require it.
+The AI-shield reference may point to a separately reviewed not-configured
+record when no AI provider was enabled at capture time. Operational Storage Box
+login credentials are reissuable through the separately tested account
+recovery procedure; they are not treated as object-decryption keys. Keep the
+actual key sets in the named break-glass system. Do not put them,
+`/opt/hash/.env`, a MinIO env file, or the Restic password in this snapshot.
+
+Run the read-only checks and a no-mutation rehearsal first:
+
+```bash
+scripts/storagebox-cold-backup.sh status \
+  --config /etc/hash-backup/storagebox-cold-backup.json
+
+scripts/storagebox-cold-backup.sh preflight \
+  --config /etc/hash-backup/storagebox-cold-backup.json \
+  --maintenance-receipt /etc/hash-backup/maintenance.json \
+  --key-escrow-receipt /etc/hash-backup/key-escrow.json
+
+scripts/storagebox-cold-backup.sh backup --dry-run \
+  --config /etc/hash-backup/storagebox-cold-backup.json \
+  --maintenance-receipt /etc/hash-backup/maintenance.json \
+  --key-escrow-receipt /etc/hash-backup/key-escrow.json
+```
+
+Only inside the approved window, after observing the same preflight output, run
+the command again without `--dry-run`. Record the full snapshot ID printed on
+success and retain the root-only local receipt. A leftover
+`.hash-cold-backup.lock` is not removed automatically after an uncatchable host
+crash; inspect running processes and container state before removing it.
+
+Restic encryption protects confidentiality in transit and at rest, but a
+Storage Box repository and Storage Box snapshots are mutable by an account that
+holds their credentials. This cold copy does not satisfy the independent
+COMPLIANCE-locked archive control by itself, and its retention must never be
+used to shorten the legal retention of signed evidence.
+
+### Storage-Box-only isolated restore drill
+
+Perform this drill on a disposable host/network with no route to production.
+Assume the original Hash host, local MinIO, local registry cache, and Git remote
+are unavailable. The allowed inputs are the selected Storage Box Restic
+snapshot, the separately escrowed break-glass material, and base OS tooling
+(`restic`, Docker, `jq`, `psql`, and AWS CLI). Do not restore onto an existing
+Docker volume or database.
+
+1. Recover or reissue Storage Box access and recover the Restic decryption
+   password from the separate escrow system into a root-only file on a tmpfs.
+   Disable shell tracing, list snapshots by the `hash-cold-backup` and exact
+   `release:<commit>` tags, and select the recorded full snapshot ID.
+   Confirm the Restic config ID and repository-URI fingerprint match the local
+   backup receipt. Run `restic check` before restore.
+2. Restore the selected snapshot into a new empty `0700` directory. Find the
+   single `metadata/backup-manifest.json`, require schema 1,
+   `whole_minio_volume=true`, `exclusions=[]`, and
+   `minio_sys_present=true`, then run `sha256sum --check SHA256SUMS` from that
+   snapshot's staging root. Require exactly one restored MinIO data root at the
+   manifest-recorded suffix and confirm its `.minio.sys` directory exists.
+3. Load `release/images.tar`, `images/minio-image.tar`, and
+   `images/postgres-image.tar`. Inspect the loaded content IDs and require exact
+   equality with the manifest. Do not pull a tag or rebuild source as a
+   substitute.
+4. Recover every MinIO object-decryption key set and the other named Hash key
+   sets from the separate escrow system into root-only files on a tmpfs outside
+   the Restic restore directory. This includes every historical KMS/SSE-C key
+   referenced by a retained version, not merely the key current at backup time.
+   Create fresh recovery-only MinIO root credentials; those access credentials
+   are reissuable, while the captured objects' decryption keys are not. Never
+   print a key value or pass one as a command-line argument.
+5. Start the archived PostgreSQL image and exact MinIO image on a new private
+   Docker network. Bind-mount only the newly restored MinIO data root at the
+   recorded destination. Publish MinIO, if needed for the verifier, on a
+   loopback-only port. Keep ingress, SMTP, webhooks, CRM calls, and
+   `hash-worker` disabled.
+6. Create an empty recovery database and restore
+   `postgresql/hash.pgdump` with `pg_restore --exit-on-error
+   --single-transaction --no-owner --no-acl`. Run the restored
+   `tools/ops/recovery-object-inventory.sql` against it with `ON_ERROR_STOP=1`
+   and compare the result byte-for-byte to
+   `postgresql/recovery-object-inventory.tsv`. Any difference fails the drill.
+7. Point the restored `tools/scripts/verify-recovery-objects.sh` at that
+   isolated database and restored MinIO bucket. Inject PostgreSQL and S3
+   credentials through root-only password/config files, not arguments or
+   logs. Require exit `0`, not review exit `2`. This performs exact-VersionId
+   GET/HEAD, digest checks, canonical bucket-to-database inventory comparison,
+   and `GetObjectRetention` verification of per-version COMPLIANCE retention.
+8. Start one exact Hash server image only after the data checks pass. Use an
+   isolation-specific configuration, the recovered audit/key history, and the
+   recovered bucket/database; leave the worker and all external effects off.
+   Open and cryptographically verify sampled old and recent evidence bundles,
+   download representative PDFs, and record counts, elapsed recovery time,
+   image IDs, snapshot ID, and verifier evidence.
+
+Example verifier invocation after the database and MinIO have been restored:
+
+```bash
+set +x
+export PGHOST=127.0.0.1 PGPORT=<isolated-postgres-port>
+export PGDATABASE=hash_recovery PGUSER=<recovery-role>
+export PGPASSFILE=/run/hash-recovery/postgres.pass
+export AWS_SHARED_CREDENTIALS_FILE=/run/hash-recovery/aws-credentials
+export AWS_CONFIG_FILE=/run/hash-recovery/aws-config
+
+restored_stage=/srv/hash-storagebox-restore/<restored-staging-root>
+"$restored_stage/tools/scripts/verify-recovery-objects.sh" \
+  --database hash_recovery \
+  --endpoint http://127.0.0.1:<isolated-minio-port> \
+  --bucket <recovered-hash-bucket> \
+  --output /srv/hash-storagebox-restore/verification
+```
+
+An exact-version mismatch, missing object, short/non-COMPLIANCE retention,
+inventory conflict, unverified sidecar, orphan/review result, image mismatch,
+missing escrow history, or inability to boot the exact MinIO image fails the
+restore. Preserve the isolated evidence and do not promote it over production.
+
 ## Daily backup verification
 
 The platform's PITR and version-aware replication facilities are the

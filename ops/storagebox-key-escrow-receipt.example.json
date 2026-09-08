@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "scope": "hash-storagebox-cold-backup-key-escrow",
+  "data_repository_sha256": "<sha256-of-exact-restic-repository-uri>",
+  "escrow_system_identity_sha256": "<different-64-lowercase-hex-system-identity>",
+  "escrow_reference": "<non-secret-break-glass-record-reference>",
+  "separate_failure_domain": true,
+  "rotation_state_reviewed": true,
+  "data_decryption_keysets_complete": true,
+  "verified_by": "<named-operator>",
+  "verified_at": "<UTC-RFC3339-time>",
+  "key_sets": [
+    {
+      "purpose": "restic-repository-decryption",
+      "manifest_reference": "<non-secret-versioned-key-set-reference>",
+      "covers_all_versions_at_snapshot": true
+    },
+    {
+      "purpose": "minio-object-decryption",
+      "manifest_reference": "<non-secret-versioned-kms-and-sse-c-key-set-reference>",
+      "covers_all_versions_at_snapshot": true
+    },
+    {
+      "purpose": "hash-audit-signing",
+      "manifest_reference": "<non-secret-versioned-key-set-reference>",
+      "covers_all_versions_at_snapshot": true
+    },
+    {
+      "purpose": "hash-signer-token",
+      "manifest_reference": "<non-secret-versioned-key-set-reference>",
+      "covers_all_versions_at_snapshot": true
+    },
+    {
+      "purpose": "hash-session",
+      "manifest_reference": "<non-secret-versioned-key-set-reference>",
+      "covers_all_versions_at_snapshot": true
+    },
+    {
+      "purpose": "hash-webhook-encryption",
+      "manifest_reference": "<non-secret-versioned-current-and-previous-key-set-reference>",
+      "covers_all_versions_at_snapshot": true
+    },
+    {
+      "purpose": "hash-ai-shield",
+      "manifest_reference": "<non-secret-key-set-or-verified-not-configured-reference>",
+      "covers_all_versions_at_snapshot": true
+    }
+  ]
+}
