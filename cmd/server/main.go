@@ -166,6 +166,9 @@ func run() error {
 		AccessKey:         cfg.S3AccessKey,
 		SecretKey:         cfg.S3SecretKey,
 		UseSSL:            cfg.S3UseSSL,
+		SSEMode:           cfg.S3SSEMode,
+		SSECKeyFile:       cfg.S3SSECKeyFile,
+		BucketLookup:      cfg.S3BucketLookup,
 		RequireObjectLock: !config.IsLocalDevelopment(cfg.PublicURL),
 	})
 	if err != nil {

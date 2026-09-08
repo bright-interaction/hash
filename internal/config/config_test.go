@@ -4,7 +4,10 @@
 package config
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -117,8 +120,75 @@ func TestLoad_OK(t *testing.T) {
 	if c.Release != strings.Repeat("ab", 20) || c.Environment != "production" {
 		t.Errorf("telemetry identity = %q/%q, want immutable test release/production", c.Release, c.Environment)
 	}
+	if c.S3SSEMode != "sse-s3" || c.S3SSECKeyFile != "" || c.S3BucketLookup != "auto" {
+		t.Fatalf("default S3 policy = %q/%q/%q, want sse-s3/no-key/auto", c.S3SSEMode, c.S3SSECKeyFile, c.S3BucketLookup)
+	}
 	if c.OperatorName != "Example Hash Operator AB" || c.PrivacyContact != "privacy@example.test" || c.SupervisoryAuthority != "Example Data Protection Authority" || c.PrivacyPolicyURL != "https://example.test/privacy" {
 		t.Fatalf("operator disclosure identity was not loaded exactly: %#v", c)
+	}
+}
+
+func TestLoad_ValidatesSSECPolicyBeforeNetworkAccess(t *testing.T) {
+	key := sha256.Sum256([]byte("public config-test SSE-C key material"))
+	keyFile := filepath.Join(t.TempDir(), "sse-c.key")
+	if err := os.WriteFile(keyFile, key[:], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	setAllRequired(t)
+	t.Setenv("HASH_S3_SSE_MODE", "sse-c")
+	t.Setenv("HASH_S3_SSE_C_KEY_FILE", keyFile)
+	t.Setenv("HASH_S3_BUCKET_LOOKUP", "path")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("valid SSE-C policy rejected: %v", err)
+	}
+	if cfg.S3SSEMode != "sse-c" || cfg.S3SSECKeyFile != keyFile || cfg.S3BucketLookup != "path" {
+		t.Fatal("validated SSE-C configuration was not preserved")
+	}
+
+	for _, test := range []struct {
+		name    string
+		mode    string
+		keyFile string
+		lookup  string
+		useSSL  string
+		want    string
+	}{
+		{name: "missing key file", mode: "sse-c", lookup: "auto", useSSL: "true", want: "HASH_S3_SSE_C_KEY_FILE is required"},
+		{name: "plaintext transport", mode: "sse-c", keyFile: keyFile, lookup: "auto", useSSL: "false", want: "requires HASH_S3_USE_SSL=true"},
+		{name: "key path under sse-s3", mode: "sse-s3", keyFile: keyFile, lookup: "auto", useSSL: "true", want: "must be empty"},
+		{name: "unknown encryption", mode: "SSE-C", keyFile: keyFile, lookup: "auto", useSSL: "true", want: "must be exactly sse-s3 or sse-c"},
+		{name: "unknown addressing", mode: "sse-s3", lookup: "virtual", useSSL: "true", want: "must be exactly auto, path, or dns"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			setAllRequired(t)
+			t.Setenv("HASH_S3_SSE_MODE", test.mode)
+			t.Setenv("HASH_S3_SSE_C_KEY_FILE", test.keyFile)
+			t.Setenv("HASH_S3_BUCKET_LOOKUP", test.lookup)
+			t.Setenv("HASH_S3_USE_SSL", test.useSSL)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("invalid S3 policy accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsWrongLengthSSECKeyWithoutRenderingIt(t *testing.T) {
+	contents := []byte("not-a-32-byte-customer-key")
+	keyFile := filepath.Join(t.TempDir(), "sse-c.key")
+	if err := os.WriteFile(keyFile, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setAllRequired(t)
+	t.Setenv("HASH_S3_SSE_MODE", "sse-c")
+	t.Setenv("HASH_S3_SSE_C_KEY_FILE", keyFile)
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "exactly 32 raw bytes") {
+		t.Fatalf("wrong-length SSE-C key accepted: %v", err)
+	}
+	if strings.Contains(err.Error(), string(contents)) {
+		t.Fatal("SSE-C key contents leaked through config validation")
 	}
 }
 
@@ -798,6 +868,9 @@ func setAllRequired(t *testing.T) {
 	t.Setenv("HASH_SMTP_PASSWORD", "")
 	t.Setenv("HASH_SMTP_FROM", "Hash <esign@example.test>")
 	t.Setenv("HASH_S3_USE_SSL", "true")
+	t.Setenv("HASH_S3_SSE_MODE", "")
+	t.Setenv("HASH_S3_SSE_C_KEY_FILE", "")
+	t.Setenv("HASH_S3_BUCKET_LOOKUP", "")
 	t.Setenv("HASH_EVIDENCE_OTS_ENABLED", "false")
 	t.Setenv("HASH_BRIGHTCRM_URL", "")
 	t.Setenv("HASH_BRIGHTCRM_TOKEN", "")

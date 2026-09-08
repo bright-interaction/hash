@@ -22,12 +22,17 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 	"github.com/minio/minio-go/v7/pkg/lifecycle"
+
+	"github.com/bright-interaction/hash/internal/s3policy"
 )
 
 type Client struct {
-	mc                  *minio.Client
-	bucket              string
-	requireEvidenceLock bool
+	mc                        *minio.Client
+	bucket                    string
+	requireEvidenceLock       bool
+	writeServerSideEncryption encrypt.ServerSide
+	readServerSideEncryption  encrypt.ServerSide
+	sseMode                   string
 }
 
 type Config struct {
@@ -37,10 +42,20 @@ type Config struct {
 	AccessKey string
 	SecretKey string
 	UseSSL    bool
+	// SSEMode is "sse-s3" (the default) or "sse-c". SSE-C reads its
+	// customer key only from SSECKeyFile and is rejected without TLS.
+	SSEMode     string
+	SSECKeyFile string
+	// BucketLookup controls S3 addressing: auto (default), path, or dns.
+	BucketLookup string
 	// RequireObjectLock turns the bucket and per-object immutability checks on.
 	// Production sets this unconditionally; development leaves it false because
 	// its disposable MinIO bucket is recreated for every test run.
 	RequireObjectLock bool
+	// SkipTransientLifecycle prevents New from reconciling Hash's optional
+	// transient-object expiry rule. It exists for a live-provider conformance
+	// test against an operator-owned bucket; normal runtimes must leave it false.
+	SkipTransientLifecycle bool
 }
 
 // DevelopmentVersionID is persisted only by disposable, non-versioned local
@@ -78,10 +93,15 @@ type bucketInitializer interface {
 }
 
 func New(ctx context.Context, cfg Config) (*Client, error) {
+	policy, err := s3policy.Load(cfg.SSEMode, cfg.SSECKeyFile, cfg.BucketLookup, cfg.UseSSL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid object storage policy: %w", err)
+	}
 	mc, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
-		Secure: cfg.UseSSL,
-		Region: cfg.Region,
+		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Secure:       cfg.UseSSL,
+		Region:       cfg.Region,
+		BucketLookup: policy.BucketLookupType,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("init minio client: %w", err)
@@ -104,12 +124,21 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	// retention is NOT a lifecycle expiry rule: production writes and verifies
 	// COMPLIANCE-mode Object Lock per evidence object below. Failure to install
 	// this optional cleanup policy remains non-fatal.
-	if err := applyLifecycle(ctx, mc, cfg.Bucket); err != nil {
-		slog.Warn("storage: bucket lifecycle apply failed (set s3:PutBucketLifecycle?)",
-			"bucket", cfg.Bucket, "err", err)
+	if !cfg.SkipTransientLifecycle {
+		if err := applyLifecycle(ctx, mc, cfg.Bucket); err != nil {
+			slog.Warn("storage: bucket lifecycle apply failed (set s3:PutBucketLifecycle?)",
+				"bucket", cfg.Bucket, "err", err)
+		}
 	}
 
-	return &Client{mc: mc, bucket: cfg.Bucket, requireEvidenceLock: cfg.RequireObjectLock}, nil
+	return &Client{
+		mc:                        mc,
+		bucket:                    cfg.Bucket,
+		requireEvidenceLock:       cfg.RequireObjectLock,
+		writeServerSideEncryption: policy.WriteEncryption,
+		readServerSideEncryption:  policy.ReadEncryption,
+		sseMode:                   policy.SSEMode,
+	}, nil
 }
 
 func validateObjectLockEnabled(enabled string) error {
@@ -203,15 +232,27 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
-// putOpts returns the canonical PutObjectOptions Hash uses for every
-// upload. SSE-S3 (server-side AES-256, MinIO-managed key) is on by
-// default so the privacy-policy "encrypted at rest" claim is backed by
-// code, not vibes. A bucket-default encryption policy is the belt; this
-// is the suspenders so a misconfigured bucket still encrypts.
-func putOpts(contentType string) minio.PutObjectOptions {
+// putOpts returns the canonical PutObjectOptions Hash uses for every upload.
+// SSE-S3 remains the default; an explicitly configured SSE-C policy supplies
+// the same customer-key headers to every write path.
+func (c *Client) putOpts(contentType string) minio.PutObjectOptions {
 	return minio.PutObjectOptions{
 		ContentType:          contentType,
-		ServerSideEncryption: encrypt.NewSSE(),
+		ServerSideEncryption: c.writeServerSideEncryption,
+	}
+}
+
+func (c *Client) getOpts(versionID string) minio.GetObjectOptions {
+	return minio.GetObjectOptions{
+		VersionID:            versionID,
+		ServerSideEncryption: c.readServerSideEncryption,
+	}
+}
+
+func (c *Client) statOpts(versionID string) minio.StatObjectOptions {
+	return minio.StatObjectOptions{
+		VersionID:            versionID,
+		ServerSideEncryption: c.readServerSideEncryption,
 	}
 }
 
@@ -239,8 +280,8 @@ func canonicalEvidenceRetainUntil(retainUntil time.Time) (time.Time, error) {
 	return retainUntil, nil
 }
 
-func evidencePutOpts(contentType string, retainUntil time.Time) minio.PutObjectOptions {
-	opts := putOpts(contentType)
+func (c *Client) evidencePutOpts(contentType string, retainUntil time.Time) minio.PutObjectOptions {
+	opts := c.putOpts(contentType)
 	opts.Mode = minio.Compliance
 	opts.RetainUntilDate = retainUntil
 	return opts
@@ -251,7 +292,7 @@ func evidencePutOpts(contentType string, retainUntil time.Time) minio.PutObjectO
 // must use PutVersioned so the exact S3 VersionId can be persisted.
 func (c *Client) Put(ctx context.Context, key, contentType string, data []byte) (sha [32]byte, err error) {
 	sha = sha256.Sum256(data)
-	_, err = c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), putOpts(contentType))
+	_, err = c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), c.putOpts(contentType))
 	if err != nil {
 		return sha, fmt.Errorf("put %q: %w", key, err)
 	}
@@ -268,7 +309,7 @@ func (c *Client) PutVersioned(ctx context.Context, key, contentType string, data
 	} else if !errors.Is(err, errStoredVersionNotFound) {
 		return stored, fmt.Errorf("reuse versioned object %q: %w", key, err)
 	}
-	info, err := c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), putOpts(contentType))
+	info, err := c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), c.putOpts(contentType))
 	if err != nil {
 		return stored, fmt.Errorf("put %q: %w", key, err)
 	}
@@ -307,14 +348,14 @@ func (c *Client) PutEvidenceVersioned(ctx context.Context, key, contentType stri
 	}
 	if !c.requireEvidenceLock {
 		// The preflight above established that no matching local object exists.
-		info, err := c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), putOpts(contentType))
+		info, err := c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), c.putOpts(contentType))
 		if err != nil {
 			return stored, fmt.Errorf("put immutable evidence %q: %w", key, err)
 		}
 		stored.VersionID, err = c.persistableVersionID(key, info.VersionID)
 		return stored, err
 	}
-	opts := evidencePutOpts(contentType, retainUntil)
+	opts := c.evidencePutOpts(contentType, retainUntil)
 	info, err := c.mc.PutObject(ctx, c.bucket, key, bytes.NewReader(data), int64(len(data)), opts)
 	if err != nil {
 		return stored, fmt.Errorf("put immutable evidence %q: %w", key, err)
@@ -454,7 +495,7 @@ func (c *Client) verifyEvidenceRetention(ctx context.Context, key, versionID str
 
 // PutStream uploads from an io.Reader of known length.
 func (c *Client) PutStream(ctx context.Context, key, contentType string, r io.Reader, size int64) error {
-	_, err := c.mc.PutObject(ctx, c.bucket, key, r, size, putOpts(contentType))
+	_, err := c.mc.PutObject(ctx, c.bucket, key, r, size, c.putOpts(contentType))
 	if err != nil {
 		return fmt.Errorf("put stream %q: %w", key, err)
 	}
@@ -464,7 +505,7 @@ func (c *Client) PutStream(ctx context.Context, key, contentType string, r io.Re
 // Get returns the full object bytes. Caller must keep payloads small (<50MB
 // hard cap on uploads).
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
-	obj, err := c.mc.GetObject(ctx, c.bucket, key, minio.GetObjectOptions{})
+	obj, err := c.mc.GetObject(ctx, c.bucket, key, c.getOpts(""))
 	if err != nil {
 		return nil, fmt.Errorf("get %q: %w", key, err)
 	}
@@ -552,7 +593,7 @@ func (c *Client) resolveLatestMatchingVersion(ctx context.Context, key string, e
 		return stored, errors.New("verify stored object: expected SHA-256 must be 32 bytes")
 	}
 	copy(stored.SHA256[:], expectedSHA256)
-	info, err := c.mc.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{})
+	info, err := c.mc.StatObject(ctx, c.bucket, key, c.statOpts(""))
 	if err != nil {
 		if isObjectNotFound(err) {
 			return stored, errStoredVersionNotFound
@@ -585,7 +626,7 @@ func (c *Client) resolveCommittedVersion(ctx context.Context, key string, expect
 	}
 	var latestVersionID string
 	var latestErr error
-	info, err := c.mc.StatObject(ctx, c.bucket, key, minio.StatObjectOptions{})
+	info, err := c.mc.StatObject(ctx, c.bucket, key, c.statOpts(""))
 	if err != nil {
 		if !isObjectNotFound(err) {
 			return nil, "", fmt.Errorf("verify stored object %q: stat latest: %w", key, err)
@@ -688,7 +729,7 @@ func (c *Client) getObjectVersion(ctx context.Context, key, versionID string) ([
 		}
 		versionID = ""
 	}
-	opts := minio.GetObjectOptions{VersionID: versionID}
+	opts := c.getOpts(versionID)
 	obj, err := c.mc.GetObject(ctx, c.bucket, key, opts)
 	if err != nil {
 		return nil, fmt.Errorf("get %q version %q: %w", key, versionID, err)
@@ -737,6 +778,9 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 func (c *Client) PresignGet(ctx context.Context, key string, ttl time.Duration) (*url.URL, error) {
 	if ttl <= 0 {
 		return nil, errors.New("presign ttl must be positive")
+	}
+	if c.sseMode == s3policy.SSEModeC {
+		return nil, errors.New("presigned browser downloads are unavailable with SSE-C; proxy the authenticated download through Hash")
 	}
 	return c.mc.PresignedGetObject(ctx, c.bucket, key, ttl, nil)
 }

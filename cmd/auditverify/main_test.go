@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/encrypt"
 )
 
 type unexpectedObjectReader struct{}
@@ -20,20 +21,32 @@ func (unexpectedObjectReader) GetObject(context.Context, string, string, minio.G
 }
 
 func TestGetVerifiedSmokeObjectRejectsIncompleteCommitmentBeforeStorage(t *testing.T) {
-	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "", "version-1", make([]byte, 32)); err == nil {
+	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "", "version-1", make([]byte, 32), nil); err == nil {
 		t.Fatal("empty evidence key was accepted")
 	}
-	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "key", "version-1", nil); err == nil {
+	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "key", "version-1", nil, nil); err == nil {
 		t.Fatal("missing evidence digest was accepted")
 	}
-	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "key", "", make([]byte, 32)); err == nil {
+	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "key", "", make([]byte, 32), nil); err == nil {
 		t.Fatal("missing evidence VersionId was accepted")
 	}
-	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "key", "hash:unversioned-development", make([]byte, 32)); err == nil {
+	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "key", "hash:unversioned-development", make([]byte, 32), nil); err == nil {
 		t.Fatal("development VersionId sentinel was accepted by the production verifier")
 	}
-	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "key", " hash:unversioned-development ", make([]byte, 32)); err == nil {
+	if _, err := getVerifiedSmokeObject(context.Background(), unexpectedObjectReader{}, "bucket", "key", " hash:unversioned-development ", make([]byte, 32), nil); err == nil {
 		t.Fatal("whitespace-aliased development VersionId sentinel was accepted by the production verifier")
+	}
+}
+
+func TestEvidenceGetOptionsCarriesSSECAndExactVersion(t *testing.T) {
+	key := make([]byte, 32)
+	sse, err := encrypt.NewSSEC(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := evidenceGetOptions("provider-version-1", sse)
+	if opts.VersionID != "provider-version-1" || opts.ServerSideEncryption == nil || opts.ServerSideEncryption.Type() != encrypt.SSEC {
+		t.Fatal("release evidence GET did not retain its exact VersionId and SSE-C policy")
 	}
 }
 

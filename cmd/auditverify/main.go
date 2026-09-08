@@ -27,11 +27,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/encrypt"
 
 	"github.com/bright-interaction/hash/internal/audit"
 	"github.com/bright-interaction/hash/internal/config"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/evidence"
+	"github.com/bright-interaction/hash/internal/s3policy"
 	"github.com/bright-interaction/hash/internal/sign"
 	"github.com/bright-interaction/hash/internal/storage"
 )
@@ -429,10 +431,15 @@ func verifyEvidenceSample(ctx context.Context, sample *evidenceSample) error {
 	if err != nil {
 		return errors.New("invalid runtime configuration")
 	}
+	policy, err := s3policy.Load(cfg.S3SSEMode, cfg.S3SSECKeyFile, cfg.S3BucketLookup, cfg.S3UseSSL)
+	if err != nil {
+		return errors.New("object storage policy is invalid")
+	}
 	mc, err := minio.New(cfg.S3Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
-		Secure: cfg.S3UseSSL,
-		Region: cfg.S3Region,
+		Creds:        credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, ""),
+		Secure:       cfg.S3UseSSL,
+		Region:       cfg.S3Region,
+		BucketLookup: policy.BucketLookupType,
 	})
 	if err != nil {
 		return errors.New("object storage initialization failed")
@@ -441,11 +448,11 @@ func verifyEvidenceSample(ctx context.Context, sample *evidenceSample) error {
 	if err != nil || lockStatus != "Enabled" {
 		return errors.New("production evidence bucket object lock is unavailable")
 	}
-	payload, err := getVerifiedSmokeObject(ctx, mc, cfg.S3Bucket, sample.PayloadKey, sample.PayloadVersionID, sample.PayloadSHA256)
+	payload, err := getVerifiedSmokeObject(ctx, mc, cfg.S3Bucket, sample.PayloadKey, sample.PayloadVersionID, sample.PayloadSHA256, policy.ReadEncryption)
 	if err != nil {
 		return err
 	}
-	signature, err := getVerifiedSmokeObject(ctx, mc, cfg.S3Bucket, sample.SignatureKey, sample.SignatureVersionID, sample.SignatureSHA256)
+	signature, err := getVerifiedSmokeObject(ctx, mc, cfg.S3Bucket, sample.SignatureKey, sample.SignatureVersionID, sample.SignatureSHA256, policy.ReadEncryption)
 	if err != nil {
 		return err
 	}
@@ -495,12 +502,12 @@ type smokeObjectReader interface {
 	GetObject(context.Context, string, string, minio.GetObjectOptions) (*minio.Object, error)
 }
 
-func getVerifiedSmokeObject(ctx context.Context, mc smokeObjectReader, bucket, key, versionID string, expectedSHA256 []byte) ([]byte, error) {
+func getVerifiedSmokeObject(ctx context.Context, mc smokeObjectReader, bucket, key, versionID string, expectedSHA256 []byte, sse encrypt.ServerSide) ([]byte, error) {
 	if key == "" || strings.TrimSpace(versionID) == "" || len(versionID) > 1024 ||
 		strings.TrimSpace(versionID) == storage.DevelopmentVersionID || len(expectedSHA256) != sha256.Size {
 		return nil, errors.New("evidence sidecar commitment is incomplete")
 	}
-	object, err := mc.GetObject(ctx, bucket, key, minio.GetObjectOptions{VersionID: versionID})
+	object, err := mc.GetObject(ctx, bucket, key, evidenceGetOptions(versionID, sse))
 	if err != nil {
 		return nil, errors.New("read evidence sidecar failed")
 	}
@@ -518,6 +525,13 @@ func getVerifiedSmokeObject(ctx context.Context, mc smokeObjectReader, bucket, k
 		return nil, errors.New("evidence sidecar digest mismatch")
 	}
 	return body, nil
+}
+
+func evidenceGetOptions(versionID string, sse encrypt.ServerSide) minio.GetObjectOptions {
+	return minio.GetObjectOptions{
+		VersionID:            versionID,
+		ServerSideEncryption: sse,
+	}
 }
 
 func verifyOrganization(ctx context.Context, q *generated.Queries, orgID uuid.UUID) (audit.ChainVerifyResult, error) {

@@ -106,6 +106,16 @@ Grant the backup principal read-only access to the production bucket and only
 the PostgreSQL privileges needed for backup. Grant the restore principal write
 access only to a newly created recovery database and recovery bucket.
 
+For an SSE-C bucket, retain the historical 32-byte raw key with the recovery
+set in a separate secret manager and mount it read-only into each recovery job.
+Every invocation of `scripts/verify-recovery-objects.sh` must add
+`--sse-c-key-file "$HASH_RECOVERY_S3_SSE_C_KEY_FILE"` (use the corresponding
+source-key path when verifying the source bucket). The verifier supplies that
+file with `fileb://` on every GET and HEAD, so arbitrary binary bytes do not
+enter an environment value or process argument. It rejects non-HTTPS custom
+endpoints and files that are not exactly 32 bytes. Never enable shell tracing
+around an SSE-C recovery job.
+
 ## Daily backup verification
 
 The platform's PITR and version-aware replication facilities are the
@@ -153,11 +163,25 @@ pg_dump \
   --no-acl \
   --file="$snapshot_dir/hash.pgdump"
 
+# SSE-C protects reads as well as writes. Pass only a file URI to the AWS CLI;
+# the raw key bytes never enter an environment value or process argument.
+source_sse_args=()
+if [[ "${HASH_S3_SSE_MODE:-sse-s3}" == "sse-c" ]]; then
+  test -n "${HASH_SOURCE_S3_SSE_C_KEY_FILE:?mount the source SSE-C key file}"
+  case "$HASH_SOURCE_S3_URL" in https://?*) ;; *) exit 1;; esac
+  case "$HASH_SOURCE_S3_SSE_C_KEY_FILE" in /*) ;; *) exit 1;; esac
+  test -f "$HASH_SOURCE_S3_SSE_C_KEY_FILE"
+  test -r "$HASH_SOURCE_S3_SSE_C_KEY_FILE"
+  test "$(wc -c < "$HASH_SOURCE_S3_SSE_C_KEY_FILE" | tr -d ' ')" = 32
+  source_sse_args=(--sse-c AES256 --sse-c-key "fileb://$HASH_SOURCE_S3_SSE_C_KEY_FILE")
+fi
+
 # Supplementary latest-byte copy only. This does not preserve object history or
 # the provider VersionIds committed by current Hash database rows.
 aws --endpoint-url "$HASH_SOURCE_S3_URL" s3 sync \
   "s3://$HASH_S3_BUCKET" \
   "$snapshot_dir/objects" \
+  "${source_sse_args[@]}" \
   --only-show-errors
 
 # Store the canonical DB-side object inventory with the same quiesced
@@ -173,11 +197,16 @@ psql --no-psqlrc --set ON_ERROR_STOP=1 --tuples-only --no-align \
 # SHA-256; a shadow is a review finding, while unversioned legal evidence,
 # legacy existence-only audit sidecars, missing objects, conflicts, or orphans
 # block acceptance.
+source_verify_sse_args=()
+if [[ "${HASH_S3_SSE_MODE:-sse-s3}" == "sse-c" ]]; then
+  source_verify_sse_args=(--sse-c-key-file "$HASH_SOURCE_S3_SSE_C_KEY_FILE")
+fi
 "$hash_source_dir/scripts/verify-recovery-objects.sh" \
   --database "${PGDATABASE:-hash}" \
   --endpoint "$HASH_SOURCE_S3_URL" \
   --bucket "$HASH_S3_BUCKET" \
-  --output "$snapshot_dir/source-object-verification"
+  --output "$snapshot_dir/source-object-verification" \
+  "${source_verify_sse_args[@]}"
 
 readlink /opt/hash/current > "$snapshot_dir/current-release.txt"
 cp /opt/hash/current/manifest.json "$snapshot_dir/release-manifest.json"
@@ -323,9 +352,20 @@ if awk -F '\t' '$10 != "-" { pinned=1 } END { exit pinned ? 0 : 1 }' "$inventory
   echo 'portable logical restore refused: inventory contains exact VersionId pins' >&2
   exit 1
 fi
+recovery_sse_args=()
+if [[ "${HASH_RECOVERY_S3_SSE_MODE:-sse-s3}" == "sse-c" ]]; then
+  test -n "${HASH_RECOVERY_S3_SSE_C_KEY_FILE:?mount the recovery SSE-C key file}"
+  case "$HASH_RECOVERY_S3_ENDPOINT" in https://?*) ;; *) exit 1;; esac
+  case "$HASH_RECOVERY_S3_SSE_C_KEY_FILE" in /*) ;; *) exit 1;; esac
+  test -f "$HASH_RECOVERY_S3_SSE_C_KEY_FILE"
+  test -r "$HASH_RECOVERY_S3_SSE_C_KEY_FILE"
+  test "$(wc -c < "$HASH_RECOVERY_S3_SSE_C_KEY_FILE" | tr -d ' ')" = 32
+  recovery_sse_args=(--sse-c AES256 --sse-c-key "fileb://$HASH_RECOVERY_S3_SSE_C_KEY_FILE")
+fi
 aws --endpoint-url "$HASH_RECOVERY_S3_ENDPOINT" s3 sync \
   /srv/hash-backups/<snapshot>/objects \
   "s3://$HASH_RECOVERY_BUCKET" \
+  "${recovery_sse_args[@]}" \
   --only-show-errors
 ```
 
@@ -471,11 +511,17 @@ inventory counts that shared set only through the parent. Then run the read-only
 canonical inventory verifier against the isolated recovery database and bucket:
 
 ```bash
+recovery_sse_args=()
+if [[ "${HASH_RECOVERY_S3_SSE_MODE:-sse-s3}" == "sse-c" ]]; then
+  test -n "${HASH_RECOVERY_S3_SSE_C_KEY_FILE:?mount the recovery SSE-C key file}"
+  recovery_sse_args=(--sse-c-key-file "$HASH_RECOVERY_S3_SSE_C_KEY_FILE")
+fi
 /root/automations/hash/scripts/verify-recovery-objects.sh \
   --database hash_recovery \
   --endpoint "$HASH_RECOVERY_S3_ENDPOINT" \
   --bucket "$HASH_RECOVERY_BUCKET" \
-  --output "/srv/hash-recovery-verification/$incident_id"
+  --output "/srv/hash-recovery-verification/$incident_id" \
+  "${recovery_sse_args[@]}"
 ```
 
 For AWS S3 itself, omit `--endpoint`. The verifier uses

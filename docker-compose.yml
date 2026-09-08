@@ -124,11 +124,14 @@ services:
       HASH_LOG_LEVEL: ${HASH_LOG_LEVEL:-info}
       HASH_DB_URL: postgres://hash:${POSTGRES_PASSWORD:-devpass}@postgres:5432/hash?sslmode=disable
       HASH_S3_ENDPOINT: ${HASH_S3_ENDPOINT:-hash-minio:9000}
-      HASH_S3_REGION: eu-central-1
-      HASH_S3_BUCKET: hash
+      HASH_S3_REGION: ${HASH_S3_REGION:-eu-central-1}
+      HASH_S3_BUCKET: ${HASH_S3_BUCKET:-hash}
       HASH_S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       HASH_S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       HASH_S3_USE_SSL: "false"
+      HASH_S3_SSE_MODE: ${HASH_S3_SSE_MODE:-sse-s3}
+      HASH_S3_SSE_C_KEY_FILE: ${HASH_S3_SSE_C_KEY_FILE:-}
+      HASH_S3_BUCKET_LOOKUP: ${HASH_S3_BUCKET_LOOKUP:-auto}
       HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-http://localhost:9999}
       HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
       HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-dev}
@@ -172,11 +175,14 @@ services:
       HASH_LOG_LEVEL: ${HASH_LOG_LEVEL:-info}
       HASH_DB_URL: postgres://hash:${POSTGRES_PASSWORD:-devpass}@postgres:5432/hash?sslmode=disable
       HASH_S3_ENDPOINT: ${HASH_S3_ENDPOINT:-hash-minio:9000}
-      HASH_S3_REGION: eu-central-1
-      HASH_S3_BUCKET: hash
+      HASH_S3_REGION: ${HASH_S3_REGION:-eu-central-1}
+      HASH_S3_BUCKET: ${HASH_S3_BUCKET:-hash}
       HASH_S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       HASH_S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       HASH_S3_USE_SSL: "false"
+      HASH_S3_SSE_MODE: ${HASH_S3_SSE_MODE:-sse-s3}
+      HASH_S3_SSE_C_KEY_FILE: ${HASH_S3_SSE_C_KEY_FILE:-}
+      HASH_S3_BUCKET_LOOKUP: ${HASH_S3_BUCKET_LOOKUP:-auto}
       HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-http://localhost:9999}
       HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
       HASH_OIDC_CLIENT_SECRET: ${HASH_OIDC_CLIENT_SECRET:-dev}

@@ -52,6 +52,119 @@ Lock support/permissions are missing. Do not grant governance-bypass,
 bucket-policy, or permanent-version-delete authority. Lifecycle expiration is
 only for explicitly transient objects and does not enforce legal retention.
 
+### S3 encryption and addressing
+
+Hash defaults to `HASH_S3_SSE_MODE=sse-s3` and
+`HASH_S3_BUCKET_LOOKUP=auto`, preserving the MinIO deployment behavior. Some
+S3-compatible providers require explicit `path` or `dns` bucket addressing;
+select it with `HASH_S3_BUCKET_LOOKUP` only after a provider conformance run.
+
+For providers such as Hetzner Object Storage that support customer-provided
+encryption keys rather than SSE-S3, set `HASH_S3_SSE_MODE=sse-c`, require
+`HASH_S3_USE_SSL=true`, and set `HASH_S3_SSE_C_KEY_FILE` to a file path inside
+the container. The file must contain exactly 32 raw random bytes—not 64 hex
+characters, base64, or a trailing newline. For a local Compose file-backed
+secret, protect access with the parent directory and make the source file
+readable by Hash's non-root container user:
+
+```bash
+secret_dir=/opt/hash/runtime-secrets
+install -d -m 0700 "$secret_dir"
+test ! -e "$secret_dir/s3-sse-c.key"
+test ! -L "$secret_dir/s3-sse-c.key"
+(set -o noclobber; umask 0333; openssl rand 32 > "$secret_dir/s3-sse-c.key")
+test "$(wc -c < "$secret_dir/s3-sse-c.key" | tr -d ' ')" = 32
+test ! -L "$secret_dir/s3-sse-c.key"
+test "$(stat -c %h "$secret_dir/s3-sse-c.key")" = 1
+test "$(stat -c %a "$secret_dir")" = 700
+test "$(stat -c %a "$secret_dir/s3-sse-c.key")" = 444
+export HASH_S3_SSE_C_KEY_HOST_FILE="$secret_dir/s3-sse-c.key"
+```
+
+The apparently unusual `0444` source-file mode is intentional: non-Swarm
+Compose implements a file-backed secret as a direct bind mount and preserves
+its host mode, while the container runs as `USER hash`. The root/operator-only
+`0700` host directory prevents other host users from traversing to that file;
+only explicitly attached single-purpose containers see the direct mount. Do
+not relax the directory mode or create links to the key.
+
+Set the env-file path to `/run/secrets/hash-s3-sse-c` and mount that same file
+read-only into the server, worker, `hash-config-check`, `hash-audit-verify`, and
+recovery jobs. Never place the key bytes in an environment variable, image,
+URL, command argument, log, database, or S3 backup. Direct browser-presigned
+GETs fail closed in SSE-C mode because they would require secret request
+headers; downloads must go through Hash's authenticated server path.
+This release accepts one SSE-C key at a time. Do not rotate it in place: old
+versions would become unreadable. A future rotation must use a separately
+proved re-encryption/remapping procedure while retaining every historical key.
+
+For Compose, keep the raw host key outside the checkout, set only its path in
+`HASH_S3_SSE_C_KEY_HOST_FILE`, and explicitly add the matching override. The
+standalone override also requires the external endpoint, region, bucket,
+credentials, and bucket-lookup mode rather than falling back to bundled MinIO.
+The override grants both processes the same read-only Docker service secret:
+
+```bash
+# Bundled/standalone stack (services `hash` and `worker`):
+docker compose -f docker-compose.yml -f docker-compose.sse-c.yml up -d
+
+# Production config check remains networkless. Use the exact image selected by
+# the release and mount the one key file directly (its host parent stays 0700).
+docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --env-file /opt/hash/.env \
+  --mount type=bind,src="$HASH_S3_SSE_C_KEY_HOST_FILE",dst=/run/secrets/hash-s3-sse-c,readonly \
+  --entrypoint /usr/local/bin/hash-config-check "$HASH_IMAGE"
+
+# Production read-only audit needs both database and object-storage networks;
+# the service-derived one-shot container inherits the secret and networks.
+docker compose -f docker-compose.prod.yml -f docker-compose.prod.sse-c.yml \
+  run --rm --no-deps --entrypoint /usr/local/bin/hash-audit-verify hash
+```
+
+Both overrides mount the key read-only at `/run/secrets/hash-s3-sse-c` for the
+server and worker and set only that in-container path in their environments.
+Omitting the override preserves SSE-S3 and requires no key file. Bright
+Interaction's current automated production workflow publishes and invokes only
+`docker-compose.prod.yml` and creates its config/audit containers directly. It
+must be updated to carry the equivalent read-only key mount before an SSE-C
+production cutover; this manual override does not alter that automation.
+
+Hetzner Storage Box is SFTP/SMB/WebDAV storage, not an S3 object store, and is
+not a valid primary Hash backend. Hetzner Object Storage is a distinct service.
+Before using it, run the Object Lock E2E test below against a dedicated,
+pre-created private Object-Lock bucket and prove exact VersionId reads,
+seven-year COMPLIANCE retention, and denied permanent deletion. The basic live
+test writes one retained version under a unique prefix and therefore requires
+the explicit `HASH_E2E_S3_LIVE_CONFORMANCE=true` acknowledgement plus
+`HASH_E2E_S3_BUCKET`. It consumes `HASH_E2E_S3_REGION`,
+`HASH_E2E_S3_USE_SSL`, `HASH_E2E_S3_SSE_MODE`,
+`HASH_E2E_S3_SSE_C_KEY_FILE`, and `HASH_E2E_S3_BUCKET_LOOKUP`.
+
+```bash
+# Set credentials in the process environment without placing them on this
+# command line. HASH_E2E_S3_SSE_C_KEY_FILE is the host path in this Go test.
+HASH_E2E_S3_LIVE_CONFORMANCE=true \
+  go test -tags=e2e ./internal/e2e -run '^TestEvidenceObjectLockE2E$' -v
+```
+
+The deeper shadow/version stress proof runs automatically for ephemeral local
+MinIO. On a live provider it additionally requires
+`HASH_E2E_S3_LIVE_STRESS_CONFORMANCE=true`. Use that only with a disposable,
+dedicated bucket: it permanently extends the first version to eight years and
+writes 101 shadow versions plus one additional seven-year retained recovery
+version. A default bucket-retention rule may retain the shadows as well. The
+test deliberately cannot promise cleanup under the least-privilege principal.
+
+Do not switch an existing Hash database to a copied bucket: S3 copy/replication
+creates provider-local VersionIds, while Hash persists the original opaque IDs.
+Use a new deployment or a separately designed, atomic migration/remapping
+procedure, retain every historical SSE-C key for its objects' full retention
+period, and prove a coupled PostgreSQL/object restore before cutover.
+Likewise, do not change the encryption mode or SSE-C key of a bucket containing
+existing Hash objects: one configured key cannot read objects written under a
+different policy.
+
 ## 1. Configure
 
 Copy `.env.example` to `.env` and fill it in. `.env.example` is the
@@ -156,14 +269,27 @@ Run **two containers from the same image**, sharing the same environment:
 
 ```bash
 export HASH_IMAGE='registry.example.com/hash@sha256:<manifest-digest>'
+s3_secret_mount=()
+if [[ -n "${HASH_S3_SSE_C_KEY_HOST_FILE:-}" ]]; then
+  s3_secret_mount=(
+    --mount "type=bind,src=$HASH_S3_SSE_C_KEY_HOST_FILE,dst=/run/secrets/hash-s3-sse-c,readonly"
+  )
+fi
 
 # server (publishes 8080)
-docker run -d --name hash --env-file .env -p 8080:8080 "$HASH_IMAGE"
+docker run -d --name hash --env-file .env \
+  "${s3_secret_mount[@]}" -p 8080:8080 "$HASH_IMAGE"
 
 # worker (no port; override the entrypoint)
 docker run -d --name hash-worker --env-file .env \
+  "${s3_secret_mount[@]}" \
   --entrypoint /usr/local/bin/hash-worker "$HASH_IMAGE"
 ```
+
+For SSE-C, export only the protected host file path in
+`HASH_S3_SSE_C_KEY_HOST_FILE`; `.env` must still point
+`HASH_S3_SSE_C_KEY_FILE` at `/run/secrets/hash-s3-sse-c`. With SSE-S3, leave
+the host-path variable unset and the array adds no mount.
 
 Or use the bundled `docker-compose.yml`, which also brings up Postgres, MinIO,
 Gotenberg, and MailHog for a one-command local stack. The worker always creates
@@ -314,6 +440,7 @@ docker run -d -p 3000:3000 \
 HASH_E2E_DB_URL='postgres://hash:e2e@localhost:5432/hash?sslmode=disable' \
 HASH_E2E_S3_ENDPOINT=localhost:9000 \
 HASH_E2E_S3_ACCESS_KEY=minioadmin HASH_E2E_S3_SECRET_KEY=minioadmin \
+HASH_E2E_S3_EPHEMERAL_BUCKET=true \
 HASH_E2E_GOTENBERG_URL=http://localhost:3000 \
 go test -tags e2e -count=1 -timeout=180s ./internal/e2e/...
 ```

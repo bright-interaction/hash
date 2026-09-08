@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/encrypt"
+
+	"github.com/bright-interaction/hash/internal/s3policy"
 )
 
 func TestReadBounded(t *testing.T) {
@@ -87,7 +90,8 @@ func TestValidateObjectLockEnabled(t *testing.T) {
 func TestEvidencePutOptsUsesComplianceModeForSevenCalendarYears(t *testing.T) {
 	now := time.Date(2024, time.February, 29, 12, 30, 0, 987654321, time.FixedZone("test", 2*60*60))
 	retainUntil := EvidenceRetentionDeadline(now, 7)
-	opts := evidencePutOpts("application/pdf", retainUntil)
+	c := &Client{writeServerSideEncryption: encrypt.NewSSE()}
+	opts := c.evidencePutOpts("application/pdf", retainUntil)
 	if opts.Mode != minio.Compliance {
 		t.Fatalf("retention mode = %q, want COMPLIANCE", opts.Mode)
 	}
@@ -97,6 +101,52 @@ func TestEvidencePutOptsUsesComplianceModeForSevenCalendarYears(t *testing.T) {
 	}
 	if opts.ContentType != "application/pdf" || opts.ServerSideEncryption == nil {
 		t.Fatal("evidence write must preserve content type and SSE-S3 encryption")
+	}
+}
+
+func TestStorageOptionsCarrySSECOnEveryDataPath(t *testing.T) {
+	testKey := sha256.Sum256([]byte("public unit-test SSE-C key material"))
+	sse, err := encrypt.NewSSEC(testKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{
+		writeServerSideEncryption: sse,
+		readServerSideEncryption:  sse,
+		sseMode:                   s3policy.SSEModeC,
+	}
+
+	if got := c.putOpts("application/pdf").ServerSideEncryption; got == nil || got.Type() != encrypt.SSEC {
+		t.Fatal("put options did not carry SSE-C")
+	}
+	if got := c.evidencePutOpts("application/pdf", time.Now().UTC()).ServerSideEncryption; got == nil || got.Type() != encrypt.SSEC {
+		t.Fatal("evidence put options did not carry SSE-C")
+	}
+	if got := c.getOpts("version-1"); got.ServerSideEncryption == nil || got.ServerSideEncryption.Type() != encrypt.SSEC || got.VersionID != "version-1" {
+		t.Fatal("get options did not preserve version-bound SSE-C")
+	}
+	if got := c.statOpts("version-2"); got.ServerSideEncryption == nil || got.ServerSideEncryption.Type() != encrypt.SSEC || got.VersionID != "version-2" {
+		t.Fatal("stat options did not preserve version-bound SSE-C")
+	}
+}
+
+func TestStorageOptionsDoNotSendSSES3OnReads(t *testing.T) {
+	c := &Client{writeServerSideEncryption: encrypt.NewSSE()}
+	if got := c.putOpts("application/pdf").ServerSideEncryption; got == nil || got.Type() != encrypt.S3 {
+		t.Fatal("SSE-S3 write options were lost")
+	}
+	if c.getOpts("version-1").ServerSideEncryption != nil {
+		t.Fatal("SSE-S3 must not set encryption headers on GET")
+	}
+	if c.statOpts("version-1").ServerSideEncryption != nil {
+		t.Fatal("SSE-S3 must not set encryption headers on HEAD/Stat")
+	}
+}
+
+func TestPresignGetFailsClosedForSSEC(t *testing.T) {
+	c := &Client{sseMode: s3policy.SSEModeC}
+	if _, err := c.PresignGet(context.Background(), "legal/evidence.pdf", time.Minute); err == nil || !strings.Contains(err.Error(), "unavailable with SSE-C") {
+		t.Fatalf("SSE-C browser presign did not fail closed: %v", err)
 	}
 }
 

@@ -24,6 +24,12 @@ the supplied certificate or evidence bundle; it is not an offline verifier.
 (The Bright Interaction instance uses MinIO, Postal, and Zitadel. Alternatives must satisfy the
 runtime contracts above and the OIDC claim requirements enforced at boot/login.)
 
+Hetzner **Object Storage** can be evaluated as an S3 backend with Hash's `sse-c`
+mode; a Hetzner **Storage Box** cannot be used as primary object storage because
+it does not provide the S3 VersionId, exact-version read, and Object Lock APIs
+that Hash's evidence model requires. Storage Box remains suitable only as a
+separately verified encrypted backup target.
+
 The built-in legal pages are Bright Interaction draft templates, not reusable operator terms. A
 self-hosting operator must replace or obtain approval for its own notices, DPA, sub-processor and
 retention schedules before processing customer data.

@@ -19,6 +19,7 @@ Required:
 Options:
   --database DBNAME     psql database/connection target; otherwise PG* applies
   --endpoint URL        S3-compatible recovery endpoint; omit for AWS default
+  --sse-c-key-file FILE exactly 32 raw bytes for SSE-C GET/HEAD requests
   --output NEW_DIR      evidence directory; default is a new TMPDIR directory
   --self-test           validate object classification only; use no services
   -h, --help
@@ -177,6 +178,7 @@ EOF
 bucket=""
 database=""
 endpoint=""
+sse_c_key_file=""
 output_request=""
 self_test=0
 while (($# > 0)); do
@@ -194,6 +196,11 @@ while (($# > 0)); do
     --endpoint)
       (($# >= 2)) || die "--endpoint requires a value"
       endpoint="$2"
+      shift 2
+      ;;
+    --sse-c-key-file)
+      (($# >= 2)) || die "--sse-c-key-file requires a value"
+      sse_c_key_file="$2"
       shift 2
       ;;
     --output)
@@ -274,6 +281,21 @@ aws_args=(aws)
 if [[ -n "$endpoint" ]]; then
   aws_args+=(--endpoint-url "$endpoint")
 fi
+sse_read_args=()
+if [[ -n "$sse_c_key_file" ]]; then
+  [[ -z "$endpoint" || "$endpoint" == https://* ]] ||
+    die "--sse-c-key-file requires an HTTPS endpoint"
+  [[ "$sse_c_key_file" == /* ]] ||
+    die "--sse-c-key-file must be an absolute path"
+  [[ -f "$sse_c_key_file" && -r "$sse_c_key_file" ]] ||
+    die "--sse-c-key-file must name a readable regular file"
+  [[ "$(wc -c < "$sse_c_key_file" | tr -d ' ')" == "32" ]] ||
+    die "--sse-c-key-file must contain exactly 32 raw bytes"
+  # fileb:// lets the AWS CLI read arbitrary binary key bytes without copying
+  # them into an environment value or process argument. Never render this
+  # array or run the verifier with shell tracing enabled.
+  sse_read_args=(--sse-customer-algorithm AES256 --sse-customer-key "fileb://$sse_c_key_file")
+fi
 
 inventory_tsv="$output_dir/db-object-inventory.tsv"
 "${psql_args[@]}" --file "$inventory_sql" > "$inventory_tsv"
@@ -353,7 +375,7 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
     : > "$download_tmp"
     : > "$get_result_tmp"
     if ! "${aws_args[@]}" s3api get-object --bucket "$bucket" --key "$key" \
-        --version-id "$selected_version_id" "$download_tmp" > "$get_result_tmp" 2>/dev/null; then
+        --version-id "$selected_version_id" "${sse_read_args[@]}" "$download_tmp" > "$get_result_tmp" 2>/dev/null; then
       printf '%s\t%s\tEXACT_VERSION_GET_FAILED:%s\n' \
         "$key" "$expected_sha" "$selected_version_id" >> "$hash_mismatches"
       continue
@@ -376,7 +398,8 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
     # bounded version history. Existence-only mutable assets use latest HEAD
     # and never enter the digest-history path.
     : > "$head_tmp"
-    if "${aws_args[@]}" s3api head-object --bucket "$bucket" --key "$key" > "$head_tmp" 2>/dev/null; then
+    if "${aws_args[@]}" s3api head-object --bucket "$bucket" --key "$key" \
+        "${sse_read_args[@]}" > "$head_tmp" 2>/dev/null; then
       head_available=1
       latest_version_id="$(jq -r '.VersionId // empty' "$head_tmp")"
       latest_last_modified="$(jq -r '.LastModified // empty' "$head_tmp")"
@@ -400,6 +423,7 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
         if [[ -n "$latest_version_id" && "$latest_version_id" != "null" ]]; then
           get_args+=(--version-id "$latest_version_id")
         fi
+        get_args+=("${sse_read_args[@]}")
         if "${aws_args[@]}" "${get_args[@]}" "$download_tmp" > "$get_result_tmp" 2>/dev/null; then
           returned_version_id="$(jq -r '.VersionId // empty' "$get_result_tmp" 2>/dev/null || true)"
           if [[ -n "$latest_version_id" && "$latest_version_id" != "null" && "$returned_version_id" != "$latest_version_id" ]]; then
@@ -435,7 +459,7 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
           : > "$download_tmp"
           : > "$get_result_tmp"
           if ! "${aws_args[@]}" s3api get-object --bucket "$bucket" --key "$key" \
-              --version-id "$candidate_version" "$download_tmp" > "$get_result_tmp" 2>/dev/null; then
+              --version-id "$candidate_version" "${sse_read_args[@]}" "$download_tmp" > "$get_result_tmp" 2>/dev/null; then
             continue
           fi
           returned_version_id="$(jq -r '.VersionId // empty' "$get_result_tmp" 2>/dev/null || true)"
@@ -470,7 +494,7 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
   if [[ -n "$selected_version_id" && "$selected_version_id" != "null" ]]; then
     : > "$head_tmp"
     if ! "${aws_args[@]}" s3api head-object --bucket "$bucket" --key "$key" \
-        --version-id "$selected_version_id" > "$head_tmp" 2>/dev/null; then
+        --version-id "$selected_version_id" "${sse_read_args[@]}" > "$head_tmp" 2>/dev/null; then
       printf '%s\t%s\tEXACT_VERSION_HEAD_FAILED:%s\n' "$key" "$expected_sha" "$selected_version_id" >> "$hash_mismatches"
       continue
     fi
@@ -511,7 +535,8 @@ while IFS=$'\t' read -r key classes owners org_ids expected_sha legal refs expec
   # them, but that shadowing is retained as an operator-review finding.
   if [[ -n "$selected_version_id" && "$selected_version_id" != "null" ]]; then
     : > "$head_tmp"
-    if ! "${aws_args[@]}" s3api head-object --bucket "$bucket" --key "$key" > "$head_tmp" 2>/dev/null; then
+    if ! "${aws_args[@]}" s3api head-object --bucket "$bucket" --key "$key" \
+        "${sse_read_args[@]}" > "$head_tmp" 2>/dev/null; then
       if [[ "$shadow_reported" == "0" ]]; then
         printf '%s\t%s\t%s\t%s\t%s\n' \
           "$key" "$selected_version_id" "UNAVAILABLE" "$expected_sha" "PINNED_VERSION_HIDDEN_BY_LATEST_STATE" >> "$shadowed_references"

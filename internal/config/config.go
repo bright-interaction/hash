@@ -20,6 +20,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/bright-interaction/hash/internal/s3policy"
 )
 
 type Config struct {
@@ -43,12 +45,15 @@ type Config struct {
 
 	DBURL string
 
-	S3Endpoint  string
-	S3Region    string
-	S3Bucket    string
-	S3AccessKey string
-	S3SecretKey string
-	S3UseSSL    bool
+	S3Endpoint     string
+	S3Region       string
+	S3Bucket       string
+	S3AccessKey    string
+	S3SecretKey    string
+	S3UseSSL       bool
+	S3SSEMode      string
+	S3SSECKeyFile  string
+	S3BucketLookup string
 
 	SMTPHost     string
 	SMTPPort     int
@@ -177,6 +182,9 @@ func Load() (*Config, error) {
 		S3AccessKey:                  os.Getenv("HASH_S3_ACCESS_KEY"),
 		S3SecretKey:                  os.Getenv("HASH_S3_SECRET_KEY"),
 		S3UseSSL:                     s3UseSSL,
+		S3SSEMode:                    envString("HASH_S3_SSE_MODE", s3policy.SSEModeS3),
+		S3SSECKeyFile:                os.Getenv("HASH_S3_SSE_C_KEY_FILE"),
+		S3BucketLookup:               envString("HASH_S3_BUCKET_LOOKUP", s3policy.BucketLookupAuto),
 		SMTPHost:                     os.Getenv("HASH_SMTP_HOST"),
 		SMTPPort:                     smtpPort,
 		SMTPUser:                     os.Getenv("HASH_SMTP_USER"),
@@ -306,6 +314,12 @@ func Load() (*Config, error) {
 
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ", "))
+	}
+	// Configcheck runs without a network and must still catch an unreadable,
+	// malformed, or plaintext-transport SSE-C deployment before cutover. Load
+	// reads at most 33 bytes and never renders the key contents.
+	if _, err := s3policy.Load(c.S3SSEMode, c.S3SSECKeyFile, c.S3BucketLookup, c.S3UseSSL); err != nil {
+		return nil, err
 	}
 	if err := validateDatabaseConfig(c.DBURL, c.Environment); err != nil {
 		return nil, err
