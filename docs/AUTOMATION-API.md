@@ -21,10 +21,12 @@ Idempotency-Key: <stable request or delivery id>
 
 `X-API-Key` is accepted instead of `Authorization`. Send exactly one
 `Idempotency-Key`, between 1 and 200 UTF-8 bytes with no surrounding whitespace
-or control characters. Do not use an email address as the key. Reactor should
-derive a stable, workflow-namespaced key from the inbound event id so separate
-partners and workflows cannot collide in the organization-wide Hash namespace.
-Direct callers should apply the same producer/operation namespace rule.
+or control characters. Do not use an email address as the key. Reactor derives
+the key from an operator-owned, globally unique namespace for the target Hash
+organization plus the immutable workflow slug and inbound event id. The
+namespace must differ for separate partner/integration trust boundaries even
+when their tenant-local workflow slugs happen to match. Direct callers should
+apply the same producer/operation namespace rule.
 The request body must be one valid UTF-8 JSON object; malformed byte sequences,
 duplicate or unknown members, and trailing JSON values are rejected.
 
