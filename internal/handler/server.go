@@ -123,6 +123,11 @@ type Server struct {
 	// transaction/send orchestrator. Production always uses the Server-backed
 	// implementation and its durable idempotency table.
 	automationSignatureRequestProcessorOverride automationSignatureRequestProcessor
+	// automationTemplateSnapshotHook lets the PostgreSQL E2E suite pause after
+	// a pinned template row is validated while its FOR SHARE lock is held. It is
+	// nil in production and exists only to make the update/materialize race
+	// deterministic rather than timing-dependent.
+	automationTemplateSnapshotHook func()
 	// EvidenceTrustedPublicKeys pins bundle verification to this Hash issuer.
 	// Cryptographically valid bundles signed by arbitrary self-supplied keys
 	// must never receive an issuer-authentic OK result.

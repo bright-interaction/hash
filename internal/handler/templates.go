@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path"
@@ -21,6 +22,7 @@ import (
 	blockschema "github.com/bright-interaction/hash/internal/blocks"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/sanitize"
+	"github.com/bright-interaction/hash/internal/templatepin"
 )
 
 const maxPDFUpload = 50 << 20 // 50 MB
@@ -39,12 +41,13 @@ type templateResponse struct {
 	PageCount     int32           `json:"page_count,omitempty"`
 	FieldsJSON    json.RawMessage `json:"fields_json"`
 	Version       int32           `json:"version"`
+	ContentSHA256 string          `json:"content_sha256,omitempty"`
 	CreatedBy     uuid.UUID       `json:"created_by"`
 	CreatedAt     string          `json:"created_at"`
 	UpdatedAt     string          `json:"updated_at"`
 }
 
-func toTemplateResponse(t *generated.Template) templateResponse {
+func toTemplateResponse(t *generated.Template) (templateResponse, error) {
 	resp := templateResponse{
 		ID:            t.ID,
 		OrgID:         t.OrgID,
@@ -67,7 +70,23 @@ func toTemplateResponse(t *generated.Template) templateResponse {
 	if t.PageCount.Valid {
 		resp.PageCount = t.PageCount.Int32
 	}
-	return resp
+	if t.SourceKind == "blocks" {
+		content, err := templatepin.Canonicalize(t.BlocksJson, t.VariablesJson)
+		if err != nil {
+			return templateResponse{}, fmt.Errorf("compute template content digest: %w", err)
+		}
+		resp.ContentSHA256 = content.SHA256Hex()
+	}
+	return resp, nil
+}
+
+func writeTemplateResponse(w http.ResponseWriter, status int, template *generated.Template) {
+	response, err := toTemplateResponse(template)
+	if err != nil {
+		writeInternalErrorMsg(w, "template has invalid canonical content", err)
+		return
+	}
+	writeJSON(w, status, response)
 }
 
 // handleListTemplates returns a paginated list of non-archived templates for
@@ -89,7 +108,12 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]templateResponse, 0, len(rows))
 	for _, t := range rows {
-		out = append(out, toTemplateResponse(t))
+		response, err := toTemplateResponse(t)
+		if err != nil {
+			writeInternalErrorMsg(w, "template has invalid canonical content", err)
+			return
+		}
+		out = append(out, response)
 	}
 	total, _ := s.Queries.CountTemplates(r.Context(), u.OrgID)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -173,7 +197,7 @@ func (s *Server) createBlocksTemplate(w http.ResponseWriter, r *http.Request, us
 		writeError(w, http.StatusInternalServerError, "create template failed")
 		return
 	}
-	writeJSON(w, http.StatusCreated, toTemplateResponse(t))
+	writeTemplateResponse(w, http.StatusCreated, t)
 }
 
 type createStarterTemplateInput struct {
@@ -231,7 +255,7 @@ func (s *Server) handleCreateStarterTemplate(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "create template failed")
 		return
 	}
-	writeJSON(w, http.StatusCreated, toTemplateResponse(t))
+	writeTemplateResponse(w, http.StatusCreated, t)
 }
 
 func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID) {
@@ -329,7 +353,7 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, toTemplateResponse(t))
+	writeTemplateResponse(w, http.StatusCreated, t)
 }
 
 func looksLikePDF(data []byte) bool {
@@ -354,7 +378,7 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "get template failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, toTemplateResponse(t))
+	writeTemplateResponse(w, http.StatusOK, t)
 }
 
 type updateTemplateInput struct {
@@ -433,7 +457,7 @@ func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "update template failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, toTemplateResponse(t))
+		writeTemplateResponse(w, http.StatusOK, t)
 	case "pdf":
 		fields := in.FieldsJSON
 		if len(fields) == 0 {
@@ -459,7 +483,7 @@ func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "update template failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, toTemplateResponse(t))
+		writeTemplateResponse(w, http.StatusOK, t)
 	default:
 		writeError(w, http.StatusInternalServerError, "unknown template source kind")
 	}

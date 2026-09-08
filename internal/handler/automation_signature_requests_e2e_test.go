@@ -28,6 +28,7 @@ import (
 	"github.com/bright-interaction/hash/internal/dispatch"
 	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
+	"github.com/bright-interaction/hash/internal/templatepin"
 )
 
 func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing.T) {
@@ -74,8 +75,12 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	}
 	template, err := q.CreateBlocksTemplate(ctx, generated.CreateBlocksTemplateParams{
 		OrgID: org.ID, Name: "Partner agreement", BlocksJson: blocksJSON,
-		VariablesJson: json.RawMessage(`{"customer.name":"Template default"}`), CreatedBy: user.ID,
+		VariablesJson: json.RawMessage(`{"customer.name":"Template default","company.name":"Example AB"}`), CreatedBy: user.ID,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	templateContent, err := templatepin.Canonicalize(template.BlocksJson, template.VariablesJson)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,11 +89,14 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		PublicURL: "https://hash.example.test", OrgName: "Hash E2E",
 	}
 	server := &Server{Pool: pool, Queries: q, Audit: auditLog, Send: sendEngine}
-	prepared, requestHash, err := prepareAutomationSignatureRequest(automationSignatureRequestInput{
-		TemplateID: template.ID.String(), Name: "Ada partner agreement", LawfulBasis: "contract",
+	baseRequestInput := automationSignatureRequestInput{
+		TemplateID: template.ID.String(), TemplateVersion: template.Version,
+		TemplateContentSHA256: templateContent.SHA256Hex(),
+		Name:                  "Ada partner agreement", LawfulBasis: "contract",
 		Variables:  map[string]string{"customer.name": "Ada"},
 		Recipients: []automationSignatureRecipientInput{{Email: "ada@example.test", Name: "Ada", Locale: "en"}},
-	})
+	}
+	prepared, requestHash, err := prepareAutomationSignatureRequest(baseRequestInput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +104,78 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		User:    auth.SessionUser{UserID: user.ID, OrgID: org.ID, Role: user.Role, Email: user.Email},
 		Request: prepared, IdempotencyKeyHash: automationIdempotencyKeyHash("e2e-send-" + uuid.NewString()),
 		RequestHash: requestHash, IP: "127.0.0.1", UserAgent: "hash-e2e",
+	}
+	type durableCounts struct {
+		Requests, Documents, Recipients, Versions, Audits, Emails, Webhooks int
+	}
+	readDurableCounts := func(email string) durableCounts {
+		t.Helper()
+		var counts durableCounts
+		if err := pool.QueryRow(ctx, `SELECT
+			(SELECT count(*) FROM automation_signature_requests WHERE org_id = $1),
+			(SELECT count(*) FROM documents WHERE org_id = $1),
+			(SELECT count(*) FROM recipients r JOIN documents d ON d.id = r.document_id WHERE d.org_id = $1),
+			(SELECT count(*) FROM document_versions WHERE org_id = $1),
+			(SELECT count(*) FROM events WHERE org_id = $1),
+			(SELECT count(*) FROM email_deliveries WHERE to_email = $2),
+			(SELECT count(*) FROM webhook_deliveries wd JOIN events e ON e.id = wd.event_id WHERE e.org_id = $1)`,
+			org.ID, email,
+		).Scan(&counts.Requests, &counts.Documents, &counts.Recipients, &counts.Versions, &counts.Audits, &counts.Emails, &counts.Webhooks); err != nil { //nolint:rawsql
+			t.Fatal(err)
+		}
+		return counts
+	}
+	differentDigest := func(value string) string {
+		first := byte('0')
+		if value[0] == first {
+			first = '1'
+		}
+		return string(first) + value[1:]
+	}
+	for _, test := range []struct {
+		name                string
+		mutate              func(*automationSignatureRequestInput)
+		wantContentMismatch bool
+		wantExpectedVersion int32
+	}{
+		{
+			name: "version mismatch", wantExpectedVersion: template.Version + 1,
+			mutate: func(in *automationSignatureRequestInput) { in.TemplateVersion++ },
+		},
+		{
+			name: "content mismatch", wantContentMismatch: true, wantExpectedVersion: template.Version,
+			mutate: func(in *automationSignatureRequestInput) {
+				in.TemplateContentSHA256 = differentDigest(in.TemplateContentSHA256)
+			},
+		},
+	} {
+		t.Run("pin "+test.name+" leaves no durable state", func(t *testing.T) {
+			mismatched := baseRequestInput
+			mismatched.Recipients = []automationSignatureRecipientInput{{
+				Email: uuid.NewString() + "@pin-mismatch.test", Name: "Mismatch", Locale: "en",
+			}}
+			test.mutate(&mismatched)
+			mismatchedPrepared, mismatchedHash, err := prepareAutomationSignatureRequest(mismatched)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mismatchedProcess := processInput
+			mismatchedProcess.Request = mismatchedPrepared
+			mismatchedProcess.RequestHash = mismatchedHash
+			mismatchedProcess.IdempotencyKeyHash = automationIdempotencyKeyHash("e2e-pin-mismatch-" + uuid.NewString())
+			before := readDurableCounts(mismatched.Recipients[0].Email)
+			_, _, callErr := server.materializeAutomationSignatureRequest(ctx, mismatchedProcess)
+			var precondition *automationTemplatePreconditionError
+			if !errors.As(callErr, &precondition) || precondition.ActualVersion != template.Version ||
+				precondition.ExpectedVersion != test.wantExpectedVersion ||
+				precondition.ContentDigestMismatch != test.wantContentMismatch {
+				t.Fatalf("precondition error = %#v/%v", precondition, callErr)
+			}
+			after := readDurableCounts(mismatched.Recipients[0].Email)
+			if after != before {
+				t.Fatalf("pin mismatch leaked durable state: before=%#v after=%#v", before, after)
+			}
+		})
 	}
 
 	first, err := server.processAutomationSignatureRequest(ctx, processInput)
@@ -117,12 +197,32 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		t.Fatal(err)
 	}
 	variables, err := blocks.ParseVariableValues(document.VariablesJson)
-	if err != nil || variables["customer.name"] != "Ada" {
+	if err != nil || variables["customer.name"] != "Ada" || variables["company.name"] != "Example AB" {
 		t.Fatalf("frozen variables = %#v/%v", variables, err)
+	}
+	copiedTemplateContent, err := templatepin.Canonicalize(document.BlocksJson, template.VariablesJson)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copiedTemplateContent.SHA256 != templateContent.SHA256 {
+		t.Fatalf("document copied content digest = %s, want pinned %s", copiedTemplateContent.SHA256Hex(), templateContent.SHA256Hex())
 	}
 	versions, err := q.CountDocumentVersions(ctx, document.ID)
 	if err != nil || versions != 1 {
 		t.Fatalf("document versions = %d/%v, want 1", versions, err)
+	}
+	var versionBlocksMatch, versionVariablesMatch bool
+	if err := pool.QueryRow(ctx, `SELECT
+		v.block_tree_json = d.blocks_json,
+		v.variables_json = d.variables_json
+		FROM document_versions v
+		JOIN documents d ON d.id = v.document_id
+		WHERE v.document_id = $1 AND v.version_no = 1`, document.ID,
+	).Scan(&versionBlocksMatch, &versionVariablesMatch); err != nil { //nolint:rawsql
+		t.Fatal(err)
+	}
+	if !versionBlocksMatch || !versionVariablesMatch {
+		t.Fatalf("initial version did not exactly snapshot copied blocks/variables: %v/%v", versionBlocksMatch, versionVariablesMatch)
 	}
 	var documentCount, recipientCount int
 	if err := pool.QueryRow(ctx, `SELECT
@@ -149,18 +249,60 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 		t.Fatalf("lifecycle automation_request_id = %q, want %q",
 			lifecycleEvent.AutomationRequestID, first.AutomationRequestID)
 	}
+	var createPayloadJSON []byte
+	if err := pool.QueryRow(ctx, `SELECT payload_hashed FROM events WHERE document_id = $1 AND kind = 'document.created' ORDER BY created_at LIMIT 1`, first.DocumentID).Scan(&createPayloadJSON); err != nil { //nolint:rawsql
+		t.Fatal(err)
+	}
+	var createProvenance struct {
+		TemplateID            uuid.UUID `json:"template_id"`
+		TemplateVersion       int32     `json:"template_version"`
+		TemplateContentSHA256 string    `json:"template_content_sha256"`
+	}
+	if err := json.Unmarshal(createPayloadJSON, &createProvenance); err != nil {
+		t.Fatal(err)
+	}
+	if createProvenance.TemplateID != template.ID || createProvenance.TemplateVersion != template.Version ||
+		createProvenance.TemplateContentSHA256 != templateContent.SHA256Hex() {
+		t.Fatalf("immutable create provenance = %#v", createProvenance)
+	}
 
 	collision := processInput
 	collision.RequestHash[0] ^= 0xff
 	if _, err := server.processAutomationSignatureRequest(ctx, collision); !errors.Is(err, errAutomationIdempotencyConflict) {
 		t.Fatalf("same key/different request error = %v", err)
 	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*automationSignatureRequestInput)
+	}{
+		{name: "changed template version", mutate: func(in *automationSignatureRequestInput) { in.TemplateVersion++ }},
+		{name: "changed template digest", mutate: func(in *automationSignatureRequestInput) {
+			in.TemplateContentSHA256 = differentDigest(in.TemplateContentSHA256)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := baseRequestInput
+			test.mutate(&changed)
+			changedPrepared, changedHash, err := prepareAutomationSignatureRequest(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changedInput := processInput
+			changedInput.Request = changedPrepared
+			changedInput.RequestHash = changedHash
+			if _, err := server.processAutomationSignatureRequest(ctx, changedInput); !errors.Is(err, errAutomationIdempotencyConflict) {
+				t.Fatalf("same idempotency key/changed pin error = %v", err)
+			}
+		})
+	}
 
 	// A command can materialize successfully and then sit in a retry queue. The
 	// replay must re-check the persisted absolute deadline instead of sending a
 	// draft whose signing links are already too close to expiry.
 	expiringPrepared, expiringHash, err := prepareAutomationSignatureRequest(automationSignatureRequestInput{
-		TemplateID: template.ID.String(), Name: "Expiring partner agreement", LawfulBasis: "contract",
+		TemplateID: template.ID.String(), TemplateVersion: template.Version,
+		TemplateContentSHA256: templateContent.SHA256Hex(),
+		Name:                  "Expiring partner agreement", LawfulBasis: "contract",
 		Variables:  map[string]string{"customer.name": "Grace"},
 		Recipients: []automationSignatureRecipientInput{{Email: "grace@example.test", Name: "Grace", Locale: "en"}},
 		ExpiresAt:  time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano),
@@ -397,6 +539,128 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 	}
 	if firstCount != 1 || replayCount != 1 {
 		t.Fatalf("concurrent first/replay = %d/%d, want 1/1", firstCount, replayCount)
+	}
+
+	// Hold materialization immediately after it validates a FOR SHARE snapshot,
+	// then race an in-place template update. The edit must wait until the old
+	// block/default pair has been copied and committed; a document may never
+	// combine columns from different template revisions.
+	raceTree := blocks.Tree{Version: blocks.SchemaVersion, Blocks: []blocks.Block{
+		{ID: "race-body", Type: blocks.TypeParagraph, Text: "Old approved {{customer.name}}"},
+		{ID: "race-signature", Type: blocks.TypeSignatureField, Attrs: map[string]any{"recipient_role": "signer"}},
+	}}
+	raceBlocksJSON, err := json.Marshal(raceTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raceTemplate, err := q.CreateBlocksTemplate(ctx, generated.CreateBlocksTemplateParams{
+		OrgID: org.ID, Name: "Concurrent approved template", BlocksJson: raceBlocksJSON,
+		VariablesJson: json.RawMessage(`{"customer.name":"Old default"}`), CreatedBy: user.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raceContent, err := templatepin.Canonicalize(raceTemplate.BlocksJson, raceTemplate.VariablesJson)
+	if err != nil {
+		t.Fatal(err)
+	}
+	racePrepared, raceHash, err := prepareAutomationSignatureRequest(automationSignatureRequestInput{
+		TemplateID: raceTemplate.ID.String(), TemplateVersion: raceTemplate.Version,
+		TemplateContentSHA256: raceContent.SHA256Hex(), Name: "Pinned concurrent agreement", LawfulBasis: "contract",
+		Recipients: []automationSignatureRecipientInput{{Email: "concurrent@example.test", Name: "Concurrent", Locale: "en"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raceInput := processInput
+	raceInput.Request = racePrepared
+	raceInput.RequestHash = raceHash
+	raceInput.IdempotencyKeyHash = automationIdempotencyKeyHash("e2e-template-update-race-" + uuid.NewString())
+	snapshotReady := make(chan struct{})
+	releaseSnapshot := make(chan struct{})
+	releasedSnapshot := false
+	server.automationTemplateSnapshotHook = func() {
+		close(snapshotReady)
+		<-releaseSnapshot
+	}
+	defer func() {
+		if !releasedSnapshot {
+			close(releaseSnapshot)
+		}
+		server.automationTemplateSnapshotHook = nil
+	}()
+	materialized := make(chan struct {
+		request *generated.AutomationSignatureRequest
+		err     error
+	}, 1)
+	go func() {
+		request, _, callErr := server.materializeAutomationSignatureRequest(ctx, raceInput)
+		materialized <- struct {
+			request *generated.AutomationSignatureRequest
+			err     error
+		}{request: request, err: callErr}
+	}()
+	select {
+	case <-snapshotReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("materialization did not reach the pinned template snapshot")
+	}
+	updatedTree := blocks.Tree{Version: blocks.SchemaVersion, Blocks: []blocks.Block{
+		{ID: "race-body", Type: blocks.TypeParagraph, Text: "New unapproved {{customer.name}}"},
+		{ID: "race-signature", Type: blocks.TypeSignatureField, Attrs: map[string]any{"recipient_role": "signer"}},
+	}}
+	updatedBlocksJSON, err := json.Marshal(updatedTree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateStarted := make(chan struct{})
+	updated := make(chan struct {
+		template *generated.Template
+		err      error
+	}, 1)
+	go func() {
+		close(updateStarted)
+		value, callErr := q.UpdateBlocksTemplate(ctx, generated.UpdateBlocksTemplateParams{
+			ID: raceTemplate.ID, OrgID: org.ID, Name: raceTemplate.Name,
+			BlocksJson: updatedBlocksJSON, VariablesJson: json.RawMessage(`{"customer.name":"New default"}`),
+		})
+		updated <- struct {
+			template *generated.Template
+			err      error
+		}{template: value, err: callErr}
+	}()
+	<-updateStarted
+	select {
+	case result := <-updated:
+		t.Fatalf("concurrent template update escaped the pinned snapshot lock: %#v/%v", result.template, result.err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(releaseSnapshot)
+	releasedSnapshot = true
+	materializeResult := <-materialized
+	if materializeResult.err != nil {
+		t.Fatalf("materialize pinned concurrent snapshot: %v", materializeResult.err)
+	}
+	updateResult := <-updated
+	if updateResult.err != nil || updateResult.template.Version != raceTemplate.Version+1 {
+		t.Fatalf("concurrent template update = %#v/%v", updateResult.template, updateResult.err)
+	}
+	server.automationTemplateSnapshotHook = nil
+	raceDocumentID := uuid.UUID(materializeResult.request.DocumentID.Bytes)
+	raceDocument, err := q.GetDocument(ctx, generated.GetDocumentParams{ID: raceDocumentID, OrgID: org.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	copiedRaceContent, err := templatepin.Canonicalize(raceDocument.BlocksJson, raceTemplate.VariablesJson)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copiedRaceVariables, err := blocks.ParseVariableValues(raceDocument.VariablesJson)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copiedRaceContent.SHA256 != raceContent.SHA256 || copiedRaceVariables["customer.name"] != "Old default" {
+		t.Fatalf("concurrent document mixed template revisions: digest=%s variables=%#v", copiedRaceContent.SHA256Hex(), copiedRaceVariables)
 	}
 
 	// Simulate the existing hard purge of an abandoned draft. ON DELETE SET

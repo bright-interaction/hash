@@ -37,11 +37,36 @@ than document-scoped, and carry both existing scopes:
 API-key issuance is a core Hash capability and is not gated on the optional MCP
 feature. Calling `/mcp` with that key remains plan-gated independently.
 
+Every automation request must pin the exact operator-approved blocks-template
+snapshot in every environment. Hash does not accept an unpinned development or
+legacy form of this command. From an authenticated template read, copy the
+blocks template's `version` and `content_sha256` into the trusted integration
+configuration:
+
+`GET /api/v1/templates/44bf21a1-26f8-4d85-a444-968649ba891d`
+
+```json
+{
+  "id": "44bf21a1-26f8-4d85-a444-968649ba891d",
+  "source_kind": "blocks",
+  "version": 7,
+  "content_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+The authenticated `GET /api/v1/templates` list exposes the same fields. Review
+the returned block content and default variables before approving those pins;
+do not let webhook or customer input select them. A later template edit always
+increments `version`. Even if an edit produces the same content digest, the old
+version pin no longer authorizes that revision.
+
 Request body:
 
 ```json
 {
   "template_id": "44bf21a1-26f8-4d85-a444-968649ba891d",
+  "template_version": 7,
+  "template_content_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "name": "Partner agreement — Ada Lovelace",
   "variables": {
     "customer.name": "Ada Lovelace",
@@ -61,6 +86,30 @@ Request body:
   "expires_at": "2026-09-30T12:00:00Z"
 }
 ```
+
+`template_version` must be a positive JSON integer.
+`template_content_sha256` must be exactly 64 lowercase hexadecimal characters;
+uppercase, prefixes such as `sha256:`, and surrounding whitespace are rejected.
+
+Hash computes `content_sha256` deterministically from the persisted normalized
+block tree and the template's default variables—not from request overlays or
+the template name. The canonical payload is the UTF-8 sequence
+`{"blocks":<canonical-block-tree>,"variables":<canonical-defaults>}` with no
+insignificant whitespace. The block tree is decoded through Hash's strict v1
+schema, must already contain every persisted block ID, and is re-encoded in
+schema field order with object keys sorted. Defaults are decoded as the strict
+`map[string]string` contract and re-encoded with keys sorted. The lowercase
+digest is:
+
+```text
+hex(SHA-256("hash:template-content:v1\0" || canonical-payload))
+```
+
+The authenticated response value is authoritative and avoids differences
+between JSON encoders. Standalone verification tooling that computes the value
+itself must reproduce the algorithm in `internal/templatepin.Canonicalize`
+exactly and use the persisted template response, not a pre-create authoring tree
+whose missing block IDs have not yet been assigned.
 
 `variables` may be omitted and otherwise accepts at most 256 string values.
 Every variable name must match `^[A-Za-z_][A-Za-z0-9_.]*$`, and each decoded
@@ -87,6 +136,12 @@ variables, atomically creates recipients, an initial version, audit events, and
 the durable idempotency binding, then invokes Hash's normal send/sealing engine.
 The template must therefore contain a valid required signature field and the
 request must provide exactly the signing roles that template requires.
+The organization-scoped template row is read and held through materialization,
+so a concurrent edit either wins first and returns a clean pin-precondition
+failure, or waits while Hash commits one self-consistent pinned snapshot. It
+cannot mix blocks, defaults, or version from different revisions. The immutable
+`document.created` audit payload records the template id, version, and content
+digest used for the copy.
 
 New success returns `201 Created`:
 
@@ -145,9 +200,11 @@ secret material.
 ## Idempotency and errors
 
 Hash stores domain-separated SHA-256 correlations for the key and canonical
-request, not the raw delivery id or customer payload. Concurrent equivalent
-requests converge on one automation request and one document. A send interrupted
-in the durable `sealing` state is resumed through the normal recovery path.
+request, not the raw delivery id or customer payload. The canonical request hash
+includes both template pins, so reusing an accepted idempotency key with a
+different version or digest returns `409`. Concurrent equivalent requests
+converge on one automation request and one document. A send interrupted in the
+durable `sealing` state is resumed through the normal recovery path.
 
 Relevant responses:
 
@@ -162,6 +219,7 @@ Relevant responses:
 | `404` | The organization cannot access the selected template. |
 | `409` | The idempotency key was reused with different canonical content, or the send lifecycle has a conflict. |
 | `410` | The bound draft was deleted and later hard-purged; its replay tombstone prevents recreation. |
+| `412` | The accessible template's current version or canonical content digest does not match the required pin. Nothing was materialized. |
 | `415` | The request did not provide exactly one UTF-8 `application/json` content type. |
 | `422` | The selected template is not a valid block-template automation source. |
 | `503` | A required entitlement/provider dependency is temporarily unavailable. |
@@ -172,11 +230,20 @@ Transport failures, timeouts, an ambiguous or malformed `2xx`, `408`, `425`,
 `429`, and retryable `5xx` responses may be retried with the exact same
 idempotency key and body.
 
+Hash uses `412 Precondition Failed` for template-pin drift and reserves `409`
+for an already-established idempotency or lifecycle conflict. After a `412`, an
+operator must read and review the new template snapshot before changing the
+trusted pins; automatic refresh would defeat the approval boundary. Because the
+failed claim is rolled back, retrying the reviewed body with the original key is
+safe unless another request established that key in the meantime, in which case
+Hash returns `409`.
+
 A replay can recover the original ceremony but cannot authorize a new one. If
 a human has revised a change-requested document back to draft, replaying the
 old command returns `409`; the sender must review and send that revision through
-a newly authorized workflow. Quota and stable template/recipient validation run
-before the materialization transaction commits, so a rejected `400`, `402`, or
-`422` does not leave an unreported draft or recipient record behind. A transient
-failure after durable send preparation remains recoverable by retrying the same
-key.
+a newly authorized workflow. Template pins, quota, and stable
+template/recipient validation run before the materialization transaction
+commits, so a rejected `400`, `402`, `412`, or `422` does not leave an
+idempotency row, unreported draft, recipient, version, audit, or outbox record
+behind. A transient failure after durable send preparation remains recoverable
+by retrying the same key.

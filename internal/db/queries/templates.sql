@@ -15,6 +15,14 @@ RETURNING *;
 -- name: GetTemplate :one
 SELECT * FROM templates WHERE id = $1 AND org_id = $2 AND archived_at IS NULL;
 
+-- name: GetTemplateForShare :one
+-- Automation materialization keeps this row lock until its document snapshot
+-- commits. A concurrent edit therefore lands entirely before the pinned read
+-- (and fails its precondition) or entirely after the copied snapshot.
+SELECT * FROM templates
+WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
+FOR SHARE;
+
 -- name: ListTemplates :many
 SELECT * FROM templates
 WHERE org_id = $1 AND archived_at IS NULL

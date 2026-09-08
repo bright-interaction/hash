@@ -12,6 +12,7 @@ export interface TemplateResponse {
   page_count?: number;
   fields_json: unknown;
   version: number;
+  content_sha256?: string;
   created_by: string;
   created_at: string;
   updated_at: string;

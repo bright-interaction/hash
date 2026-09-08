@@ -179,6 +179,45 @@ func (q *Queries) GetTemplate(ctx context.Context, arg GetTemplateParams) (*Temp
 	return &i, err
 }
 
+const getTemplateForShare = `-- name: GetTemplateForShare :one
+SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required FROM templates
+WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
+FOR SHARE
+`
+
+type GetTemplateForShareParams struct {
+	ID    uuid.UUID `json:"id"`
+	OrgID uuid.UUID `json:"org_id"`
+}
+
+// Automation materialization keeps this row lock until its document snapshot
+// commits. A concurrent edit therefore lands entirely before the pinned read
+// (and fails its precondition) or entirely after the copied snapshot.
+func (q *Queries) GetTemplateForShare(ctx context.Context, arg GetTemplateForShareParams) (*Template, error) {
+	row := q.db.QueryRow(ctx, getTemplateForShare, arg.ID, arg.OrgID)
+	var i Template
+	err := row.Scan(
+		&i.ID,
+		&i.OrgID,
+		&i.Name,
+		&i.SourceKind,
+		&i.BlocksJson,
+		&i.VariablesJson,
+		&i.PdfStorageKey,
+		&i.PdfSha256,
+		&i.PageCount,
+		&i.FieldsJson,
+		&i.Version,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ArchivedAt,
+		&i.PdfStorageVersionID,
+		&i.EvidenceVersionPinRequired,
+	)
+	return &i, err
+}
+
 const listTemplates = `-- name: ListTemplates :many
 SELECT id, org_id, name, source_kind, blocks_json, variables_json, pdf_storage_key, pdf_sha256, page_count, fields_json, version, created_by, created_at, updated_at, archived_at, pdf_storage_version_id, evidence_version_pin_required FROM templates
 WHERE org_id = $1 AND archived_at IS NULL

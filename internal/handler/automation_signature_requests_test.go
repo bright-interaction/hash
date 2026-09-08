@@ -47,14 +47,17 @@ func (v automationAPIKeyVerifier) LookupByPrefix(context.Context, string) (uuid.
 
 func (v automationAPIKeyVerifier) Claim(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
+const testAutomationTemplateSHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 func validAutomationRequestBody(templateID uuid.UUID) string {
-	return `{"template_id":"` + templateID.String() + `","name":"Partner agreement","variables":{"customer.name":"Ada"},"recipients":[{"email":"ada@example.test","name":"Ada"}],"lawful_basis":"contract"}`
+	return `{"template_id":"` + templateID.String() + `","template_version":1,"template_content_sha256":"` + testAutomationTemplateSHA256 + `","name":"Partner agreement","variables":{"customer.name":"Ada"},"recipients":[{"email":"ada@example.test","name":"Ada"}],"lawful_basis":"contract"}`
 }
 
 func TestPrepareAutomationSignatureRequestCanonicalizesDefaultsAndSemanticEquivalents(t *testing.T) {
 	templateID := uuid.New()
 	first, firstHash, err := prepareAutomationSignatureRequest(automationSignatureRequestInput{
-		TemplateID: templateID.String(), Name: " Partner agreement ", LawfulBasis: " contract ",
+		TemplateID: templateID.String(), TemplateVersion: 7, TemplateContentSHA256: testAutomationTemplateSHA256,
+		Name: " Partner agreement ", LawfulBasis: " contract ",
 		Variables: map[string]string{"customer.name": "Ada", "customer.id": "00042"},
 		Recipients: []automationSignatureRecipientInput{{
 			Email: " ada@example.test ", Name: " Ada Lovelace ",
@@ -65,7 +68,8 @@ func TestPrepareAutomationSignatureRequestCanonicalizesDefaultsAndSemanticEquiva
 		t.Fatal(err)
 	}
 	second, secondHash, err := prepareAutomationSignatureRequest(automationSignatureRequestInput{
-		TemplateID: templateID.String(), Name: "Partner agreement", LawfulBasis: "contract",
+		TemplateID: templateID.String(), TemplateVersion: 7, TemplateContentSHA256: testAutomationTemplateSHA256,
+		Name: "Partner agreement", LawfulBasis: "contract",
 		Variables: map[string]string{"customer.id": "00042", "customer.name": "Ada"},
 		Recipients: []automationSignatureRecipientInput{{
 			Role: "signer", Email: "ada@example.test", Name: "Ada Lovelace", Locale: "en-GB",
@@ -84,7 +88,8 @@ func TestPrepareAutomationSignatureRequestCanonicalizesDefaultsAndSemanticEquiva
 	}
 	second.Variables["customer.id"] = "42"
 	_, changedHash, err := prepareAutomationSignatureRequest(automationSignatureRequestInput{
-		TemplateID: second.TemplateID.String(), Name: second.Name, LawfulBasis: second.LawfulBasis,
+		TemplateID: second.TemplateID.String(), TemplateVersion: second.TemplateVersion,
+		TemplateContentSHA256: second.TemplateContentSHA256, Name: second.Name, LawfulBasis: second.LawfulBasis,
 		Variables: second.Variables,
 		Recipients: []automationSignatureRecipientInput{{
 			Role: "signer", Email: "ada@example.test", Name: "Ada Lovelace", Locale: "en",
@@ -99,9 +104,38 @@ func TestPrepareAutomationSignatureRequestCanonicalizesDefaultsAndSemanticEquiva
 	}
 }
 
+func TestPrepareAutomationSignatureRequestPinsParticipateInRequestHash(t *testing.T) {
+	t.Parallel()
+	base := automationSignatureRequestInput{
+		TemplateID: uuid.NewString(), TemplateVersion: 3, TemplateContentSHA256: testAutomationTemplateSHA256,
+		Name: "Partner agreement", LawfulBasis: "contract",
+		Recipients: []automationSignatureRecipientInput{{Email: "ada@example.test", Name: "Ada"}},
+	}
+	_, baseHash, err := prepareAutomationSignatureRequest(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedVersion := base
+	changedVersion.TemplateVersion++
+	_, versionHash, err := prepareAutomationSignatureRequest(changedVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedDigest := base
+	changedDigest.TemplateContentSHA256 = strings.Repeat("a", sha256.Size*2)
+	_, digestHash, err := prepareAutomationSignatureRequest(changedDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseHash == versionHash || baseHash == digestHash || versionHash == digestHash {
+		t.Fatal("template version/content pins were not independently bound to the canonical request hash")
+	}
+}
+
 func TestPrepareAutomationSignatureRequestCanonicalizesCRMRegionalLocale(t *testing.T) {
 	prepared, _, err := prepareAutomationSignatureRequest(automationSignatureRequestInput{
-		TemplateID: uuid.NewString(), Name: "Partner agreement", LawfulBasis: "contract",
+		TemplateID: uuid.NewString(), TemplateVersion: 1, TemplateContentSHA256: testAutomationTemplateSHA256,
+		Name: "Partner agreement", LawfulBasis: "contract",
 		Recipients: []automationSignatureRecipientInput{{
 			Role: "signer", Email: "ada@example.test", Name: "Ada Lovelace", Locale: "sv-SE",
 		}},
@@ -116,7 +150,8 @@ func TestPrepareAutomationSignatureRequestCanonicalizesCRMRegionalLocale(t *test
 
 func TestPrepareAutomationSignatureRequestRejectsUnsafeOrUnsupportedInput(t *testing.T) {
 	base := automationSignatureRequestInput{
-		TemplateID: uuid.NewString(), Name: "Agreement", LawfulBasis: "contract",
+		TemplateID: uuid.NewString(), TemplateVersion: 1, TemplateContentSHA256: testAutomationTemplateSHA256,
+		Name: "Agreement", LawfulBasis: "contract",
 		Variables:  map[string]string{"customer.name": "Ada"},
 		Recipients: []automationSignatureRecipientInput{{Email: "ada@example.test", Name: "Ada"}},
 	}
@@ -125,6 +160,15 @@ func TestPrepareAutomationSignatureRequestRejectsUnsafeOrUnsupportedInput(t *tes
 		mutate func(*automationSignatureRequestInput)
 	}{
 		{name: "missing template", mutate: func(in *automationSignatureRequestInput) { in.TemplateID = "" }},
+		{name: "missing template version", mutate: func(in *automationSignatureRequestInput) { in.TemplateVersion = 0 }},
+		{name: "negative template version", mutate: func(in *automationSignatureRequestInput) { in.TemplateVersion = -1 }},
+		{name: "short template digest", mutate: func(in *automationSignatureRequestInput) { in.TemplateContentSHA256 = "abc" }},
+		{name: "uppercase template digest", mutate: func(in *automationSignatureRequestInput) {
+			in.TemplateContentSHA256 = strings.ToUpper(testAutomationTemplateSHA256)
+		}},
+		{name: "non-hex template digest", mutate: func(in *automationSignatureRequestInput) {
+			in.TemplateContentSHA256 = strings.Repeat("g", sha256.Size*2)
+		}},
 		{name: "control in name", mutate: func(in *automationSignatureRequestInput) { in.Name = "Agreement\nInjected" }},
 		{name: "unsupported lawful basis", mutate: func(in *automationSignatureRequestInput) { in.LawfulBasis = "consent" }},
 		{name: "invalid variable name", mutate: func(in *automationSignatureRequestInput) { in.Variables = map[string]string{"bad key": "Ada"} }},
@@ -158,7 +202,8 @@ func TestPrepareAutomationSignatureRequestAcceptsStrictRFC3339Boundaries(t *test
 		"2030-01-02T03:04:05.123456789+23:59",
 	} {
 		_, _, err := prepareAutomationSignatureRequest(automationSignatureRequestInput{
-			TemplateID: uuid.NewString(), Name: "Agreement", LawfulBasis: "contract", ExpiresAt: expiry,
+			TemplateID: uuid.NewString(), TemplateVersion: 1, TemplateContentSHA256: testAutomationTemplateSHA256,
+			Name: "Agreement", LawfulBasis: "contract", ExpiresAt: expiry,
 			Recipients: []automationSignatureRecipientInput{{Email: "ada@example.test", Name: "Ada"}},
 		})
 		if err != nil {
@@ -219,6 +264,43 @@ func TestDecodeAutomationSignatureRequestRejectsNullVariableValue(t *testing.T) 
 			err := decodeAutomationSignatureRequestJSON(httptest.NewRecorder(), request, &input)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("decode error = %v, wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestAutomationSignatureRequestHandlerRejectsMalformedTemplatePins(t *testing.T) {
+	t.Parallel()
+	templateID := uuid.New()
+	valid := validAutomationRequestBody(templateID)
+	pins := `"template_version":1,"template_content_sha256":"` + testAutomationTemplateSHA256 + `",`
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "missing pins", body: strings.Replace(valid, pins, "", 1)},
+		{name: "zero version", body: strings.Replace(valid, `"template_version":1`, `"template_version":0`, 1)},
+		{name: "fractional version", body: strings.Replace(valid, `"template_version":1`, `"template_version":1.5`, 1)},
+		{name: "string version", body: strings.Replace(valid, `"template_version":1`, `"template_version":"1"`, 1)},
+		{name: "uppercase digest", body: strings.Replace(valid, testAutomationTemplateSHA256, strings.ToUpper(testAutomationTemplateSHA256), 1)},
+		{name: "short digest", body: strings.Replace(valid, testAutomationTemplateSHA256, "abcdef", 1)},
+		{name: "non-hex digest", body: strings.Replace(valid, testAutomationTemplateSHA256, strings.Repeat("g", sha256.Size*2), 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			processor := &fakeAutomationSignatureRequestProcessor{}
+			server := &Server{automationSignatureRequestProcessorOverride: processor}
+			req := httptest.NewRequest(http.MethodPost, "/api/automation/v1/signature-requests", strings.NewReader(test.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(automationIdempotencyHeader, "crm-delivery-malformed-pin")
+			ctx := context.WithValue(req.Context(), auth.UserIDKey, uuid.New())
+			ctx = context.WithValue(ctx, auth.OrgIDKey, uuid.New())
+			ctx = context.WithValue(ctx, auth.RoleKey, "sender")
+			ctx = context.WithValue(ctx, auth.EmailKey, "sender@example.test")
+			res := httptest.NewRecorder()
+			server.handleAutomationSignatureRequest(res, req.WithContext(ctx))
+			if res.Code != http.StatusBadRequest || len(processor.inputs) != 0 {
+				t.Fatalf("status=%d processor calls=%d body=%s", res.Code, len(processor.inputs), res.Body.String())
 			}
 		})
 	}
@@ -300,8 +382,19 @@ func TestAutomationSignatureRequestRouteRequiresMachineAuthorization(t *testing.
 				t.Fatalf("processor calls = %d, wantProcessed=%v", got, test.wantProcessed)
 			}
 			if test.wantProcessed {
+				if got := processor.inputs[0].Request; got.TemplateVersion != 1 || got.TemplateContentSHA256 != testAutomationTemplateSHA256 {
+					t.Fatalf("processor template pins = %d/%q", got.TemplateVersion, got.TemplateContentSHA256)
+				}
 				if strings.Contains(res.Body.String(), "/sign/") || strings.Contains(res.Body.String(), "links") {
 					t.Fatalf("machine response exposed a signer bearer link: %s", res.Body.String())
+				}
+				var responseFields map[string]json.RawMessage
+				if err := json.Unmarshal(res.Body.Bytes(), &responseFields); err != nil {
+					t.Fatal(err)
+				}
+				if len(responseFields) != 4 || responseFields["automation_request_id"] == nil ||
+					responseFields["document_id"] == nil || responseFields["status"] == nil || responseFields["replayed"] == nil {
+					t.Fatalf("automation success response shape changed: %s", res.Body.String())
 				}
 				var response automationSignatureRequestResponse
 				if err := json.Unmarshal(res.Body.Bytes(), &response); err != nil {
@@ -341,6 +434,12 @@ func TestAutomationSignatureRequestHandlerMapsReplayAndCollision(t *testing.T) {
 		{
 			name: "purged draft tombstone", processor: &fakeAutomationSignatureRequestProcessor{err: errAutomationRequestGone},
 			wantStatus: http.StatusGone,
+		},
+		{
+			name: "template pin mismatch", processor: &fakeAutomationSignatureRequestProcessor{err: &automationTemplatePreconditionError{
+				ExpectedVersion: 1, ActualVersion: 2, ContentDigestMismatch: true,
+			}},
+			wantStatus: http.StatusPreconditionFailed,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

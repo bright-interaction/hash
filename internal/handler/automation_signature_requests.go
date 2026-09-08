@@ -32,6 +32,7 @@ import (
 	"github.com/bright-interaction/hash/internal/magictoken"
 	"github.com/bright-interaction/hash/internal/recipients"
 	"github.com/bright-interaction/hash/internal/send"
+	"github.com/bright-interaction/hash/internal/templatepin"
 	"github.com/bright-interaction/hash/internal/versions"
 )
 
@@ -46,22 +47,43 @@ const (
 )
 
 var (
-	errAutomationIdempotencyConflict = errors.New("automation idempotency key was already used with different content")
-	errAutomationRequestGone         = errors.New("automation signature request document was deleted")
-	errAutomationTemplateNotFound    = errors.New("automation signature request template not found")
-	errAutomationTemplateInvalid     = errors.New("automation signature request template is invalid")
-	errAutomationCeremonySuperseded  = errors.New("automation signature request ceremony was revised and cannot be resent by replay")
-	errAutomationExpiryTooSoon       = errors.New("expires_at must be at least 5 minutes in the future")
-	automationRFC3339Pattern         = regexp.MustCompile(`^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$`)
+	errAutomationIdempotencyConflict        = errors.New("automation idempotency key was already used with different content")
+	errAutomationRequestGone                = errors.New("automation signature request document was deleted")
+	errAutomationTemplateNotFound           = errors.New("automation signature request template not found")
+	errAutomationTemplateInvalid            = errors.New("automation signature request template is invalid")
+	errAutomationTemplatePreconditionFailed = errors.New("template version or content digest does not match")
+	errAutomationCeremonySuperseded         = errors.New("automation signature request ceremony was revised and cannot be resent by replay")
+	errAutomationExpiryTooSoon              = errors.New("expires_at must be at least 5 minutes in the future")
+	automationRFC3339Pattern                = regexp.MustCompile(`^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$`)
+	automationTemplateSHA256Pattern         = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
+// automationTemplatePreconditionError retains which operator-owned pin
+// drifted for internal tests/diagnostics while the HTTP boundary returns one
+// stable, non-oracular 412 response.
+type automationTemplatePreconditionError struct {
+	ExpectedVersion       int32
+	ActualVersion         int32
+	ContentDigestMismatch bool
+}
+
+func (e *automationTemplatePreconditionError) Error() string {
+	return errAutomationTemplatePreconditionFailed.Error()
+}
+
+func (e *automationTemplatePreconditionError) Unwrap() error {
+	return errAutomationTemplatePreconditionFailed
+}
+
 type automationSignatureRequestInput struct {
-	TemplateID  string                              `json:"template_id"`
-	Name        string                              `json:"name"`
-	Variables   map[string]string                   `json:"variables"`
-	Recipients  []automationSignatureRecipientInput `json:"recipients"`
-	LawfulBasis string                              `json:"lawful_basis"`
-	ExpiresAt   string                              `json:"expires_at,omitempty"`
+	TemplateID            string                              `json:"template_id"`
+	TemplateVersion       int32                               `json:"template_version"`
+	TemplateContentSHA256 string                              `json:"template_content_sha256"`
+	Name                  string                              `json:"name"`
+	Variables             map[string]string                   `json:"variables"`
+	Recipients            []automationSignatureRecipientInput `json:"recipients"`
+	LawfulBasis           string                              `json:"lawful_basis"`
+	ExpiresAt             string                              `json:"expires_at,omitempty"`
 }
 
 type automationSignatureRecipientInput struct {
@@ -77,12 +99,14 @@ type automationSignatureRecipientInput struct {
 // and normalizations happen before hashing so an omitted default and its
 // explicit equivalent identify the same logical request.
 type preparedAutomationSignatureRequest struct {
-	TemplateID  uuid.UUID                              `json:"template_id"`
-	Name        string                                 `json:"name"`
-	Variables   map[string]string                      `json:"variables"`
-	Recipients  []preparedAutomationSignatureRecipient `json:"recipients"`
-	LawfulBasis string                                 `json:"lawful_basis"`
-	ExpiresAt   string                                 `json:"expires_at,omitempty"`
+	TemplateID            uuid.UUID                              `json:"template_id"`
+	TemplateVersion       int32                                  `json:"template_version"`
+	TemplateContentSHA256 string                                 `json:"template_content_sha256"`
+	Name                  string                                 `json:"name"`
+	Variables             map[string]string                      `json:"variables"`
+	Recipients            []preparedAutomationSignatureRecipient `json:"recipients"`
+	LawfulBasis           string                                 `json:"lawful_basis"`
+	ExpiresAt             string                                 `json:"expires_at,omitempty"`
 }
 
 type preparedAutomationSignatureRecipient struct {
@@ -182,6 +206,8 @@ func (s *Server) handleAutomationSignatureRequest(w http.ResponseWriter, r *http
 			writeError(w, http.StatusGone, "the idempotent signature request no longer has a document")
 		case errors.Is(err, errAutomationTemplateNotFound):
 			writeError(w, http.StatusNotFound, "template not found")
+		case errors.Is(err, errAutomationTemplatePreconditionFailed):
+			writeError(w, http.StatusPreconditionFailed, errAutomationTemplatePreconditionFailed.Error())
 		case errors.Is(err, errAutomationTemplateInvalid):
 			writeError(w, http.StatusUnprocessableEntity, "template cannot be used for an automation signature request")
 		default:
@@ -309,7 +335,7 @@ func (s *Server) materializeAutomationSignatureRequest(ctx context.Context, inpu
 		return nil, false, err
 	}
 
-	template, err := q.GetTemplate(ctx, generated.GetTemplateParams{ID: input.Request.TemplateID, OrgID: input.User.OrgID})
+	template, err := q.GetTemplateForShare(ctx, generated.GetTemplateForShareParams{ID: input.Request.TemplateID, OrgID: input.User.OrgID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, errAutomationTemplateNotFound
 	}
@@ -319,14 +345,23 @@ func (s *Server) materializeAutomationSignatureRequest(ctx context.Context, inpu
 	if template.SourceKind != "blocks" {
 		return nil, false, fmt.Errorf("%w: template is not blocks-source", errAutomationTemplateInvalid)
 	}
-	blockTree, err := blocks.NormalizeTreeJSON(template.BlocksJson)
+	templateContent, err := templatepin.Canonicalize(template.BlocksJson, template.VariablesJson)
 	if err != nil {
-		return nil, false, fmt.Errorf("%w: invalid block tree: %v", errAutomationTemplateInvalid, err)
+		return nil, false, fmt.Errorf("%w: invalid canonical content: %v", errAutomationTemplateInvalid, err)
 	}
-	variables, err := blocks.ParseVariableValues(template.VariablesJson)
-	if err != nil {
-		return nil, false, fmt.Errorf("%w: invalid variable defaults: %v", errAutomationTemplateInvalid, err)
+	contentDigest := templateContent.SHA256Hex()
+	if template.Version != input.Request.TemplateVersion || contentDigest != input.Request.TemplateContentSHA256 {
+		return nil, false, &automationTemplatePreconditionError{
+			ExpectedVersion:       input.Request.TemplateVersion,
+			ActualVersion:         template.Version,
+			ContentDigestMismatch: contentDigest != input.Request.TemplateContentSHA256,
+		}
 	}
+	if s.automationTemplateSnapshotHook != nil {
+		s.automationTemplateSnapshotHook()
+	}
+	blockTree := templateContent.BlocksJSON
+	variables := templateContent.DefaultVariables
 	for name, value := range input.Request.Variables {
 		variables[name] = value
 	}
@@ -368,7 +403,8 @@ func (s *Server) materializeAutomationSignatureRequest(ctx context.Context, inpu
 		Kind: audit.KindDocumentCreated, IP: input.IP, UserAgent: input.UserAgent,
 		Payload: map[string]any{
 			"name": document.Name, "source_kind": "blocks", "via": "automation",
-			"automation_request_id": request.ID, "template_id": input.Request.TemplateID,
+			"automation_request_id": request.ID, "template_id": template.ID,
+			"template_version": template.Version, "template_content_sha256": contentDigest,
 		},
 	})
 	if err != nil {
@@ -651,6 +687,12 @@ func prepareAutomationSignatureRequest(in automationSignatureRequestInput) (prep
 	if err != nil || templateID == uuid.Nil {
 		return preparedAutomationSignatureRequest{}, [sha256.Size]byte{}, errors.New("template_id must be a UUID")
 	}
+	if in.TemplateVersion <= 0 {
+		return preparedAutomationSignatureRequest{}, [sha256.Size]byte{}, errors.New("template_version must be a positive integer")
+	}
+	if !automationTemplateSHA256Pattern.MatchString(in.TemplateContentSHA256) {
+		return preparedAutomationSignatureRequest{}, [sha256.Size]byte{}, errors.New("template_content_sha256 must be exactly 64 lowercase hexadecimal characters")
+	}
 	name := strings.TrimSpace(in.Name)
 	if !validAutomationPlainText(name, automationMaxNameBytes) {
 		return preparedAutomationSignatureRequest{}, [sha256.Size]byte{}, fmt.Errorf("name must be plain text between 1 and %d bytes", automationMaxNameBytes)
@@ -726,7 +768,9 @@ func prepareAutomationSignatureRequest(in automationSignatureRequestInput) (prep
 		expiresAt = expires.UTC().Format(time.RFC3339Nano)
 	}
 	prepared := preparedAutomationSignatureRequest{
-		TemplateID: templateID, Name: name, Variables: variablesCopy, Recipients: preparedRecipients,
+		TemplateID: templateID, TemplateVersion: in.TemplateVersion,
+		TemplateContentSHA256: in.TemplateContentSHA256,
+		Name:                  name, Variables: variablesCopy, Recipients: preparedRecipients,
 		LawfulBasis: lawfulBasis, ExpiresAt: expiresAt,
 	}
 	canonical, err := json.Marshal(prepared)
@@ -734,7 +778,7 @@ func prepareAutomationSignatureRequest(in automationSignatureRequestInput) (prep
 		return preparedAutomationSignatureRequest{}, [sha256.Size]byte{}, errors.New("signature request could not be canonicalized")
 	}
 	hasher := sha256.New()
-	_, _ = hasher.Write([]byte("hash:automation-signature-request:payload:v1\x00"))
+	_, _ = hasher.Write([]byte("hash:automation-signature-request:payload:v2\x00"))
 	_, _ = hasher.Write(canonical)
 	var digest [sha256.Size]byte
 	copy(digest[:], hasher.Sum(nil))
