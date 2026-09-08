@@ -302,10 +302,12 @@ locally:
 
 ```bash
 docker run -d -p 5432:5432 -e POSTGRES_USER=hash -e POSTGRES_PASSWORD=e2e -e POSTGRES_DB=hash postgres:16.15-alpine3.24
+export HASH_E2E_MINIO_KMS_KEY="$(openssl rand -base64 32)"
 docker run -d -p 9000:9000 \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  -e MINIO_KMS_SECRET_KEY=hash-e2e-key:qUUkXGsPxO6Vaay3hRuFTBdvO4dikHtLiin3Oy2hnV0= \
+  -e "MINIO_KMS_SECRET_KEY=hash-e2e-key:${HASH_E2E_MINIO_KMS_KEY}" \
   minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+unset HASH_E2E_MINIO_KMS_KEY
 docker run -d -p 3000:3000 \
   gotenberg/gotenberg@sha256:87c16b9f364279d321bc9772d31fa58aa6abe036423c270698bd636c3a8e9466
 
