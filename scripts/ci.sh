@@ -48,6 +48,17 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 && HAVE_GIT=1
 
 FAILED=()
 SKIPPED=()
+SCANNER_TEMP_DIR=""
+
+cleanup_scanner_temp() {
+  [ -n "$SCANNER_TEMP_DIR" ] || return 0
+  # GOBIN writes only these two reviewed tools. Remove exact filenames and use
+  # rmdir so an unexpected file can never broaden cleanup scope.
+  rm -f -- "$SCANNER_TEMP_DIR/gitleaks" "$SCANNER_TEMP_DIR/govulncheck"
+  rmdir -- "$SCANNER_TEMP_DIR" 2>/dev/null || true
+}
+trap cleanup_scanner_temp EXIT
+
 # Exit code 99 means "this check did not run". It is distinct from pass and from fail
 # on purpose: a skipped security scan that prints ok is worse than no scan at all,
 # because it looks like evidence.
@@ -150,15 +161,144 @@ frontend_dependency_audit() {
   (cd frontend && bun audit)
 }
 
+# The renderer is an intentionally separate Go module so the application does
+# not inherit Gotenberg's dependency graph. Root-module `go build ./...` and
+# `go test ./...` stop at that module boundary, so exercise it explicitly or a
+# broken/vulnerable renderer can pass an otherwise green Hash build.
+renderer_module_checks() {
+  [ -f gotenberg/go.mod ] && [ -f gotenberg/go.sum ] || {
+    echo "gotenberg/go.mod and gotenberg/go.sum are required" >&2
+    return 1
+  }
+  (
+    cd gotenberg || return 1
+    GOWORK=off go mod verify || return 1
+    unformatted="$(find . -type f -name '*.go' -print0 | xargs -0 gofmt -l)"
+    if [ -n "$unformatted" ]; then
+      echo "These renderer Go files are not gofmt-clean:" >&2
+      echo "$unformatted" >&2
+      return 1
+    fi
+    GOWORK=off go vet ./... || return 1
+    GOWORK=off go test -race -count=1 -timeout=120s ./...
+  )
+}
+
+# Lock the renderer source boundary as tightly as the final image. `go mod
+# verify` proves the downloaded bytes against go.sum; these assertions ensure
+# a routine dependency tidy cannot silently change the audited upstream or add
+# back the LibreOffice/pdfcpu module surfaces removed from Hash's binary.
+renderer_source_policy() {
+  local expected_imports actual_imports banned_deps file
+  if grep -Eq '^[[:space:]]*(replace|exclude)([[:space:](]|$)' gotenberg/go.mod; then
+    echo "renderer go.mod must not replace or exclude checksum-pinned dependencies" >&2
+    return 1
+  fi
+  grep -Eq '^[[:space:]]*github\.com/gotenberg/gotenberg/v8 v8\.36\.0[[:space:]]*$' gotenberg/go.mod || {
+    echo "renderer must pin github.com/gotenberg/gotenberg/v8 exactly at v8.36.0" >&2
+    return 1
+  }
+  grep -Fxq 'github.com/gotenberg/gotenberg/v8 v8.36.0 h1:K4VDxqHRBIh/yKJbEStzQlaWOl286AnNjFwRFDtoKYc=' gotenberg/go.sum || {
+    echo "renderer upstream v8.36.0 content checksum changed" >&2
+    return 1
+  }
+  grep -Fxq 'github.com/gotenberg/gotenberg/v8 v8.36.0/go.mod h1:QuAMRjC9/VRIU6Yy2gfGZms0ISjieC+vtSYjdLIOzig=' gotenberg/go.sum || {
+    echo "renderer upstream v8.36.0 module checksum changed" >&2
+    return 1
+  }
+  expected_imports="$(printf '%s\n' \
+    github.com/gotenberg/gotenberg/v8/pkg/modules/api \
+    github.com/gotenberg/gotenberg/v8/pkg/modules/chromium)"
+  actual_imports="$(grep -Eo 'github.com/gotenberg/gotenberg/v8/pkg/modules/[[:alnum:]_-]+' gotenberg/main.go | LC_ALL=C sort -u)"
+  [ "$actual_imports" = "$expected_imports" ] || {
+    echo "renderer must link exactly the Gotenberg API and Chromium modules" >&2
+    printf 'actual module imports:\n%s\n' "$actual_imports" >&2
+    return 1
+  }
+  for file in gotenberg/go.mod gotenberg/go.sum gotenberg/main.go; do
+    if grep -Eqi '(pdfcpu|libreoffice|unoconv)' "$file"; then
+      echo "$file reintroduces a banned renderer/document-engine dependency" >&2
+      return 1
+    fi
+  done
+  banned_deps="$(cd gotenberg && GOWORK=off go list -deps ./... \
+    | grep -E '/pkg/modules/(libreoffice|pdfcpu|qpdf|pdftk|exiftool)(/|$)' || true)"
+  if [ -n "$banned_deps" ]; then
+    echo "renderer production dependency graph includes banned converter/engine modules:" >&2
+    echo "$banned_deps" >&2
+    return 1
+  fi
+  grep -Fq 'io.brightinteraction.hash.gotenberg.upstream.version="8.36.0"' gotenberg/Dockerfile \
+    && grep -Fq 'io.brightinteraction.hash.gotenberg.upstream.module-h1="h1:K4VDxqHRBIh/yKJbEStzQlaWOl286AnNjFwRFDtoKYc="' gotenberg/Dockerfile || {
+      echo "renderer image must carry the audited upstream version and module checksum" >&2
+      return 1
+    }
+  grep -Fq 'CHROMIUM_DENY_LIST=^https?://.*' gotenberg/Dockerfile || {
+    echo "renderer image must deny every HTTP(S) request before DNS resolution by default" >&2
+    return 1
+  }
+  echo "renderer source/image provenance is checksum-pinned to Gotenberg v8.36.0; banned converter modules are absent"
+}
+
 # Gotenberg uploads HTML into its own /tmp directory and opens that staged
 # entrypoint with file://. Blocking file:// in Chromium therefore blocks every
 # completed document, even though the application never supplied a remote URL.
 # Keep that local scheme available while preserving both resolution-based
 # private-IP blocking and the explicit internal HTTP(S) deny-list.
 renderer_network_policy() {
-  local file deny required
+  local file service block deny required
   for file in docker-compose.yml docker-compose.prod.yml; do
     [ -f "$file" ] || continue
+    if [ "$file" = "docker-compose.yml" ]; then
+      service="gotenberg"
+      grep -Fq 'dockerfile: gotenberg/Dockerfile' "$file" || {
+        echo "$file must build the Hash renderer with gotenberg/Dockerfile" >&2
+        return 1
+      }
+      grep -Fq 'image: ${HASH_GOTENBERG_IMAGE:-hash-gotenberg:dev}' "$file" || {
+        echo "$file must default to the locally built Hash renderer" >&2
+        return 1
+      }
+    else
+      service="hash-gotenberg"
+    fi
+    block="$(awk -v service="$service" '
+      $0 == "  " service ":" { in_service=1; next }
+      in_service && /^  [[:alnum:]_-]+:$/ { exit }
+      in_service { print }
+    ' "$file")"
+    [ -n "$block" ] || {
+      echo "$file is missing renderer service $service" >&2
+      return 1
+    }
+    for required in \
+      'read_only: true' 'cap_drop:' '- ALL' 'no-new-privileges:true' \
+      '/tmp:rw,noexec,nosuid,nodev,size=' '--api-disable-download-from=true' \
+      '--pdfengines-disable-routes=true' '- hash-renderer' 'CMD-SHELL' \
+      'command -v wget' 'command -v curl'; do
+      printf '%s\n' "$block" | grep -Fq -- "$required" || {
+        echo "$file renderer is missing required isolation control: $required" >&2
+        return 1
+      }
+    done
+    printf '%s\n' "$block" | grep -Fq -- '--chromium-deny-public-ips=true' || {
+      echo "$file renderer must explicitly deny public-IP fetches" >&2
+      return 1
+    }
+    for forbidden in '- default' '- app_default' '- web-proxy'; do
+      if printf '%s\n' "$block" | grep -Fq -- "$forbidden"; then
+        echo "$file renderer must not join shared network $forbidden" >&2
+        return 1
+      fi
+    done
+    [ "$(grep -Fc '      - hash-renderer' "$file")" -eq 3 ] || {
+      echo "$file must connect only Hash, its worker, and the renderer to hash-renderer" >&2
+      return 1
+    }
+    grep -A1 '^  hash-renderer:$' "$file" | grep -Fq 'internal: true' || {
+      echo "$file hash-renderer network must be internal" >&2
+      return 1
+    }
     grep -Fq -- '--chromium-deny-private-ips=true' "$file" || {
       echo "$file must enable Gotenberg's Chromium private-IP denial" >&2
       return 1
@@ -174,17 +314,65 @@ renderer_network_policy() {
         return 1
         ;;
     esac
-    for required in 'https?://' '10\.' '127\.' '169\.254\.' '172\.' '192\.168\.' '0\.0\.0\.0' 'localhost' '::1' '[a-zA-Z0-9_-]+'; do
-      case "$deny" in
-        *"$required"*) ;;
-        *)
-          echo "$file Chromium deny-list no longer blocks required internal target pattern: $required" >&2
-          return 1
-          ;;
-      esac
-    done
+    printf '%s\n' "$deny" | grep -Fq -- '--chromium-deny-list=^https?://.*' || {
+      echo "$file must deny every HTTP(S) render request before DNS resolution" >&2
+      return 1
+    }
   done
-  echo "Gotenberg permits its local staged HTML and blocks private/internal HTTP(S) targets"
+  if [ -f docker-compose.prod.yml ]; then
+    block="$(awk '
+      $0 == "  hash-gotenberg:" { in_service=1; next }
+      in_service && /^  [[:alnum:]_-]+:$/ { exit }
+      in_service { print }
+    ' docker-compose.prod.yml)"
+    if printf '%s\n' "$block" | grep -Fq 'build:'; then
+      echo "production renderer must remain image-only for exact-ID --no-build deployment" >&2
+      return 1
+    fi
+  fi
+  echo "Hash builds its minimal renderer; both Compose paths isolate and harden Chromium while preserving staged file:// input"
+}
+
+# The direct-Docker path is the vendor-neutral fallback when an operator does
+# not use Compose. Keep it as complete as the Compose topology: an exact
+# renderer image, isolated network, confined processes, internal renderer URL,
+# and loopback-only application port. Candidate build instructions must not
+# publish either half of the release before exact-artifact tests and scans.
+standalone_renderer_documentation_policy() {
+  local doc="DEPLOY.md" build_section run_section required
+  build_section="$(awk '
+    $0 == "## 2. Build the image" { in_section=1 }
+    $0 == "## 3. Run" { exit }
+    in_section { print }
+  ' "$doc")"
+  run_section="$(awk '
+    $0 == "## 3. Run" { in_section=1 }
+    $0 == "## 4. Reverse proxy, TLS, health" { exit }
+    in_section { print }
+  ' "$doc")"
+  [ -n "$build_section" ] && [ -n "$run_section" ] || {
+    echo "$doc is missing its standalone build/run sections" >&2
+    return 1
+  }
+  if printf '%s\n' "$build_section" | grep -Fq 'docker push'; then
+    echo "$doc must not push candidates before exact-image tests and scans" >&2
+    return 1
+  fi
+  for required in \
+    "export HASH_GOTENBERG_IMAGE=" \
+    'docker network create --internal hash-renderer' \
+    '--read-only --cap-drop ALL --security-opt no-new-privileges:true' \
+    '--chromium-deny-list=^https?://.*' \
+    'HASH_GOTENBERG_URL=http://hash-gotenberg:3000' \
+    'docker network connect hash-renderer hash' \
+    'docker network connect hash-renderer hash-worker' \
+    '-p 127.0.0.1:8080:8080'; do
+    printf '%s\n' "$run_section" | grep -Fq -- "$required" || {
+      echo "$doc standalone renderer topology is incomplete: missing $required" >&2
+      return 1
+    }
+  done
+  echo "standalone Docker guidance builds/tests before push and isolates the exact renderer"
 }
 
 # Release-critical test services execute code on CI and deployment runners.
@@ -221,7 +409,24 @@ dependency_image_policy() {
       return 1
     fi
   done
+  if [ -f "$root_workflow" ]; then
+    for required in \
+      'docker compose ps -q hash' \
+      'docker compose ps -q worker' \
+      'docker compose ps -q gotenberg' \
+      "aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969" \
+      '--severity HIGH,CRITICAL' \
+      '--pkg-types os,library' \
+      '--exit-code 1' \
+      '^sha256:[0-9a-f]{64}$'; do
+      grep -Fq -- "$required" "$root_workflow" || {
+        echo "$root_workflow must scan both exact built image IDs with the pinned release policy: missing $required" >&2
+        return 1
+      }
+    done
+  fi
   echo "canonical Hash service dependencies are pinned by registry digest"
+  echo "canonical browser CI scans the exact app and renderer image IDs"
 }
 
 # The external-S3 Compose path must not quietly inherit the bundled MinIO
@@ -390,7 +595,7 @@ production_image_policy() {
     echo "$file must pin literal HASH_ENVIRONMENT: production for both server and worker" >&2
     return 1
   fi
-  for service in hash hash-worker; do
+  for service in hash hash-worker hash-gotenberg; do
     block="$(awk -v service="$service" '
       $0 == "  " service ":" { in_service=1; next }
       in_service && /^  [[:alnum:]_-]+:$/ { exit }
@@ -404,7 +609,7 @@ production_image_policy() {
     done
   done
   echo "production Compose requires explicit staged Hash and Gotenberg image IDs"
-  echo "production Hash processes are read-only, capability-free, no-new-privileges containers with bounded /tmp"
+  echo "production Hash processes and renderer are read-only, capability-free, no-new-privileges containers with bounded /tmp"
 }
 
 # Hash intentionally has one production HTTP-server process until its
@@ -746,30 +951,198 @@ public_workflow_fail_closed() {
   echo "public CI installs pinned sqlc and treats skipped checks as failures"
 }
 
-# Both scanners run from a binary on PATH when there is one (the estate installs
-# gitleaks with brew, and split-public-repo.sh uses that same binary for the publish
-# gate) and are otherwise installed on demand, which needs network. Set
-# HASH_CI_SKIP_SCANNERS=1 to skip them when offline, and say SKIPPED rather than
-# passing quietly, because a security scan that reports ok without running is worse
-# than no scan.
+# Install both scanners into a fresh private GOBIN instead of trusting PATH. The
+# exact module version and checksum are then read from the binary's embedded Go
+# build metadata, so a renamed or version-spoofing executable cannot satisfy the
+# release gate. Set HASH_CI_SKIP_SCANNERS=1 to skip them when offline, and say
+# SKIPPED rather than passing quietly, because a security scan that reports ok
+# without running is worse than no scan.
 resolve_scanner() {
-  local name="$1" mod="$2"
+  local name="$1" mod="$2" expected expected_command expected_module expected_h1
+  local metadata actual_command installed
   if [ "${HASH_CI_SKIP_SCANNERS:-0}" = "1" ]; then
     echo "not run: HASH_CI_SKIP_SCANNERS=1"
     return 99
   fi
-  if command -v "$name" >/dev/null 2>&1; then
-    SCANNER_BIN="$(command -v "$name")"
-    return 0
+  case "$name" in
+    gitleaks)
+      expected_command="github.com/zricethezav/gitleaks/v8"
+      expected_module="github.com/zricethezav/gitleaks/v8"
+      expected_h1="h1:PmEvCfVI7ti9dV3s5aMZUY7sS2GxRvG3yzih7E+cS3w="
+      ;;
+    govulncheck)
+      expected_command="golang.org/x/vuln/cmd/govulncheck"
+      expected_module="golang.org/x/vuln"
+      expected_h1="h1:Ju8QsuyhX3Hk8ma3CesTbO8vfJD9EvUBgHvkxHBzj0I="
+      ;;
+    *) echo "unsupported security scanner $name" >&2; return 1 ;;
+  esac
+  expected="${mod##*@}"
+  [[ "$expected" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "security scanner $name must use an exact semantic version, got $mod" >&2
+    return 1
+  }
+  if [ -z "$SCANNER_TEMP_DIR" ]; then
+    SCANNER_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hash-ci-scanners.XXXXXX")" || return 1
   fi
-  go install "$mod" >/dev/null 2>&1 || { echo "could not install $name (offline?)" >&2; return 1; }
-  SCANNER_BIN="$(go env GOPATH)/bin/$name"
+  SCANNER_BIN="$SCANNER_TEMP_DIR/$name"
+  if [ ! -x "$SCANNER_BIN" ]; then
+    GOBIN="$SCANNER_TEMP_DIR" go install "$mod" >/dev/null || {
+      echo "could not install exact $name $expected (offline?)" >&2
+      return 1
+    }
+  fi
+  metadata="$(go version -m "$SCANNER_BIN")" || {
+    echo "could not read embedded Go build metadata from $name" >&2
+    return 1
+  }
+  actual_command="$(printf '%s\n' "$metadata" | awk -F '\t' '
+    { for (i = 1; i <= NF; i++) if ($i == "path" && i < NF) { print $(i + 1); exit } }
+  ')"
+  installed="$(printf '%s\n' "$metadata" | awk -F '\t' '
+    { for (i = 1; i <= NF; i++) if ($i == "mod" && i + 3 <= NF) {
+        print $(i + 1) "|" $(i + 2) "|" $(i + 3); exit
+      }
+    }
+  ')"
+  [ "$actual_command" = "$expected_command" ] || {
+    echo "installed $name command is $actual_command, want $expected_command" >&2
+    return 1
+  }
+  [ "$installed" = "$expected_module|$expected|$expected_h1" ] || {
+    echo "installed $name module metadata is $installed" >&2
+    echo "want $expected_module|$expected|$expected_h1" >&2
+    return 1
+  }
 }
 
 scan() {
   local name="$1" mod="$2"; shift 2
   resolve_scanner "$name" "$mod" || return $?
   "$SCANNER_BIN" "$@"
+}
+
+renderer_vulnerability_scan() {
+  local review="gotenberg/vulnerability-review.json" report rc
+  local actual_version actual_h1 actual_revision expires reviewed today
+  local detected approved unknown expected_review actual_review
+  resolve_scanner govulncheck golang.org/x/vuln/cmd/govulncheck@v1.1.4 || return $?
+  command -v jq >/dev/null 2>&1 || {
+    echo "jq is required to reconcile renderer vulnerability results" >&2
+    return 1
+  }
+  [ -f "$review" ] || {
+    echo "$review is required for audited renderer vulnerability reconciliation" >&2
+    return 1
+  }
+
+  actual_version="$(cd gotenberg && GOWORK=off go list -m -f '{{.Version}}' github.com/gotenberg/gotenberg/v8)" || return 1
+  actual_h1="$(awk '$1 == "github.com/gotenberg/gotenberg/v8" && $2 == "v8.36.0" { print $3 }' gotenberg/go.sum)"
+  actual_revision="$(sed -n 's/.*io.brightinteraction.hash.gotenberg.upstream.revision="\([0-9a-f]*\)".*/\1/p' gotenberg/Dockerfile)"
+  jq -e \
+    --arg module 'github.com/gotenberg/gotenberg/v8' \
+    --arg version "$actual_version" \
+    --arg h1 "$actual_h1" \
+    --arg revision "$actual_revision" '
+      .schema == 1 and .module == $module and .version == $version and
+      .module_h1 == $h1 and .upstream_revision == $revision and
+      .reviewed_on == "2026-09-09" and
+      .review_expires_on == "2026-10-09" and
+      (.basis | type == "string" and length > 0) and
+      (.reviewed_on | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
+      (.review_expires_on | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) and
+      (.advisories | length == 7) and
+      ([.advisories[].go_id] | length == (unique | length)) and
+      all(.advisories[];
+        (.go_id | test("^GO-[0-9]{4}-[0-9]{4}$")) and
+        (.ghsa_id | test("^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$")) and
+        .reviewed_url == ("https://github.com/advisories/" + .ghsa_id) and
+        .status == "not_affected" and
+        (.official_affected_range | length > 0) and
+        (.official_updated_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")) and
+        (.justification | type == "string" and length > 0))
+    ' "$review" >/dev/null || {
+      echo "$review does not match the exact audited renderer or has malformed statements" >&2
+      return 1
+    }
+  expected_review="$(printf '%s\n' \
+    'GO-2026-4990|GHSA-2pmr-289p-44r3|<= 8.31.0|2026-05-14T20:52:22Z' \
+    'GO-2026-5080|GHSA-3cv5-q585-h563|<= 8.31.0|2026-05-14T20:52:33Z' \
+    'GO-2026-5162|GHSA-62p3-hvxx-fxg4|<= 8.30.1|2026-05-14T20:51:33Z' \
+    'GO-2026-5234|GHSA-7v3r-m9c8-r855|<= 8.29.1|2026-05-14T20:52:17Z' \
+    'GO-2026-5244|GHSA-86m8-88fq-xfxp|<= 8.32.0|2026-05-29T16:50:38Z' \
+    'GO-2026-5627|GHSA-rm4c-xj6x-49mw|<= 8.31.0|2026-05-14T20:52:18Z' \
+    'GO-2026-5636|GHSA-rqgh-gxv4-6657|= 8.29.1|2026-05-14T20:52:08Z' \
+    | LC_ALL=C sort)"
+  actual_review="$(jq -r '.advisories[] | [.go_id, .ghsa_id, .official_affected_range, .official_updated_at] | join("|")' "$review" | LC_ALL=C sort)"
+  [ "$actual_review" = "$expected_review" ] || {
+    echo "$review no longer contains the exact reviewed GitHub advisory identities, ranges, and update timestamps" >&2
+    return 1
+  }
+  expires="$(jq -r '.review_expires_on' "$review")"
+  reviewed="$(jq -r '.reviewed_on' "$review")"
+  today="$(date -u +%Y-%m-%d)"
+  if [[ "$reviewed" > "$today" ]]; then
+    echo "renderer vulnerability review date $reviewed is in the future" >&2
+    return 1
+  fi
+  if [[ "$today" > "$expires" ]]; then
+    echo "renderer vulnerability review expired on $expires; re-check every linked reviewed advisory" >&2
+    return 1
+  fi
+
+  report="$(mktemp)" || return 1
+  # Match the production Docker build and avoid auditing platform-only CGO
+  # branches that cannot be linked into the renderer image. OpenVEX makes the
+  # scanner verdict machine-readable: exit 3 means findings, while any other
+  # nonzero code is an operational failure and can never be reconciled away.
+  (cd gotenberg && GOWORK=off CGO_ENABLED=0 "$SCANNER_BIN" -format=openvex ./...) >"$report"
+  rc=$?
+  # OpenVEX output may exit zero even when it contains `affected` statements;
+  # the document, not the status alone, is the verdict. Text mode normally uses
+  # exit 3 for findings, so accept either result only long enough to parse it.
+  case "$rc" in
+    0|3) ;;
+    *)
+      rm -f "$report"
+      echo "renderer govulncheck failed operationally with exit $rc" >&2
+      return 1
+      ;;
+  esac
+  jq -e --arg product 'pkg:golang/github.com%2Fgotenberg%2Fgotenberg%2Fv8@v8.36.0' '
+    .["@context"] == "https://openvex.dev/ns/v0.2.0" and
+    (.["@id"] | startswith("govulncheck/vex:")) and
+    .version == 1 and
+    .tooling == "https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck" and
+    (.statements | type == "array") and
+    all(.statements[];
+      (.status == "affected" or .status == "not_affected") and
+      (.vulnerability.name | test("^GO-[0-9]{4}-[0-9]{4}$"))) and
+    all(.statements[] | select(.status == "affected");
+      any(.products[]?.subcomponents[]?; .["@id"] == $product))
+  ' "$report" >/dev/null || {
+    rm -f "$report"
+    echo "renderer govulncheck did not emit valid OpenVEX" >&2
+    return 1
+  }
+  detected="$(jq -r '.statements[] | select(.status == "affected") | .vulnerability.name' "$report" | LC_ALL=C sort -u)"
+  approved="$(jq -r '.advisories[].go_id' "$review" | LC_ALL=C sort -u)"
+  unknown="$(comm -23 <(printf '%s\n' "$detected") <(printf '%s\n' "$approved"))"
+  rm -f "$report"
+  if [ -z "$detected" ]; then
+    if [ "$rc" -eq 3 ]; then
+      echo "renderer govulncheck exit 3 contained no affected advisory" >&2
+      return 1
+    fi
+    echo "renderer govulncheck found no affected vulnerabilities"
+    return 0
+  fi
+  if [ -n "$unknown" ]; then
+    echo "renderer govulncheck found unreviewed affected advisories:" >&2
+    echo "$unknown" >&2
+    return 1
+  fi
+  printf 'renderer govulncheck findings are covered by the unexpired exact-version review (%s):\n%s\n' "$expires" "$detected"
 }
 
 # gitleaks exits non-zero when it finds something, so the exit status is the verdict
@@ -817,9 +1190,12 @@ secret_scan() {
 step "build"                                   go build ./...
 step "vet"                                     vet_all
 step "tests (executed, not merely compiled)"   go test -race ./... -count=1 -timeout=120s
+step "nested renderer module verify + test"    renderer_module_checks
+step "renderer pinned-source/module policy"    renderer_source_policy
 step "frontend typecheck + production build"   frontend_checks
 step "frontend dependency audit"               frontend_dependency_audit
 step "Gotenberg renderer network policy"       renderer_network_policy
+step "standalone renderer documentation policy" standalone_renderer_documentation_policy
 step "dependency image identity policy"        dependency_image_policy
 step "standalone storage topology policy"      standalone_storage_topology_policy
 step "production image identity policy"        production_image_policy
@@ -839,6 +1215,7 @@ else
   step "secret scan (working tree; split-public-repo.sh scans the filtered history)" secret_scan
 fi
 step "vulnerability scan" scan govulncheck golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+step "renderer vulnerability scan"             renderer_vulnerability_scan
 
 printf '\n'
 if [ ${#SKIPPED[@]} -ne 0 ]; then

@@ -58,8 +58,8 @@ func NewGotenberg(baseURL string) *Gotenberg {
 }
 
 // Ping confirms Gotenberg is reachable. Hits the documented /health
-// endpoint (which returns 200 + a small JSON body when both Chromium
-// and LibreOffice modules are loaded). Used by Hash /health so a
+// endpoint (which returns 200 + a small JSON body when the API and Chromium
+// modules are healthy). Used by Hash /health so a
 // dead PDF service surfaces as 503 instead of silently failing the
 // next sign ceremony.
 func (g *Gotenberg) Ping(ctx context.Context) error {

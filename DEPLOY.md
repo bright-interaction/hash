@@ -18,9 +18,19 @@ container and run it (Docker Compose, Kubernetes, a plain VM) works.
 | `hash` worker | background loops: email dispatch, reminders, expirations, webhook redrive, finalize-retry, quota warnings | same image, `hash-worker` entrypoint |
 | PostgreSQL 16+ | primary datastore | migrations run automatically on boot |
 | Contract-tested S3 storage | signed PDFs, audit certs, uploads | must pass Hash's exact-VersionId, version-listing, encryption, and seven-year COMPLIANCE Object Lock conformance suite; generic “S3 compatible” branding is insufficient |
-| Gotenberg 8.36.0 | HTML -> PDF rendering | select an immutable registry digest in production |
+| Hash renderer (Gotenberg API 8.36.0 + Chromium) | HTML -> PDF rendering | build `gotenberg/Dockerfile`; deploy its immutable image digest/ID |
 | SMTP server | outbound email | required for the worker; bundled development uses MailHog, non-development uses STARTTLS |
 | OIDC provider | sender login | any OIDC IdP: Zitadel, Keycloak, Auth0, ... |
+
+The renderer is a separate, minimal Go module and container containing only the
+Gotenberg API and Chromium modules required by Hash. It deliberately excludes
+LibreOffice and pdfcpu rather than shipping unused parsers. Compose runs it
+read-only, capability-free, with no-new-privileges and a bounded in-memory
+`/tmp`; its internal-only network is shared only with the Hash server and
+worker, and Compose intentionally publishes no renderer host port. Render input
+is self-contained, so Chromium has no need for public,
+PostgreSQL, object-storage, SMTP, or CRM network access. This architecture is
+the same for standalone, webhook-driven, and CRM-integrated deployments.
 
 Production supports exactly one `hash` HTTP-server replica. A production server
 holds a database-scoped singleton lease for its full lifetime, so a second
@@ -516,25 +526,48 @@ process that can rewrap rows under the new key.
 ## 2. Build the image
 
 ```bash
-# Use an immutable release tag; publish and deploy by registry digest in prod.
-docker build -t registry.example.com/hash:<git-commit-sha> .
-docker push registry.example.com/hash:<git-commit-sha>
+# Build commit-addressed candidates, but do not push them yet.
+export HASH_RELEASE="$(git rev-parse HEAD)"
+[[ "$HASH_RELEASE" =~ ^[0-9a-f]{40}$ ]]
+docker build --pull --label "org.opencontainers.image.revision=$HASH_RELEASE" \
+  -t "registry.example.com/hash:$HASH_RELEASE" .
+docker build --pull --label "org.opencontainers.image.revision=$HASH_RELEASE" \
+  --label 'io.brightinteraction.hash.gotenberg.upstream.ref=gotenberg/gotenberg@sha256:87c16b9f364279d321bc9772d31fa58aa6abe036423c270698bd636c3a8e9466' \
+  -f gotenberg/Dockerfile \
+  -t "registry.example.com/hash-gotenberg:$HASH_RELEASE" .
 ```
+
+Resolve the two local content IDs, run the functional gates against those exact
+IDs, and apply the HIGH/CRITICAL image scan in section 5 before pushing either
+candidate. After pushing, deploy the resulting registry digests, never these
+tags. This keeps an untested or partially published image pair ineligible.
 
 One image contains both runtime binaries plus the release-administration
 binaries. The Dockerfile builds the SvelteKit frontend with Bun (embedded into
 the server), then compiles `cmd/server`, `cmd/worker`, `cmd/configcheck`,
 `cmd/migrate`, `cmd/auditverify`, and `cmd/rollbackcheck`.
 
+The second image builds the nested `gotenberg/` module and installs only its
+patched Alpine Chromium runtime. Do not substitute the full upstream Gotenberg
+distribution without repeating the exact-image vulnerability and functional
+gates: that distribution also contains document/PDF engines Hash does not use.
+Production release manifests must bind both the Hash application image and
+renderer image by the exact staging-tested local content ID (or registry
+digest), never by a mutable tag.
+
 To build binaries without Docker: `cd frontend && bun install && bun run build`,
 copy `frontend/build` to `cmd/server/frontend/build`, then `go build ./...`.
 
 ## 3. Run
 
-Run **two containers from the same image**, sharing the same environment:
+Run the server and worker from the same application image plus the separately
+versioned renderer image. The renderer joins only an internal network; create
+the application containers before starting them so both network attachments are
+present at first boot:
 
 ```bash
 export HASH_IMAGE='registry.example.com/hash@sha256:<manifest-digest>'
+export HASH_GOTENBERG_IMAGE='registry.example.com/hash-gotenberg@sha256:<manifest-digest>'
 s3_secret_mount=()
 if [[ -n "${HASH_S3_SSE_C_KEY_HOST_FILE:-}" ]]; then
   s3_secret_mount=(
@@ -542,15 +575,48 @@ if [[ -n "${HASH_S3_SSE_C_KEY_HOST_FILE:-}" ]]; then
   )
 fi
 
-# server (publishes 8080)
-docker run -d --name hash --env-file .env \
-  "${s3_secret_mount[@]}" -p 8080:8080 "$HASH_IMAGE"
+docker network create hash-runtime
+docker network create --internal hash-renderer
 
-# worker (no port; override the entrypoint)
-docker run -d --name hash-worker --env-file .env \
-  "${s3_secret_mount[@]}" \
-  --entrypoint /usr/local/bin/hash-worker "$HASH_IMAGE"
+docker run -d --name hash-gotenberg --restart unless-stopped --network hash-renderer \
+  --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=536870912,mode=1777 \
+  "$HASH_GOTENBERG_IMAGE" gotenberg --api-port=3000 --api-timeout=60s \
+  --api-disable-download-from=true --pdfengines-disable-routes=true \
+  --chromium-deny-public-ips=true --chromium-deny-private-ips=true \
+  '--chromium-deny-list=^https?://.*'
+
+for attempt in {1..60}; do
+  [[ "$(docker inspect --format '{{.State.Health.Status}}' hash-gotenberg)" == healthy ]] && break
+  [[ "$attempt" == 60 ]] && { echo 'renderer did not become healthy' >&2; exit 1; }
+  sleep 1
+done
+
+# Server: normal runtime network for configured services/egress, plus the
+# isolated renderer network. Only the application port is published.
+docker create --name hash --restart unless-stopped --env-file .env \
+  -e HASH_GOTENBERG_URL=http://hash-gotenberg:3000 \
+  --network hash-runtime --read-only --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=536870912,mode=1777 \
+  "${s3_secret_mount[@]}" -p 127.0.0.1:8080:8080 "$HASH_IMAGE"
+docker network connect hash-renderer hash
+docker start hash
+
+# Worker: the same two networks and environment, with no published port.
+docker create --name hash-worker --restart unless-stopped --env-file .env \
+  -e HASH_GOTENBERG_URL=http://hash-gotenberg:3000 \
+  --network hash-runtime --read-only --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=536870912,mode=1777 \
+  "${s3_secret_mount[@]}" --entrypoint /usr/local/bin/hash-worker "$HASH_IMAGE"
+docker network connect hash-renderer hash-worker
+docker start hash-worker
 ```
+
+Attach any locally containerized PostgreSQL, S3, SMTP, or OIDC dependencies to
+`hash-runtime`; never attach them or the renderer to both networks. A managed or
+otherwise externally reachable provider needs no additional attachment.
 
 For SSE-C, export the protected host file path in
 `HASH_S3_SSE_C_KEY_HOST_FILE` and the lowercase SHA-256 digest (never the key
@@ -571,6 +637,12 @@ or configure another reachable SMTP endpoint when running the worker:
 cp .env.example .env   # edit first
 docker compose -f docker-compose.yml -f docker-compose.local-minio.yml up -d
 ```
+
+That command builds `gotenberg/Dockerfile` automatically. To use an already
+built or registry-hosted renderer, set `HASH_GOTENBERG_IMAGE` to its immutable
+reference; `docker compose up --no-build` then uses exactly that selected image.
+The renderer is storage-provider-neutral and does not join the MinIO/external-S3
+network.
 
 For production, point the env at your managed Postgres / S3 / SMTP / OIDC rather
 than the bundled dev containers. Server and worker retain an automatic,
@@ -648,40 +720,65 @@ staging/production reject it and no timestamp-authority claim should rely on it.
 
 ## 5. Continuous deployment (any CI)
 
-Hash has no CI coupling. Any pipeline that can build a container image and
-then tell your host to run it will do. The shape is always: **build image ->
-push to a registry -> host pulls + restarts**.
+Hash has no CI coupling. Any pipeline that can build two container images and
+then tell your host to run them will do. The shape is always: **build app and
+renderer -> test and scan those exact artifacts -> push -> host pulls +
+restarts by immutable references**.
 
-Minimal GitHub Actions example (adapt the registry + deploy step to your host):
+Both checked-in GitHub workflows make the live browser job depend on the source
+and module-E2E jobs, then build, exact-ID scan, and exercise one app/renderer
+pair. Publication must be a conditional tail of that same browser job; a fresh
+job would rebuild different, untested image IDs. For GHCR, grant that job
+`packages: write` and append this step after the worker/email assertion but
+before the always-run cleanup (adapt the registry and deployment mechanism):
 
 ```yaml
-name: deploy-hash
-on:
-  push:
-    branches: [main]
-jobs:
-  build:
-    runs-on: ubuntu-latest
+  browser-e2e:
+    # Keep the workflow's existing needs, runner, environment, and test steps.
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./hash
-          push: true
-          tags: ghcr.io/<owner>/hash:${{ github.sha }}
-      # Then deploy: SSH + `docker compose pull && docker compose up -d`,
-      # `kubectl set image ...`, or your platform's deploy action.
+      # ...all checked-in build, exact-scan, browser, and email assertions...
+      - id: publish_images
+        name: publish the exact tested image pair
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+          app_id="$(docker inspect --format '{{.Image}}' "$(docker compose ps -q hash)")"
+          renderer_id="$(docker inspect --format '{{.Image}}' "$(docker compose ps -q gotenberg)")"
+          for image_id in "$app_id" "$renderer_id"; do
+            printf '%s\n' "$image_id" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          done
+
+          app_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER}/hash:${GITHUB_SHA}"
+          renderer_ref="ghcr.io/${GITHUB_REPOSITORY_OWNER}/hash-gotenberg:${GITHUB_SHA}"
+          docker tag "$app_id" "$app_ref"
+          docker tag "$renderer_id" "$renderer_ref"
+          docker push "$app_ref"
+          docker push "$renderer_ref"
+          app_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$app_ref")"
+          renderer_digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "$renderer_ref")"
+          digest_count="$(printf '%s\n%s\n' "$app_digest" "$renderer_digest" \
+            | grep -Ec '^ghcr\.io/.+@sha256:[0-9a-f]{64}$')"
+          test "$digest_count" -eq 2
+          printf 'app=%s\nrenderer=%s\n' "$app_digest" "$renderer_digest" >> "$GITHUB_OUTPUT"
+      # Keep the workflow's existing `if: always()` cleanup step last.
 ```
 
-GitLab CI, Jenkins, Drone, etc. follow the same two steps (`docker build` /
-`docker push`, then a deploy command). The dev `.gitlab-ci.yml` / `Jenkinsfile`
-is whatever your org standardises on; Hash only needs the resulting image run
-with the env from step 1.
+A following deployment step/job consumes only
+`steps.publish_images.outputs.app` and `.renderer` (or exposes them as job
+outputs). Never deploy the tags, rebuild on the host, or publish from a job that
+did not run the exact-image scan and live browser gate itself.
+
+GitLab CI, Jenkins, Drone, etc. follow the same build/push/deploy pattern. The
+dev `.gitlab-ci.yml` / `Jenkinsfile` is whatever your org standardises on; Hash
+only needs both resulting images run with the env from step 1.
 
 ## Testing
 
@@ -690,6 +787,7 @@ Unit + build suite (no external services):
 ```bash
 bash scripts/ci.sh
 go test -race -count=1 -timeout=120s ./...
+(cd gotenberg && go mod verify && go test -race -count=1 -timeout=120s ./...)
 ```
 
 End-to-end (real send -> sign -> stamped-PDF plus transactional auth, handler,
@@ -706,8 +804,11 @@ docker run -d -p 9000:9000 \
   -e "MINIO_KMS_SECRET_KEY=hash-e2e-key:${HASH_E2E_MINIO_KMS_KEY}" \
   minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
 unset HASH_E2E_MINIO_KMS_KEY
-docker run -d -p 3000:3000 \
-  gotenberg/gotenberg@sha256:87c16b9f364279d321bc9772d31fa58aa6abe036423c270698bd636c3a8e9466
+docker build -f gotenberg/Dockerfile -t hash-gotenberg:e2e .
+docker run -d -p 3000:3000 --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=536870912,mode=1777 \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  hash-gotenberg:e2e
 
 HASH_E2E_DB_URL='postgres://hash:e2e@localhost:5432/hash?sslmode=disable' \
 HASH_E2E_S3_ENDPOINT=localhost:9000 \
@@ -717,8 +818,9 @@ HASH_E2E_GOTENBERG_URL=http://localhost:3000 \
 go test -tags e2e -count=1 -timeout=180s ./...
 ```
 
-CI runs all of this; the `e2e` job in `.github/workflows/hash-ci.yml` starts
-the three services and runs every tagged Go package. Its `browser-e2e` job
+CI runs all of this; the `e2e` job in the monorepo workflow
+`.github/workflows/hash-ci.yml` (public mirror: `.github/workflows/ci.yml`)
+starts the three services and runs every tagged Go package. Its `browser-e2e` job
 builds a live Hash + worker + MailHog stack, verifies worker stability, seeds a
 public non-secret test identity and signed session cookie, and runs the full
 Playwright suite. The signing journey uses the real MCP send result and drives the signer
@@ -728,8 +830,9 @@ path.
 
 ## 6. Upgrades
 
-Resolve the new image to a registry digest and restart both the server and the
-worker with that exact reference. Keep the server, worker, pre-cutover migrator,
-and all-org audit verifier on the same digest so their embedded schema and hash
-rules match. Use the backup/migrate/verify ordering above; follow
-`ops/BACKUP-RESTORE.md` for the recoverable coupled snapshot.
+Resolve both new images to registry digests and restart the server, worker, and
+renderer with those exact references. Keep the server, worker, pre-cutover
+migrator, and all-org audit verifier on the same application digest so their
+embedded schema and hash rules match; deploy only the renderer digest exercised
+with that candidate in staging. Use the backup/migrate/verify ordering above;
+follow `ops/BACKUP-RESTORE.md` for the recoverable coupled snapshot.

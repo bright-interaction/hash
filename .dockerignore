@@ -12,6 +12,7 @@ frontend/.env*
 frontend/build
 e2e
 bin
+gotenberg/gotenberg
 *.md
 !README.md
 test-results

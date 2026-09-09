@@ -33,4 +33,9 @@ regexes = [
   # config_test.go audit-key fixture, in mirror history pre-split. It is
   # base64("fake-ed25519-seed-for-tests"), not a credential.
   '''ZmFrZS1lZDI1NTE5LXNlZWQtZm9yLXRlc3Rz''',
+  # Public CI fixtures. Both values are committed in the development Compose
+  # topology already and are deliberately public/non-production; pin their
+  # complete values so the generic rule cannot hide a different key nearby.
+  '''^qUUkXGsPxO6Vaay3hRuFTBdvO4dikHtLiin3Oy2hnV0=$''',
+  '''^fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210$''',
 ]

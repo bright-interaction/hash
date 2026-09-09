@@ -22,27 +22,53 @@ services:
       retries: 10
 
   gotenberg:
-    # Staging overrides this with the exact local image ID that it later
-    # promotes to production. Local development still gets an immutable,
-    # registry-verifiable default rather than a mutable patch tag.
-    image: ${HASH_GOTENBERG_IMAGE:-gotenberg/gotenberg@sha256:87c16b9f364279d321bc9772d31fa58aa6abe036423c270698bd636c3a8e9466}
+    # Hash builds a deliberately minimal Gotenberg-compatible renderer from
+    # the nested module: API + Chromium only, with no LibreOffice/pdfcpu
+    # surface. Staging may override the tag with the exact local image ID it
+    # already built, scanned, and recorded; `docker compose up --no-build`
+    # then runs that ID without rebuilding it.
+    image: ${HASH_GOTENBERG_IMAGE:-hash-gotenberg:dev}
+    build:
+      context: .
+      dockerfile: gotenberg/Dockerfile
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     command:
       - "gotenberg"
       - "--api-port=3000"
       - "--api-timeout=60s"
+      # Hash needs only POST /forms/chromium/convert/html. Disable the generic
+      # URL downloader and every PDF-engine route even if a future module
+      # change accidentally makes either surface available.
+      - "--api-disable-download-from=true"
+      - "--pdfengines-disable-routes=true"
+      # Render bundles are hermetic: refuse public destinations as well as
+      # internal ones. Keep this explicit even though the image also sets the
+      # matching environment default, so Compose policy is independently clear.
+      - "--chromium-deny-public-ips=true"
       - "--chromium-deny-private-ips=true"
-      # SSRF defense-in-depth (matches prod): block Chromium from fetching
-      # internal targets (private ranges, cloud metadata, localhost, single-label
-      # Docker hostnames) during HTML->PDF render. Gotenberg itself stages the
-      # submitted HTML as file:///tmp/... and must be allowed to load that local
-      # entrypoint. hash inlines its own fonts/assets, and the app-layer
-      # proposal_html sanitizer strips remote URLs. The resolution-based
-      # deny-private-ips flag also closes dotted-host and DNS-rebinding paths
-      # that the URL regex alone cannot identify.
-      - '--chromium-deny-list=^https?://(10\.|127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|0\.0\.0\.0|localhost|\[?::1\]?|[a-zA-Z0-9_-]+(:[0-9]+)?(/|$)).*'
-    ports:
-      - "127.0.0.1:${HASH_GOTENBERG_PORT:-3010}:3000"
+      # Reject every HTTP(S) request before hostname resolution. Hash submits a
+      # hermetic bundle, so remote fetches are never required; this also avoids
+      # leaking document-controlled hostnames through DNS before the IP-denial
+      # checks run. Gotenberg's staged file:///tmp/... entrypoint stays allowed.
+      - '--chromium-deny-list=^https?://.*'
+    healthcheck:
+      # The prior official renderer carries curl; Hash's minimal renderer
+      # carries BusyBox wget. Supporting both keeps rollback health-compatible
+      # across the one-time image transition without weakening the HTTP check.
+      test: ["CMD-SHELL", "if command -v wget >/dev/null 2>&1; then exec wget -q -O /dev/null http://127.0.0.1:3000/health; elif command -v curl >/dev/null 2>&1; then exec curl --fail --silent --show-error -o /dev/null http://127.0.0.1:3000/health; else exit 127; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - hash-renderer
 
   mailhog:
     image: mailhog/mailhog:v1.0.1@sha256:8d76a3d4ffa32a3661311944007a415332c4bb855657f4f6c57996405c009bea
@@ -117,6 +143,11 @@ services:
       HASH_SMTP_FROM: ${HASH_SMTP_FROM:-Hash <esign@brightinteraction.example>}
       # Migration-only fallback for legacy rows; fresh development leaves it off.
       HASH_WEBHOOK_SECRET: ${HASH_WEBHOOK_SECRET:-}
+    networks:
+      # `default` reaches Postgres, storage, SMTP, and webhook fixtures. The
+      # renderer network is internal and contains no datastore.
+      - default
+      - hash-renderer
 
   hash:
     image: ${HASH_IMAGE:-hash-hash:dev}
@@ -171,6 +202,15 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "127.0.0.1:${HASH_APP_PORT:-8090}:8080"
+    networks:
+      - default
+      - hash-renderer
 
 volumes:
   hash_pg:
+
+networks:
+  # Chromium has no route to Postgres, S3, SMTP, webhook fixtures, or the
+  # public Internet. Hash submits a fully self-contained HTML bundle.
+  hash-renderer:
+    internal: true
