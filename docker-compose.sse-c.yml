@@ -1,4 +1,5 @@
-# Explicit SSE-C overlay for the bundled/standalone compose stack.
+# Explicit external-S3 SSE-C overlay for the standalone Compose stack. MinIO is
+# intentionally absent: do not combine this with docker-compose.local-minio.yml.
 # HASH_S3_SSE_C_KEY_HOST_FILE is a path only; Docker mounts its bytes as a
 # read-only service secret, never an environment value. Do not use this file with
 # docker-compose.prod.yml, whose worker service has a different name.
@@ -17,6 +18,7 @@ services:
       HASH_S3_USE_SSL: "true"
       HASH_S3_SSE_MODE: sse-c
       HASH_S3_SSE_C_KEY_FILE: /run/secrets/hash-s3-sse-c
+      HASH_S3_SSE_C_KEY_SHA256: ${HASH_S3_SSE_C_KEY_SHA256:?set the lowercase SHA-256 of the raw SSE-C key}
       HASH_S3_BUCKET_LOOKUP: ${HASH_S3_BUCKET_LOOKUP:?set auto, path, or dns for the external S3 provider}
     secrets:
       - hash-s3-sse-c
@@ -31,6 +33,7 @@ services:
       HASH_S3_USE_SSL: "true"
       HASH_S3_SSE_MODE: sse-c
       HASH_S3_SSE_C_KEY_FILE: /run/secrets/hash-s3-sse-c
+      HASH_S3_SSE_C_KEY_SHA256: ${HASH_S3_SSE_C_KEY_SHA256:?set the lowercase SHA-256 of the raw SSE-C key}
       HASH_S3_BUCKET_LOOKUP: ${HASH_S3_BUCKET_LOOKUP:?set auto, path, or dns for the external S3 provider}
     secrets:
       - hash-s3-sse-c

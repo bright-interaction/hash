@@ -27,8 +27,14 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/bright-interaction/hash/internal/db/generated"
+)
+
+var (
+	ErrProductionLogoUnsupported = errors.New("production logo branding is unavailable until the asset is bound to an exact version, digest, and retention commitment")
+	ErrFrozenBrandingUnavailable = errors.New("complete frozen document branding snapshot is unavailable")
 )
 
 // Branding is the resolved theme used by the renderer. All fields are
@@ -63,35 +69,105 @@ func DefaultBranding() Branding {
 	}
 }
 
-// Resolver loads org + per-doc branding from the DB and merges them.
-type Resolver struct {
-	Q *generated.Queries
+type resolverQueries interface {
+	GetOrgBranding(context.Context, uuid.UUID) (*generated.OrgBranding, error)
+	GetDocumentBrandingOverride(context.Context, uuid.UUID) (*generated.DocumentBrandingOverride, error)
 }
 
-func NewResolver(q *generated.Queries) *Resolver { return &Resolver{Q: q} }
+// Resolver loads org + per-doc branding from the DB and merges them.
+type Resolver struct {
+	q resolverQueries
+}
+
+func NewResolver(q *generated.Queries) *Resolver { return newResolver(q) }
+
+func newResolver(q resolverQueries) *Resolver { return &Resolver{q: q} }
 
 // Resolve returns the branding to use for the supplied document. Pass
 // uuid.Nil for docID to resolve org-only (e.g. for /settings/branding
 // previews).
 func (r *Resolver) Resolve(ctx context.Context, orgID, docID uuid.UUID) (Branding, error) {
 	out := DefaultBranding()
-	if r == nil || r.Q == nil {
+	if r == nil || r.q == nil {
 		return out, nil
 	}
 
 	if orgID != uuid.Nil {
-		if row, err := r.Q.GetOrgBranding(ctx, orgID); err == nil {
+		row, err := r.q.GetOrgBranding(ctx, orgID)
+		switch {
+		case err == nil:
 			out = applyOrgRow(out, row)
+		case errors.Is(err, pgx.ErrNoRows):
+			// An org without a branding row intentionally uses system defaults.
+		default:
+			return Branding{}, fmt.Errorf("resolve org branding: %w", err)
 		}
-		// pgx.ErrNoRows is fine; we fall back to defaults silently.
 	}
 
 	if docID != uuid.Nil {
-		if row, err := r.Q.GetDocumentBrandingOverride(ctx, docID); err == nil {
+		row, err := r.q.GetDocumentBrandingOverride(ctx, docID)
+		switch {
+		case err == nil:
 			out = applyDocOverride(out, row)
+		case errors.Is(err, pgx.ErrNoRows):
+			// Drafts without an override inherit the resolved org/default theme.
+		default:
+			return Branding{}, fmt.Errorf("resolve document branding: %w", err)
 		}
 	}
 	return out, nil
+}
+
+// ResolveFrozen resolves an irreversible signer/final/evidence render solely
+// from the complete per-document snapshot materialized by Send. It deliberately
+// does not consult mutable org branding or system defaults when the snapshot is
+// absent or incomplete.
+func (r *Resolver) ResolveFrozen(ctx context.Context, docID uuid.UUID) (Branding, error) {
+	if r == nil || r.q == nil || docID == uuid.Nil {
+		return Branding{}, ErrFrozenBrandingUnavailable
+	}
+	row, err := r.q.GetDocumentBrandingOverride(ctx, docID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Branding{}, fmt.Errorf("%w: %w", ErrFrozenBrandingUnavailable, err)
+		}
+		return Branding{}, fmt.Errorf("resolve frozen document branding: %w", err)
+	}
+	if err := ValidateFrozenSnapshot(docID, row); err != nil {
+		return Branding{}, err
+	}
+	return applyDocOverride(DefaultBranding(), row), nil
+}
+
+// ValidateFrozenSnapshot verifies the exact database row used by irreversible
+// signer/final/evidence rendering. It is exported so Send can validate the row
+// it has just materialized in the same transaction, before leaving draft.
+func ValidateFrozenSnapshot(docID uuid.UUID, row *generated.DocumentBrandingOverride) error {
+	if row == nil || row.DocumentID != docID ||
+		!row.PrimaryHex.Valid || !row.AccentHex.Valid || !row.SurfaceHex.Valid ||
+		!row.TextHex.Valid || !row.MutedHex.Valid || !row.LogoUrl.Valid ||
+		!row.LogoAlt.Valid || !row.FontHeading.Valid || !row.FontBody.Valid ||
+		!row.SignatureColor.Valid {
+		return ErrFrozenBrandingUnavailable
+	}
+	for _, color := range []string{
+		row.PrimaryHex.String, row.AccentHex.String, row.SurfaceHex.String,
+		row.TextHex.String, row.MutedHex.String, row.SignatureColor.String,
+	} {
+		if !ValidateHex(color) {
+			return fmt.Errorf("%w: invalid frozen color", ErrFrozenBrandingUnavailable)
+		}
+	}
+	for _, font := range []string{row.FontHeading.String, row.FontBody.String} {
+		normalized, err := NormaliseFontFamily(font)
+		if err != nil || normalized != font {
+			return fmt.Errorf("%w: invalid or non-canonical frozen font", ErrFrozenBrandingUnavailable)
+		}
+	}
+	if err := ValidateLogoURL(row.LogoUrl.String); err != nil {
+		return fmt.Errorf("%w: invalid frozen logo URL", ErrFrozenBrandingUnavailable)
+	}
+	return nil
 }
 
 func applyOrgRow(b Branding, row *generated.OrgBranding) Branding {
@@ -131,25 +207,12 @@ func applyOrgRow(b Branding, row *generated.OrgBranding) Branding {
 	return b
 }
 
-// safeFontFamily strips a stored font name to a safe CSS-identifier charset so a
-// payload like `Inter;}*{display:none}` can never break out of the font-family rule
-// and inject arbitrary CSS into the ed25519-signed audit cert or the final signed
-// PDF (whose brandCSS wrapper is outside the signed payload). Render-time chokepoint:
-// every downstream use (CSSVariables, quoteFontFamily, buildHTMLDocument) reads the
-// sanitized value. Falls back to "Inter" when nothing safe remains.
+// safeFontFamily is the render-time chokepoint for legacy data. Supported write
+// paths persist NormaliseFontFamily output, but this fallback keeps an old or
+// privileged invalid row from escaping the font-family declaration.
 func safeFontFamily(s string) string {
-	var out []rune
-	for _, r := range s {
-		if r == ' ' || r == '_' || r == '-' ||
-			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			out = append(out, r)
-		}
-		if len(out) >= 64 {
-			break
-		}
-	}
-	cleaned := strings.TrimSpace(string(out))
-	if cleaned == "" {
+	cleaned, err := NormaliseFontFamily(s)
+	if err != nil {
 		return "Inter"
 	}
 	return cleaned
@@ -229,6 +292,42 @@ func ValidateHex(s string) bool {
 
 var reHex = regexp.MustCompile(`^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$`)
 
+const maxFontFamilyListLength = 256
+
+var reCanonicalFontFamilyList = regexp.MustCompile(`^[A-Za-z0-9_-]+( [A-Za-z0-9_-]+)*(, [A-Za-z0-9_-]+( [A-Za-z0-9_-]+)*)*$`)
+
+// NormaliseFontFamily validates a safe comma-separated CSS font-family list
+// and returns its canonical stored form. Unicode whitespace is trimmed and
+// collapsed to one ASCII space within a family, and list separators become
+// exactly ", ". Quotes and CSS punctuation are rejected instead of being
+// silently persisted and sanitized only during rendering.
+func NormaliseFontFamily(s string) (string, error) {
+	parts := strings.Split(s, ",")
+	canonical := make([]string, 0, len(parts))
+	for _, part := range parts {
+		family := strings.Join(strings.Fields(part), " ")
+		if family == "" {
+			return "", errors.New("font family must contain at least one name")
+		}
+		canonical = append(canonical, family)
+	}
+	normalized := strings.Join(canonical, ", ")
+	if len(normalized) > maxFontFamilyListLength {
+		return "", fmt.Errorf("font family must be at most %d bytes", maxFontFamilyListLength)
+	}
+	if !reCanonicalFontFamilyList.MatchString(normalized) {
+		return "", errors.New("font family must use letters, numbers, spaces, hyphens, underscores, and commas")
+	}
+	return normalized, nil
+}
+
+// IsCanonicalFontFamily reports whether a stored font list is both valid and
+// already in the one representation Hash commits to frozen evidence.
+func IsCanonicalFontFamily(s string) bool {
+	normalized, err := NormaliseFontFamily(s)
+	return err == nil && normalized == s
+}
+
 // ValidateLogoURL guards the logo_url write boundary (MCP set_org_branding +
 // REST branding upsert). The stored value is later rendered as an <img src> in
 // the branded sign UI / emails, so an attacker-supplied javascript: or data:
@@ -255,6 +354,20 @@ func ValidateLogoURL(s string) error {
 	}
 	if u.Host == "" {
 		return errors.New("logo_url must include a host")
+	}
+	return nil
+}
+
+// ValidateLogoURLForEnvironment keeps development previews available while
+// preventing production from persisting a logo dependency that Hash cannot yet
+// bind to an exact provider VersionId, SHA-256, and Object Lock commitment.
+// Empty remains valid so an operator can clear a legacy value.
+func ValidateLogoURLForEnvironment(environment, s string) error {
+	if err := ValidateLogoURL(s); err != nil {
+		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(environment), "production") && strings.TrimSpace(s) != "" {
+		return ErrProductionLogoUnsupported
 	}
 	return nil
 }
@@ -288,16 +401,28 @@ func ContrastTextOn(bgHex string) string {
 	return "#FFFFFF"
 }
 
-// quoteFontFamily wraps the value in quotes if it contains spaces so
-// the CSS `font-family` rule parses correctly.
+// quoteFontFamily quotes each multi-word family independently while retaining
+// canonical comma separators. NormaliseFontFamily has already excluded quote,
+// escape, delimiter, and declaration-breaking characters.
 func quoteFontFamily(s string) string {
-	if s == "" {
+	normalized, err := NormaliseFontFamily(s)
+	if err != nil {
 		return "Inter"
 	}
-	if strings.ContainsAny(s, " \t") {
-		return `"` + strings.ReplaceAll(s, `"`, "") + `"`
+	parts := strings.Split(normalized, ", ")
+	for i, family := range parts {
+		if !genericFontFamilies[strings.ToLower(family)] {
+			parts[i] = `"` + family + `"`
+		}
 	}
-	return s
+	return strings.Join(parts, ", ")
+}
+
+var genericFontFamilies = map[string]bool{
+	"serif": true, "sans-serif": true, "monospace": true,
+	"cursive": true, "fantasy": true, "system-ui": true,
+	"ui-serif": true, "ui-sans-serif": true, "ui-monospace": true,
+	"ui-rounded": true, "emoji": true, "math": true, "fangsong": true,
 }
 
 func parseHex(s string) (r, g, b int, ok bool) {

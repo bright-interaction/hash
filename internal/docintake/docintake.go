@@ -49,7 +49,7 @@ type documentQueries interface {
 
 type objectStore interface {
 	PutVersioned(context.Context, string, string, []byte) (storage.StoredObject, error)
-	Delete(context.Context, string) error
+	DeleteVersion(context.Context, string, string, []byte) error
 }
 
 // CreatePDFSourceDocument sanitizes the PDF bytes (strips /Info, XMP, JS,
@@ -94,7 +94,7 @@ func CreatePDFSourceDocument(ctx context.Context, q documentQueries, st objectSt
 		// context detached from the request cancellation that commonly caused
 		// the DB error. Otherwise every failed upload leaves an unreferenced PDF
 		// in the bucket forever.
-		cleanupErr := deleteAfterFailedWrite(ctx, st, key)
+		cleanupErr := deleteAfterFailedWrite(ctx, st, key, stored)
 		if cleanupErr != nil {
 			return nil, 0, errors.Join(
 				fmt.Errorf("create PDF document: %w", err),
@@ -107,22 +107,22 @@ func CreatePDFSourceDocument(ctx context.Context, q documentQueries, st objectSt
 	// reference it without a template lookup.
 	rep, rerr := sanitize.MergeReports(nil, cleaned.Report)
 	if rerr != nil {
-		cleanupErr := deleteAfterFailedWrite(ctx, st, key)
+		cleanupErr := deleteAfterFailedWrite(ctx, st, key, stored)
 		return nil, 0, errors.Join(fmt.Errorf("build metadata redaction report: %w", rerr), cleanupErr)
 	}
 	if err := q.UpdateMetadataRedactionReport(ctx, generated.UpdateMetadataRedactionReportParams{
 		ID: d.ID, MetadataRedactionReport: rep,
 	}); err != nil {
-		cleanupErr := deleteAfterFailedWrite(ctx, st, key)
+		cleanupErr := deleteAfterFailedWrite(ctx, st, key, stored)
 		return nil, 0, errors.Join(fmt.Errorf("persist metadata redaction report: %w", err), cleanupErr)
 	}
 	return d, pageCount, nil
 }
 
-func deleteAfterFailedWrite(parent context.Context, st objectStore, key string) error {
+func deleteAfterFailedWrite(parent context.Context, st objectStore, key string, stored storage.StoredObject) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), orphanCleanupTimeout)
 	defer cancel()
-	return st.Delete(cleanupCtx, key)
+	return st.DeleteVersion(cleanupCtx, key, stored.VersionID, stored.SHA256[:])
 }
 
 // Compile-time assertions keep interface drift visible at the storage/query

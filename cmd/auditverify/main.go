@@ -30,6 +30,8 @@ import (
 	"github.com/minio/minio-go/v7/pkg/encrypt"
 
 	"github.com/bright-interaction/hash/internal/audit"
+	"github.com/bright-interaction/hash/internal/blocks"
+	"github.com/bright-interaction/hash/internal/branding"
 	"github.com/bright-interaction/hash/internal/config"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/evidence"
@@ -55,6 +57,11 @@ type estateResult struct {
 	UncommittedEvidenceRootCount     int64                `json:"uncommitted_evidence_root_count"`
 	CompletedEnvelopeChildrenChecked int64                `json:"completed_envelope_children_checked"`
 	InvalidEnvelopeChildCount        int64                `json:"invalid_envelope_child_count"`
+	ImmutableBlockTreesChecked       int64                `json:"immutable_block_trees_checked"`
+	InvalidImmutableBlockTreeCount   int64                `json:"invalid_immutable_block_tree_count"`
+	FrozenBrandingSnapshotsChecked   int64                `json:"frozen_branding_snapshots_checked"`
+	InvalidFrozenBrandingCount       int64                `json:"invalid_frozen_branding_count"`
+	UnsupportedBrandingLogoCount     int64                `json:"unsupported_branding_logo_count"`
 	EvidencePayloadSmoke             string               `json:"evidence_payload_smoke"`
 	FailedOrgs                       []failedOrganization `json:"failed_orgs,omitempty"`
 	sample                           *evidenceSample      `json:"-"`
@@ -167,11 +174,191 @@ func verifyEstate(ctx context.Context, pool *pgxpool.Pool) (estateResult, error)
 	if evidenceCounts.IncompleteRoots != 0 || evidenceCounts.UncommittedRoots != 0 || evidenceCounts.InvalidChildren != 0 {
 		result.OK = false
 	}
+	blockCounts, err := verifyImmutableBlockEvidence(ctx, tx)
+	if err != nil {
+		return result, fmt.Errorf("verify immutable block evidence: %w", err)
+	}
+	result.ImmutableBlockTreesChecked = blockCounts.Checked
+	result.InvalidImmutableBlockTreeCount = blockCounts.Invalid
+	if blockCounts.Invalid != 0 {
+		result.OK = false
+	}
+	brandingCounts, err := verifyFrozenBrandingEvidence(ctx, tx)
+	if err != nil {
+		return result, fmt.Errorf("verify frozen branding evidence: %w", err)
+	}
+	result.FrozenBrandingSnapshotsChecked = brandingCounts.Checked
+	result.InvalidFrozenBrandingCount = brandingCounts.Invalid
+	result.UnsupportedBrandingLogoCount = brandingCounts.UnsupportedLogos
+	if brandingCounts.Invalid != 0 || brandingCounts.UnsupportedLogos != 0 {
+		result.OK = false
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return result, fmt.Errorf("finish verification snapshot: %w", err)
 	}
 	result.Complete = true
 	return result, nil
+}
+
+type immutableBlockEvidenceCounts struct {
+	Checked int64
+	Invalid int64
+}
+
+const immutableBlockEvidenceSQL = `
+WITH frozen_documents AS (
+    SELECT d.id
+      FROM documents d
+     WHERE d.status IN ('sent','in_progress','changes_requested','finalizing','completed','declined','voided','expired')
+        OR (d.status = 'sealing' AND EXISTS (
+            SELECT 1
+              FROM send_sealing_intents si
+             WHERE si.document_id = COALESCE(d.parent_envelope_id, d.id)
+               AND si.org_id = d.org_id
+               AND si.retention_started_at IS NOT NULL
+        ))
+)
+SELECT d.blocks_json
+  FROM documents d
+  JOIN frozen_documents frozen ON frozen.id = d.id
+ WHERE d.blocks_json IS NOT NULL
+UNION ALL
+SELECT v.block_tree_json
+  FROM document_versions v
+  JOIN frozen_documents frozen ON frozen.id = v.document_id
+ WHERE v.block_tree_json IS NOT NULL`
+
+// verifyImmutableBlockEvidence makes the ordinary release audit apply the
+// same fail-closed gate as candidate-cutover recovery. Every current tree and
+// historical version belonging to a legally frozen document is parsed through
+// the canonical block parser. Envelope children are ordinary document rows and
+// are therefore covered independently of the wrapper.
+func verifyImmutableBlockEvidence(ctx context.Context, tx pgx.Tx) (immutableBlockEvidenceCounts, error) {
+	var out immutableBlockEvidenceCounts
+	rows, err := tx.Query(ctx, immutableBlockEvidenceSQL)
+	if err != nil {
+		return out, errors.New("query immutable block-evidence inventory")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return out, errors.New("decode immutable block-evidence inventory")
+		}
+		out.Checked++
+		if err := validateImmutableBlockEvidence(raw); err != nil {
+			out.Invalid++
+		}
+		clear(raw)
+	}
+	if rows.Err() != nil {
+		return out, errors.New("immutable block-evidence inventory did not complete")
+	}
+	return out, nil
+}
+
+func validateImmutableBlockEvidence(raw []byte) error {
+	tree, err := blocks.ParseCanonicalTree(raw)
+	if err != nil {
+		return errors.New("immutable block evidence is not canonical")
+	}
+	if err := blocks.ValidateImmutableSigningEvidence(tree); err != nil {
+		return errors.New("immutable block evidence contains unsupported or unpinned content")
+	}
+	return nil
+}
+
+type frozenBrandingEvidenceCounts struct {
+	Checked          int64
+	Invalid          int64
+	UnsupportedLogos int64
+}
+
+const frozenBrandingEvidenceSQL = `
+WITH frozen_documents AS (
+    SELECT d.id
+      FROM documents d
+     WHERE d.status IN ('sent','in_progress','changes_requested','finalizing','completed','declined','voided','expired')
+        OR (d.status = 'sealing' AND EXISTS (
+            SELECT 1
+              FROM send_sealing_intents si
+             WHERE si.document_id = COALESCE(d.parent_envelope_id, d.id)
+               AND si.org_id = d.org_id
+               AND si.retention_started_at IS NOT NULL
+        ))
+)
+SELECT snapshot.document_id, snapshot.primary_hex, snapshot.accent_hex,
+       snapshot.surface_hex, snapshot.text_hex, snapshot.muted_hex,
+       snapshot.logo_url, snapshot.logo_alt, snapshot.font_heading,
+       snapshot.font_body, snapshot.signature_color
+  FROM frozen_documents frozen
+  LEFT JOIN document_branding_override snapshot ON snapshot.document_id = frozen.id`
+
+const unsupportedBrandingLogosSQL = `
+SELECT count(*)
+  FROM (
+        SELECT org_id::text AS owner
+          FROM org_branding
+         WHERE logo_url <> ''
+        UNION ALL
+        SELECT document_id::text AS owner
+          FROM document_branding_override
+         WHERE logo_url IS NOT NULL AND logo_url <> ''
+  ) unsupported`
+
+// verifyFrozenBrandingEvidence proves terminal and in-flight renderers no
+// longer depend on mutable org branding. Send materializes every effective
+// field into a document override before sealing. Production also forbids logo
+// dependencies until they carry exact object-version evidence, so any legacy
+// org or document logo blocks promotion even if it belongs only to a draft.
+func verifyFrozenBrandingEvidence(ctx context.Context, tx pgx.Tx) (frozenBrandingEvidenceCounts, error) {
+	var out frozenBrandingEvidenceCounts
+	rows, err := tx.Query(ctx, frozenBrandingEvidenceSQL)
+	if err != nil {
+		return out, errors.New("query frozen branding inventory")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			documentID                                              pgtype.UUID
+			primary, accent, surface, text, muted                   pgtype.Text
+			logoURL, logoAlt, fontHeading, fontBody, signatureColor pgtype.Text
+		)
+		if err := rows.Scan(&documentID, &primary, &accent, &surface, &text, &muted,
+			&logoURL, &logoAlt, &fontHeading, &fontBody, &signatureColor); err != nil {
+			return out, errors.New("decode frozen branding inventory")
+		}
+		out.Checked++
+		if !validFrozenBrandingSnapshot(documentID, primary, accent, surface, text, muted,
+			logoURL, logoAlt, fontHeading, fontBody, signatureColor) {
+			out.Invalid++
+		}
+	}
+	if rows.Err() != nil {
+		return out, errors.New("frozen branding inventory did not complete")
+	}
+	rows.Close()
+	if err := tx.QueryRow(ctx, unsupportedBrandingLogosSQL).Scan(&out.UnsupportedLogos); err != nil {
+		return out, errors.New("query unsupported branding logos")
+	}
+	return out, nil
+}
+
+func validFrozenBrandingSnapshot(documentID pgtype.UUID, primary, accent, surface, text, muted,
+	logoURL, logoAlt, fontHeading, fontBody, signatureColor pgtype.Text,
+) bool {
+	if !documentID.Valid || !primary.Valid || !accent.Valid || !surface.Valid || !text.Valid || !muted.Valid ||
+		!logoURL.Valid || !logoAlt.Valid || !fontHeading.Valid || !fontBody.Valid || !signatureColor.Valid {
+		return false
+	}
+	for _, color := range []string{primary.String, accent.String, surface.String, text.String, muted.String, signatureColor.String} {
+		if !branding.ValidateHex(color) {
+			return false
+		}
+	}
+	return logoURL.String == "" &&
+		branding.IsCanonicalFontFamily(fontHeading.String) &&
+		branding.IsCanonicalFontFamily(fontBody.String)
 }
 
 type terminalEvidenceCounts struct {
@@ -431,7 +618,7 @@ func verifyEvidenceSample(ctx context.Context, sample *evidenceSample) error {
 	if err != nil {
 		return errors.New("invalid runtime configuration")
 	}
-	policy, err := s3policy.Load(cfg.S3SSEMode, cfg.S3SSECKeyFile, cfg.S3BucketLookup, cfg.S3UseSSL)
+	policy, err := s3policy.Load(cfg.S3SSEMode, cfg.S3SSECKeyFile, cfg.S3SSECKeySHA256, cfg.S3BucketLookup, cfg.S3UseSSL)
 	if err != nil {
 		return errors.New("object storage policy is invalid")
 	}

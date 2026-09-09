@@ -5,9 +5,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -16,7 +18,12 @@ import (
 )
 
 type purgeObjectDeleter interface {
-	Delete(context.Context, string) error
+	DeleteVersion(context.Context, string, string, []byte) error
+}
+
+type purgeObjectVersion struct {
+	key, versionID string
+	digest         []byte
 }
 
 type purgeRowDelete func(context.Context, *generated.Document) (int64, error)
@@ -93,12 +100,16 @@ func cleanupClaimedSoftDeletedDocument(ctx context.Context, doc *generated.Docum
 	if doc == nil || deleteRow == nil {
 		return 0, errors.New("soft delete purge: document and row delete are required")
 	}
-	if key := purgeOwnedSourceKey(doc); key != "" {
+	object, err := purgeOwnedSourceVersion(doc)
+	if err != nil {
+		return 0, err
+	}
+	if object != nil {
 		if objects == nil {
 			return 0, errors.New("soft delete purge: storage unavailable")
 		}
 		deleteCtx, cancel := context.WithTimeout(ctx, softDeleteObjectTimeout)
-		err := objects.Delete(deleteCtx, key)
+		err := objects.DeleteVersion(deleteCtx, object.key, object.versionID, object.digest)
 		cancel()
 		if err != nil {
 			return 0, fmt.Errorf("delete source object: %w", err)
@@ -107,18 +118,26 @@ func cleanupClaimedSoftDeletedDocument(ctx context.Context, doc *generated.Docum
 	return deleteRow(ctx, doc)
 }
 
-// purgeOwnedSourceKey mirrors the request-path cleanup predicate. Template
+// purgeOwnedSourceVersion mirrors the request-path cleanup predicate. Template
 // clones share their source object and must retain it; final/audit aliases are
-// legal evidence and must never be removed by draft retention cleanup.
-func purgeOwnedSourceKey(doc *generated.Document) string {
+// legal evidence and must never be removed by draft retention cleanup. An
+// unpinned legacy row is retained for explicit remediation instead of resolving
+// and deleting an ambiguous latest/history version.
+func purgeOwnedSourceVersion(doc *generated.Document) (*purgeObjectVersion, error) {
 	if doc == nil || doc.Status != "draft" || doc.TemplateID.Valid ||
 		!doc.PdfStorageKey.Valid || doc.PdfStorageKey.String == "" {
-		return ""
+		return nil, nil
 	}
 	key := doc.PdfStorageKey.String
 	if (doc.FinalPdfKey.Valid && doc.FinalPdfKey.String == key) ||
 		(doc.AuditCertKey.Valid && doc.AuditCertKey.String == key) {
-		return ""
+		return nil, nil
 	}
-	return key
+	if !doc.EvidenceVersionPinsRequired || !doc.PdfStorageVersionID.Valid ||
+		strings.TrimSpace(doc.PdfStorageVersionID.String) == "" || len(doc.PdfSha256) != sha256.Size {
+		return nil, errors.New("soft delete purge: draft source lacks its exact-version cleanup commitment")
+	}
+	return &purgeObjectVersion{
+		key: key, versionID: doc.PdfStorageVersionID.String, digest: append([]byte(nil), doc.PdfSha256...),
+	}, nil
 }

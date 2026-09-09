@@ -5,12 +5,14 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -278,7 +280,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 				return nil, err
 			}
 			if err := d.Billing.EnforceDocumentQuotaMutation(r.Context(), q, u.OrgID); err != nil {
-				if cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc.PdfStorageKey.String); cleanupErr != nil {
+				if cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc); cleanupErr != nil {
 					slog.Error("mcp document quota rollback object cleanup failed", "quota_err", err, "cleanup_err", cleanupErr)
 					return nil, errors.New("document import rollback cleanup failed")
 				}
@@ -291,7 +293,7 @@ func registerAuthoringTools(s *Server, d Deps) {
 					ID: doc.ID, OrgID: u.OrgID, RequiresSignature: false,
 				})
 				if uerr != nil {
-					cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc.PdfStorageKey.String)
+					cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc)
 					return nil, errors.Join(uerr, cleanupErr)
 				}
 				doc = updated
@@ -302,11 +304,11 @@ func registerAuthoringTools(s *Server, d Deps) {
 				Payload: map[string]any{"name": p.Name, "source_kind": "pdf", "via": "mcp", "tool": "create_pdf_document"},
 			})
 			if err != nil {
-				cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc.PdfStorageKey.String)
+				cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc)
 				return nil, errors.Join(err, cleanupErr)
 			}
 			if err := tx.Commit(r.Context()); err != nil {
-				cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc.PdfStorageKey.String)
+				cleanupErr := cleanupMCPImportedPDF(r.Context(), d, doc)
 				return nil, errors.Join(err, cleanupErr)
 			}
 			d.Audit.Publish(pending)
@@ -1101,11 +1103,13 @@ func clientIP(r *http.Request) string {
 	return requestmeta.ClientIP(r.RemoteAddr)
 }
 
-func cleanupMCPImportedPDF(parent context.Context, d Deps, key string) error {
-	if d.Storage == nil || key == "" {
+func cleanupMCPImportedPDF(parent context.Context, d Deps, doc *generated.Document) error {
+	if d.Storage == nil || doc == nil || !doc.PdfStorageKey.Valid || doc.PdfStorageKey.String == "" ||
+		!doc.EvidenceVersionPinsRequired || !doc.PdfStorageVersionID.Valid ||
+		strings.TrimSpace(doc.PdfStorageVersionID.String) == "" || len(doc.PdfSha256) != sha256.Size {
 		return errors.New("document import cleanup unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 15*time.Second)
 	defer cancel()
-	return d.Storage.Delete(ctx, key)
+	return d.Storage.DeleteVersion(ctx, doc.PdfStorageKey.String, doc.PdfStorageVersionID.String, doc.PdfSha256)
 }

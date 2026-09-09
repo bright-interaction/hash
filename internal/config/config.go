@@ -45,15 +45,16 @@ type Config struct {
 
 	DBURL string
 
-	S3Endpoint     string
-	S3Region       string
-	S3Bucket       string
-	S3AccessKey    string
-	S3SecretKey    string
-	S3UseSSL       bool
-	S3SSEMode      string
-	S3SSECKeyFile  string
-	S3BucketLookup string
+	S3Endpoint      string
+	S3Region        string
+	S3Bucket        string
+	S3AccessKey     string
+	S3SecretKey     string
+	S3UseSSL        bool
+	S3SSEMode       string
+	S3SSECKeyFile   string
+	S3SSECKeySHA256 string
+	S3BucketLookup  string
 
 	SMTPHost     string
 	SMTPPort     int
@@ -184,6 +185,7 @@ func Load() (*Config, error) {
 		S3UseSSL:                     s3UseSSL,
 		S3SSEMode:                    envString("HASH_S3_SSE_MODE", s3policy.SSEModeS3),
 		S3SSECKeyFile:                os.Getenv("HASH_S3_SSE_C_KEY_FILE"),
+		S3SSECKeySHA256:              os.Getenv("HASH_S3_SSE_C_KEY_SHA256"),
 		S3BucketLookup:               envString("HASH_S3_BUCKET_LOOKUP", s3policy.BucketLookupAuto),
 		SMTPHost:                     os.Getenv("HASH_SMTP_HOST"),
 		SMTPPort:                     smtpPort,
@@ -242,6 +244,11 @@ func Load() (*Config, error) {
 		// These are the only runtime modes with defined safety semantics.
 	default:
 		return nil, errors.New("HASH_ENVIRONMENT must be exactly development, staging, or production")
+	}
+	if c.Environment == "production" {
+		if err := validateNoProductionLibpqEnv(os.Environ()); err != nil {
+			return nil, err
+		}
 	}
 	c.OperatorName = strings.TrimSpace(c.OperatorName)
 	c.PrivacyContact = strings.TrimSpace(c.PrivacyContact)
@@ -318,7 +325,11 @@ func Load() (*Config, error) {
 	// Configcheck runs without a network and must still catch an unreadable,
 	// malformed, or plaintext-transport SSE-C deployment before cutover. Load
 	// reads at most 33 bytes and never renders the key contents.
-	if _, err := s3policy.Load(c.S3SSEMode, c.S3SSECKeyFile, c.S3BucketLookup, c.S3UseSSL); err != nil {
+	allowInsecureDevelopment := c.Environment == "development" && isLocalPublicURL(c.PublicURL)
+	if err := s3policy.ValidateEndpointTransport(c.S3Endpoint, c.S3UseSSL, allowInsecureDevelopment); err != nil {
+		return nil, err
+	}
+	if _, err := s3policy.Load(c.S3SSEMode, c.S3SSECKeyFile, c.S3SSECKeySHA256, c.S3BucketLookup, c.S3UseSSL); err != nil {
 		return nil, err
 	}
 	if err := validateDatabaseConfig(c.DBURL, c.Environment); err != nil {
@@ -471,6 +482,16 @@ func Load() (*Config, error) {
 	}
 
 	return c, nil
+}
+
+func validateNoProductionLibpqEnv(env []string) error {
+	for _, entry := range env {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && strings.HasPrefix(name, "PG") && value != "" {
+			return errors.New("nonempty libpq PG* environment variables are forbidden in production; HASH_DB_URL is the sole database configuration")
+		}
+	}
+	return nil
 }
 
 func validateDatabaseConfig(dsn, environment string) error {

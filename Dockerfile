@@ -24,6 +24,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/server ./cmd/server && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/worker ./cmd/worker && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/config-check ./cmd/configcheck && \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/storage-check ./cmd/storagecheck && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/audit-verify ./cmd/auditverify && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/rollback-check ./cmd/rollbackcheck && \
     CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/migrate ./cmd/migrate
@@ -42,6 +43,7 @@ RUN apk add --no-cache \
 COPY --from=backend /out/server /usr/local/bin/hash-server
 COPY --from=backend /out/worker /usr/local/bin/hash-worker
 COPY --from=backend /out/config-check /usr/local/bin/hash-config-check
+COPY --from=backend /out/storage-check /usr/local/bin/hash-storage-check
 COPY --from=backend /out/audit-verify /usr/local/bin/hash-audit-verify
 COPY --from=backend /out/rollback-check /usr/local/bin/hash-rollback-check
 COPY --from=backend /out/migrate /usr/local/bin/hash-migrate

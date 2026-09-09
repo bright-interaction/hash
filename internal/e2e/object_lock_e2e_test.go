@@ -11,7 +11,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,21 +36,13 @@ func TestEvidenceObjectLockE2E(t *testing.T) {
 	if endpoint == "" || accessKey == "" || secretKey == "" {
 		t.Skip("set HASH_E2E_S3_ENDPOINT and credentials to run")
 	}
-	region := os.Getenv("HASH_E2E_S3_REGION")
-	if region == "" {
-		region = "eu-central-1"
-	}
-	useSSL := false
-	if raw := os.Getenv("HASH_E2E_S3_USE_SSL"); raw != "" {
-		var err error
-		useSSL, err = strconv.ParseBool(raw)
-		must(t, err, "parse HASH_E2E_S3_USE_SSL")
-	}
+	storageCfg := e2eStorageConfig(t, os.Getenv("HASH_E2E_S3_BUCKET"))
 	policy, err := s3policy.Load(
-		os.Getenv("HASH_E2E_S3_SSE_MODE"),
-		os.Getenv("HASH_E2E_S3_SSE_C_KEY_FILE"),
-		os.Getenv("HASH_E2E_S3_BUCKET_LOOKUP"),
-		useSSL,
+		storageCfg.SSEMode,
+		storageCfg.SSECKeyFile,
+		storageCfg.SSECKeySHA256,
+		storageCfg.BucketLookup,
+		storageCfg.UseSSL,
 	)
 	must(t, err, "validate live S3 policy")
 
@@ -59,13 +50,13 @@ func TestEvidenceObjectLockE2E(t *testing.T) {
 	defer cancel()
 	raw, err := minio.New(endpoint, &minio.Options{
 		Creds:        credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure:       useSSL,
-		Region:       region,
+		Secure:       storageCfg.UseSSL,
+		Region:       storageCfg.Region,
 		BucketLookup: policy.BucketLookupType,
 	})
 	must(t, err, "create raw MinIO client")
 	runID := strings.ReplaceAll(uuid.NewString(), "-", "")
-	bucket := os.Getenv("HASH_E2E_S3_BUCKET")
+	bucket := storageCfg.Bucket
 	precreatedBucket := bucket != ""
 	if bucket == "" {
 		if os.Getenv("HASH_E2E_S3_EPHEMERAL_BUCKET") != "true" {
@@ -76,25 +67,42 @@ func TestEvidenceObjectLockE2E(t *testing.T) {
 		}
 		bucket = "hash-lock-e2e-" + runID
 		must(t, raw.MakeBucket(ctx, bucket, minio.MakeBucketOptions{
-			Region: region, ObjectLocking: true,
+			Region: storageCfg.Region, ObjectLocking: true,
 		}), "create Object-Lock bucket")
 	} else if os.Getenv("HASH_E2E_S3_LIVE_CONFORMANCE") != "true" {
 		t.Fatal("a pre-created provider bucket requires HASH_E2E_S3_LIVE_CONFORMANCE=true because this test writes seven-year COMPLIANCE objects")
 	}
 
-	store, err := storage.New(ctx, storage.Config{
-		Endpoint: endpoint, Region: region, Bucket: bucket,
-		AccessKey: accessKey, SecretKey: secretKey, UseSSL: useSSL,
-		SSEMode: policy.SSEMode, SSECKeyFile: os.Getenv("HASH_E2E_S3_SSE_C_KEY_FILE"),
-		BucketLookup: policy.BucketLookup, RequireObjectLock: true,
-		// A conformance run may write only its unique object prefix. It must not
-		// overwrite lifecycle configuration on an operator-managed bucket.
-		SkipTransientLifecycle: precreatedBucket,
-	})
+	storageCfg.Bucket = bucket
+	storageCfg.SSEMode = policy.SSEMode
+	storageCfg.BucketLookup = policy.BucketLookup
+	storageCfg.RequireObjectLock = true
+	// A conformance run may write only its unique object prefix. It must not
+	// overwrite lifecycle configuration on an operator-managed bucket.
+	storageCfg.SkipTransientLifecycle = precreatedBucket
+	store, err := storage.New(ctx, storageCfg)
 	must(t, err, "open production-mode storage")
 
 	started := time.Now().UTC()
 	retainUntil := storage.EvidenceRetentionDeadline(started, article13.RetentionYearsV1)
+	mutableKey := "conformance/" + runID + "/org/test/documents/draft-source.pdf"
+	mutable := []byte("mutable draft source")
+	mutableDigest := sha256.Sum256(mutable)
+	mutableStored, err := store.PutVersioned(ctx, mutableKey, "application/pdf", mutable)
+	must(t, err, "put mutable exact-version draft source")
+	if mutableStored.VersionID == "" || mutableStored.VersionID == storage.DevelopmentVersionID || mutableStored.SHA256 != mutableDigest {
+		t.Fatalf("mutable stored identity = %#v, want exact production VersionId and digest", mutableStored)
+	}
+	must(t, store.DeleteVersion(ctx, mutableKey, mutableStored.VersionID, mutableDigest[:]), "physically delete exact mutable draft version")
+	for item := range raw.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: mutableKey, Recursive: true, WithVersions: true}) {
+		if item.Err != nil {
+			t.Fatalf("list mutable draft history after exact deletion: %v", item.Err)
+		}
+		if item.Key == mutableKey {
+			t.Fatalf("exact deletion left version/delete-marker state: VersionId=%q delete_marker=%t", item.VersionID, item.IsDeleteMarker)
+		}
+	}
+
 	key := "conformance/" + runID + "/org/test/documents/test/final.pdf"
 	authentic := []byte("immutable evidence")
 	expected := sha256.Sum256(authentic)

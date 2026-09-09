@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -39,7 +40,7 @@ func registerBrandingTools(s *Server, d Deps) {
 		Write:       true,
 		MinRole:     auth.RoleOwner, // REST PUT /branding is owner-only; match it (branding renders into every signer page + final PDF)
 		MinFeature:  "branding",     // paid-feature gate, mirroring the REST handleSetBranding
-		Description: "Upsert the org-level brand palette. All fields optional; missing fields default to the system palette. Hex colours accept 3- or 6-char form with optional leading '#' and normalise to '#RRGGBB'.",
+		Description: "Upsert the org-level brand palette. All fields optional; missing fields default to the system palette. Hex colours accept 3- or 6-char form with optional leading '#' and normalise to '#RRGGBB'. Font lists accept safe comma-separated family names and are stored canonically.",
 		InputSchema: schemaObject(map[string]any{
 			"primary_hex":     stringSchema("hex color for primary surfaces"),
 			"accent_hex":      stringSchema("hex color for accents + links"),
@@ -69,6 +70,26 @@ func registerBrandingTools(s *Server, d Deps) {
 			if err := MustParseArgs(args, &in); err != nil {
 				return nil, err
 			}
+			in.LogoURL = strings.TrimSpace(in.LogoURL)
+			// Reject malformed caller-supplied fonts before even consulting the
+			// database. The merged effective values are checked again below so a
+			// legacy invalid row cannot survive an unrelated palette update.
+			for _, font := range []struct {
+				name  string
+				value *string
+			}{
+				{name: "font_heading", value: &in.FontHeading},
+				{name: "font_body", value: &in.FontBody},
+			} {
+				if *font.value == "" {
+					continue
+				}
+				normalized, err := branding.NormaliseFontFamily(*font.value)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", font.name, err)
+				}
+				*font.value = normalized
+			}
 			// Validate + normalise hex inputs before persisting.
 			pairs := []struct {
 				name string
@@ -91,12 +112,29 @@ func registerBrandingTools(s *Server, d Deps) {
 				}
 				*p.ptr = norm
 			}
-			if err := branding.ValidateLogoURL(in.LogoURL); err != nil {
+			if err := branding.ValidateLogoURLForEnvironment(d.Environment, in.LogoURL); err != nil {
 				return nil, err
 			}
 			merged := mergeForMCP(loadOrgBranding(r, d, u.OrgID), in.PrimaryHex, in.AccentHex,
 				in.SurfaceHex, in.TextHex, in.MutedHex, in.LogoURL, in.LogoAlt,
 				in.FontHeading, in.FontBody, in.SignatureColor)
+			// MCP updates merge omitted fields into the existing row. Recheck the
+			// effective value so an old logo cannot survive a production palette
+			// edit and bypass the immutable-logo gate.
+			merged.LogoURL = strings.TrimSpace(merged.LogoURL)
+			if err := branding.ValidateLogoURLForEnvironment(d.Environment, merged.LogoURL); err != nil {
+				return nil, err
+			}
+			normalizedFont, err := branding.NormaliseFontFamily(merged.FontHeading)
+			if err != nil {
+				return nil, fmt.Errorf("font_heading: %w", err)
+			}
+			merged.FontHeading = normalizedFont
+			normalizedFont, err = branding.NormaliseFontFamily(merged.FontBody)
+			if err != nil {
+				return nil, fmt.Errorf("font_body: %w", err)
+			}
+			merged.FontBody = normalizedFont
 			row, err := audit.CommitMutation(r.Context(), d.Pool, d.Audit,
 				func(q *generated.Queries) (*generated.OrgBranding, error) {
 					return q.UpsertOrgBranding(r.Context(), generated.UpsertOrgBrandingParams{

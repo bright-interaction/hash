@@ -99,12 +99,25 @@ func (s *Server) handleUpsertOrgBranding(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, field+": "+err.Error())
 		return
 	}
-	if err := branding.ValidateLogoURL(in.LogoURL); err != nil {
+	in.LogoURL = strings.TrimSpace(in.LogoURL)
+	if err := branding.ValidateLogoURLForEnvironment(s.Environment, in.LogoURL); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	def := branding.DefaultBranding()
 	merged := mergeBrandingInput(def, in)
+	normalizedFont, err := branding.NormaliseFontFamily(merged.FontHeading)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "font_heading: "+err.Error())
+		return
+	}
+	merged.FontHeading = normalizedFont
+	normalizedFont, err = branding.NormaliseFontFamily(merged.FontBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "font_body: "+err.Error())
+		return
+	}
+	merged.FontBody = normalizedFont
 	row, err := audit.CommitMutation(r.Context(), s.Pool, s.Audit,
 		func(q *generated.Queries) (*generated.OrgBranding, error) {
 			return q.UpsertOrgBranding(r.Context(), generated.UpsertOrgBrandingParams{
@@ -175,6 +188,10 @@ func (s *Server) handleExtractBrandingPalette(w http.ResponseWriter, r *http.Req
 func (s *Server) handleUploadBrandingLogo(w http.ResponseWriter, r *http.Request) {
 	sess, ok := requireSessionUser(w, r.Context())
 	if !ok {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(s.Environment), "production") {
+		writeError(w, http.StatusConflict, branding.ErrProductionLogoUnsupported.Error())
 		return
 	}
 	if s.Storage == nil {

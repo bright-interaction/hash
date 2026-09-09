@@ -160,16 +160,20 @@ func run() error {
 
 	// Storage.
 	store, err := storage.New(ctx, storage.Config{
-		Endpoint:          cfg.S3Endpoint,
-		Region:            cfg.S3Region,
-		Bucket:            cfg.S3Bucket,
-		AccessKey:         cfg.S3AccessKey,
-		SecretKey:         cfg.S3SecretKey,
-		UseSSL:            cfg.S3UseSSL,
-		SSEMode:           cfg.S3SSEMode,
-		SSECKeyFile:       cfg.S3SSECKeyFile,
-		BucketLookup:      cfg.S3BucketLookup,
-		RequireObjectLock: !config.IsLocalDevelopment(cfg.PublicURL),
+		Endpoint:                         cfg.S3Endpoint,
+		Region:                           cfg.S3Region,
+		Bucket:                           cfg.S3Bucket,
+		AccessKey:                        cfg.S3AccessKey,
+		SecretKey:                        cfg.S3SecretKey,
+		UseSSL:                           cfg.S3UseSSL,
+		SSEMode:                          cfg.S3SSEMode,
+		SSECKeyFile:                      cfg.S3SSECKeyFile,
+		SSECKeySHA256:                    cfg.S3SSECKeySHA256,
+		BucketLookup:                     cfg.S3BucketLookup,
+		RequireObjectLock:                !config.IsLocalDevelopment(cfg.PublicURL),
+		RequireExistingBucket:            !config.IsLocalDevelopment(cfg.PublicURL),
+		SkipTransientLifecycle:           cfg.Environment != "development",
+		AllowInsecureDevelopmentEndpoint: cfg.Environment == "development" && config.IsLocalDevelopment(cfg.PublicURL),
 	})
 	if err != nil {
 		return fmt.Errorf("init storage: %w", err)
@@ -283,15 +287,15 @@ func run() error {
 		OrgName:      cfg.OperatorName,
 		BaseURL:      cfg.PublicURL,
 		ActionSecret: cfg.SignerTokenKey,
-		BrandingCSS: func(ctx context.Context, doc *generated.Document) string {
+		BrandingCSS: func(ctx context.Context, doc *generated.Document) (string, error) {
 			if doc == nil {
-				return branding.DefaultBranding().CSSVariables()
+				return branding.DefaultBranding().CSSVariables(), nil
 			}
-			b, err := brandingResolver.Resolve(ctx, doc.OrgID, doc.ID)
+			b, err := brandingResolver.ResolveFrozen(ctx, doc.ID)
 			if err != nil {
-				return branding.DefaultBranding().CSSVariables()
+				return "", err
 			}
-			return b.CSSVariables()
+			return b.CSSVariables(), nil
 		},
 		EnvelopeManifestHTML: func(ctx context.Context, doc *generated.Document) string {
 			if doc == nil || !doc.IsEnvelope {
@@ -380,17 +384,18 @@ func run() error {
 	// all route through it so the magic-token TTL, variable freeze, eIDAS
 	// guard, and billing quota are enforced in exactly one place.
 	sendEngine := &send.Engine{
-		Pool:      pool,
-		Queries:   queries,
-		Audit:     auditLog,
-		Mailer:    mailer,
-		Resolver:  resolverEngine,
-		EIDAS:     eidasEngine,
-		Billing:   billingEngine,
-		Envelopes: envelopesEngine,
-		Storage:   store,
-		PublicURL: cfg.PublicURL,
-		OrgName:   cfg.OperatorName,
+		Pool:        pool,
+		Queries:     queries,
+		Audit:       auditLog,
+		Mailer:      mailer,
+		Resolver:    resolverEngine,
+		EIDAS:       eidasEngine,
+		Billing:     billingEngine,
+		Envelopes:   envelopesEngine,
+		Storage:     store,
+		PublicURL:   cfg.PublicURL,
+		OrgName:     cfg.OperatorName,
+		Environment: cfg.Environment,
 	}
 
 	// v1.1 Yjs collaborative editing hub. One per process; the in-memory

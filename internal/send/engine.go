@@ -67,6 +67,7 @@ var (
 	ErrAcknowledgementNeedsPDF   = errors.New("acknowledgement documents must be standalone PDF-source documents with a source PDF and SHA-256 digest")
 	ErrAcknowledgementFields     = errors.New("acknowledgement documents cannot contain fillable fields")
 	ErrUnsupportedBlockEvidence  = errors.New("block type is not supported by the immutable signing artifact")
+	ErrUnsupportedBrandingLogo   = errors.New("signing does not support logo branding until immutable asset evidence is implemented")
 	ErrUnresolvedVariables       = errors.New("document contains unresolved variables")
 	ErrLawfulBasisUnconfirmed    = errors.New("sender must explicitly confirm the document GDPR Article 6 lawful basis")
 	ErrInvalidSignerDisclosure   = errors.New("document cannot produce a valid signer privacy disclosure")
@@ -106,18 +107,19 @@ type Actor struct {
 // Resolver/EIDAS/Billing/Envelopes engines are nil-safe so unit tests + dev
 // can run without them.
 type Engine struct {
-	Pool      *pgxpool.Pool
-	Queries   *generated.Queries
-	Audit     *audit.Logger
-	Mailer    dispatch.Mailer
-	Resolver  *resolver.Resolver
-	EIDAS     *eidas.Engine
-	Billing   *billing.Engine
-	Envelopes *envelopes.Engine
-	Storage   EvidenceRetainer
-	PublicURL string
-	OrgName   string
-	Now       func() time.Time
+	Pool        *pgxpool.Pool
+	Queries     *generated.Queries
+	Audit       *audit.Logger
+	Mailer      dispatch.Mailer
+	Resolver    *resolver.Resolver
+	EIDAS       *eidas.Engine
+	Billing     *billing.Engine
+	Envelopes   *envelopes.Engine
+	Storage     EvidenceRetainer
+	PublicURL   string
+	OrgName     string
+	Environment string
+	Now         func() time.Time
 }
 
 // EvidenceRetainer is the narrow storage capability Send needs. PDF uploads
@@ -436,6 +438,21 @@ func (e *Engine) Send(ctx context.Context, a Actor, docID uuid.UUID) (SendResult
 	// before committing the durable/possibly irreversible sealing intent.
 	if err := ValidateExpiryForSend(doc.ExpiresAt, e.now()); err != nil {
 		return SendResult{}, err
+	}
+	// Resolve and persist the complete effective theme while the document rows
+	// are locked and before any irreversible lifecycle transition. Later org
+	// branding changes cannot alter signer or terminal rendering. Envelope
+	// children get complete snapshots too, even though the current renderer uses
+	// the root theme, so their independent evidence state remains self-contained.
+	brandingDocs := append([]*generated.Document{doc}, envelopeChildren...)
+	for _, brandingDoc := range brandingDocs {
+		logoURL, ferr := freezeDocumentBranding(ctx, tx, brandingDoc)
+		if ferr != nil {
+			return SendResult{}, ferr
+		}
+		if logoURL != "" {
+			return SendResult{}, ErrUnsupportedBrandingLogo
+		}
 	}
 	// Durable cross-system boundary: commit a non-editable/non-deletable
 	// `sealing` state and actor intent before applying irreversible Object Lock.
@@ -1612,25 +1629,8 @@ func validateImmutableBlockEvidence(tree *blocks.Tree) error {
 	if tree == nil {
 		return fmt.Errorf("%w: nil block tree", ErrUnsupportedBlockEvidence)
 	}
-	var unsupported blocks.Type
-	var walk func([]blocks.Block)
-	walk = func(items []blocks.Block) {
-		for i := range items {
-			block := &items[i]
-			switch block.Type {
-			case blocks.TypeImage, blocks.TypeInitialField, blocks.TypeTextField, blocks.TypeDateField, blocks.TypeCheckbox:
-				unsupported = block.Type
-				return
-			}
-			walk(block.Content)
-			if unsupported != "" {
-				return
-			}
-		}
-	}
-	walk(tree.Blocks)
-	if unsupported != "" {
-		return fmt.Errorf("%w: %s", ErrUnsupportedBlockEvidence, unsupported)
+	if err := blocks.ValidateImmutableSigningEvidence(tree); err != nil {
+		return fmt.Errorf("%w: %v", ErrUnsupportedBlockEvidence, err)
 	}
 	return nil
 }

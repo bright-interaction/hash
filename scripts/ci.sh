@@ -193,19 +193,24 @@ renderer_network_policy() {
 # Postgres/MinIO dependency (and the browser suite's auxiliary services) bound
 # to a registry digest. The human-readable tag remains for upgrade clarity.
 dependency_image_policy() {
-  local compose="docker-compose.yml" drill="scripts/backup-restore-drill.sh"
+  local compose="docker-compose.yml" minio_compose="docker-compose.local-minio.yml"
+  local drill="scripts/backup-restore-drill.sh"
   local root_workflow="../.github/workflows/hash-ci.yml" ref
   local postgres_ref="postgres:16.15-alpine3.24@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685"
   local minio_ref="minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
   local mailhog_ref="mailhog/mailhog:v1.0.1@sha256:8d76a3d4ffa32a3661311944007a415332c4bb855657f4f6c57996405c009bea"
   local webhook_ref="mendhak/http-https-echo:31@sha256:0fefe04350131d7bb28355e3bf037062643e45f4a8a32f23679529e1b09d8ce4"
 
-  for ref in "$postgres_ref" "$minio_ref" "$mailhog_ref" "$webhook_ref"; do
+  for ref in "$postgres_ref" "$mailhog_ref" "$webhook_ref"; do
     grep -Fq "image: $ref" "$compose" || {
       echo "$compose must pin dependency image $ref" >&2
       return 1
     }
   done
+  grep -Fq "image: $minio_ref" "$minio_compose" || {
+    echo "$minio_compose must pin dependency image $minio_ref" >&2
+    return 1
+  }
   for ref in "$postgres_ref" "$minio_ref"; do
     grep -Fq "$ref" "$drill" || {
       echo "$drill must default to dependency image $ref" >&2
@@ -217,6 +222,137 @@ dependency_image_policy() {
     fi
   done
   echo "canonical Hash service dependencies are pinned by registry digest"
+}
+
+# The external-S3 Compose path must not quietly inherit the bundled MinIO
+# process or its startup dependency. Conversely, local development needs an
+# explicit overlay that pins MinIO, waits for its health check, and forces both
+# Hash processes back to the local endpoint. Render the merged models rather
+# than trusting comments or filenames: Compose merge behavior is the contract.
+standalone_storage_topology_policy() {
+  local key_file fixture_access_key fixture_secret_key fixture_sha256
+  local local_json external_json external_sse_s3_json
+  command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || {
+    echo "not run: Docker Compose is required to validate storage topology"
+    return 99
+  }
+  command -v jq >/dev/null 2>&1 || {
+    echo "not run: jq is required to validate rendered Compose topology"
+    return 99
+  }
+
+  key_file="$(mktemp)" || return 1
+  # Generate a syntactically valid fingerprint without embedding a
+  # credential-shaped 64-hex literal that secret scanners must flag.
+  fixture_access_key="$(printf 'compose-policy-%s' access)"
+  fixture_secret_key="$(printf 'compose-policy-%s' secret)"
+  fixture_sha256="$(printf '%064d' 0)"
+  local_json="$(docker compose --env-file /dev/null \
+    -f docker-compose.yml -f docker-compose.local-minio.yml \
+    config --format json)" || {
+      rm -f "$key_file"
+      echo "the bundled local-MinIO Compose topology does not render" >&2
+      return 1
+    }
+  external_json="$(
+    HASH_S3_ENDPOINT=fsn1.your-objectstorage.com \
+    HASH_S3_REGION=fsn1 \
+    HASH_S3_BUCKET=hash-compose-policy-fixture \
+    HASH_S3_ACCESS_KEY="$fixture_access_key" \
+    HASH_S3_SECRET_KEY="$fixture_secret_key" \
+    HASH_S3_BUCKET_LOOKUP=path \
+    HASH_S3_SSE_C_KEY_HOST_FILE="$key_file" \
+    HASH_S3_SSE_C_KEY_SHA256="$fixture_sha256" \
+      docker compose --env-file /dev/null \
+        -f docker-compose.yml -f docker-compose.sse-c.yml \
+        config --format json
+  )" || {
+      rm -f "$key_file"
+      echo "the external-S3/SSE-C Compose topology does not render" >&2
+      return 1
+    }
+  external_sse_s3_json="$(
+    HASH_S3_ENDPOINT=s3.example.test \
+    HASH_S3_REGION=eu-test-1 \
+    HASH_S3_BUCKET=hash-compose-policy-fixture \
+    HASH_S3_ACCESS_KEY="$fixture_access_key" \
+    HASH_S3_SECRET_KEY="$fixture_secret_key" \
+    HASH_S3_USE_SSL=true \
+    HASH_S3_SSE_MODE=sse-s3 \
+    HASH_S3_BUCKET_LOOKUP=dns \
+      docker compose --env-file /dev/null -f docker-compose.yml \
+        config --format json
+  )" || {
+      rm -f "$key_file"
+      echo "the external-S3/SSE-S3 base Compose topology does not render" >&2
+      return 1
+    }
+  rm -f "$key_file"
+
+  printf '%s\n' "$external_json" | jq -e \
+    --arg access "$fixture_access_key" --arg secret "$fixture_secret_key" '
+    (.services | has("minio") | not) and
+    (.volumes | has("hash_minio") | not) and
+    (.services.hash.depends_on.minio == null) and
+    (.services.worker.depends_on.minio == null) and
+    (.services.hash.environment.HASH_S3_ENDPOINT == "fsn1.your-objectstorage.com") and
+    (.services.worker.environment.HASH_S3_ENDPOINT == "fsn1.your-objectstorage.com") and
+    (.services.hash.environment.HASH_S3_ACCESS_KEY == $access) and
+    (.services.worker.environment.HASH_S3_ACCESS_KEY == $access) and
+    (.services.hash.environment.HASH_S3_SECRET_KEY == $secret) and
+    (.services.worker.environment.HASH_S3_SECRET_KEY == $secret) and
+    (.services.hash.environment.HASH_S3_USE_SSL == "true") and
+    (.services.worker.environment.HASH_S3_USE_SSL == "true") and
+    (.services.hash.environment.HASH_S3_SSE_MODE == "sse-c") and
+    (.services.worker.environment.HASH_S3_SSE_MODE == "sse-c") and
+    ([.services.hash.secrets[].source] | index("hash-s3-sse-c") != null) and
+    ([.services.worker.secrets[].source] | index("hash-s3-sse-c") != null)
+  ' >/dev/null || {
+    echo "external-S3/SSE-C Compose unexpectedly contains or depends on MinIO, or lost its TLS/SSE-C secret contract" >&2
+    return 1
+  }
+
+  printf '%s\n' "$external_sse_s3_json" | jq -e \
+    --arg access "$fixture_access_key" --arg secret "$fixture_secret_key" '
+    (.services | has("minio") | not) and
+    (.services.hash.depends_on.minio == null) and
+    (.services.worker.depends_on.minio == null) and
+    (.services.hash.environment.HASH_S3_ENDPOINT == "s3.example.test") and
+    (.services.worker.environment.HASH_S3_ENDPOINT == "s3.example.test") and
+    (.services.hash.environment.HASH_S3_ACCESS_KEY == $access) and
+    (.services.worker.environment.HASH_S3_ACCESS_KEY == $access) and
+    (.services.hash.environment.HASH_S3_SECRET_KEY == $secret) and
+    (.services.worker.environment.HASH_S3_SECRET_KEY == $secret) and
+    (.services.hash.environment.HASH_S3_USE_SSL == "true") and
+    (.services.worker.environment.HASH_S3_USE_SSL == "true") and
+    (.services.hash.environment.HASH_S3_SSE_MODE == "sse-s3") and
+    (.services.worker.environment.HASH_S3_SSE_MODE == "sse-s3")
+  ' >/dev/null || {
+    echo "external-S3/SSE-S3 Compose unexpectedly contains or depends on MinIO, or lost its provider environment" >&2
+    return 1
+  }
+
+  printf '%s\n' "$local_json" | jq -e '
+    (.services | has("minio")) and
+    (.volumes | has("hash_minio")) and
+    (.services.hash.depends_on.minio.condition == "service_healthy") and
+    (.services.worker.depends_on.minio.condition == "service_healthy") and
+    (.services.hash.environment.HASH_S3_ENDPOINT == "hash-minio:9000") and
+    (.services.worker.environment.HASH_S3_ENDPOINT == "hash-minio:9000") and
+    (.services.hash.environment.HASH_S3_USE_SSL == "false") and
+    (.services.worker.environment.HASH_S3_USE_SSL == "false") and
+    (.services.hash.environment.HASH_S3_SSE_MODE == "sse-s3") and
+    (.services.worker.environment.HASH_S3_SSE_MODE == "sse-s3")
+  ' >/dev/null || {
+    echo "bundled local-MinIO Compose lost its service, readiness dependency, or forced local storage policy" >&2
+    return 1
+  }
+
+  grep -Fq 'docker-compose.local-minio.yml' DEPLOY.md || {
+    echo "DEPLOY.md must document the opt-in local-MinIO overlay" >&2
+    return 1
+  }
+  echo "standalone external-S3/SSE-C runs without MinIO; bundled MinIO remains an explicit local overlay"
 }
 
 # The internal production manifest is stripped from the public mirror, but in
@@ -412,6 +548,9 @@ storagebox_cold_backup_policy() {
     'restic-repository-decryption' \
     'minio-object-decryption' \
     'covers_all_versions_at_snapshot' \
+    'bootstrap-storage-estate/intent.json' \
+    'bootstrap-storage-estate/receipt/receipt.json' \
+    'hash-storagebox-cold-backup-v2' \
     'material_in_snapshot:false'; do
     grep -Fq "$required" "$workflow" || {
       echo "$workflow lost a fail-closed cold-backup invariant: $required" >&2
@@ -421,6 +560,7 @@ storagebox_cold_backup_policy() {
   for required in \
     'Storage Box is a valid encrypted **cold backup destination**' \
     'The ordinary Dockyard nightly backup intentionally continues to exclude' \
+    'It does not back up or restore a Hetzner' \
     'Require exit `0`, not review exit `2`'; do
     grep -Fq "$required" "$doc" || {
       echo "$doc lost required Storage Box recovery guidance: $required" >&2
@@ -681,6 +821,7 @@ step "frontend typecheck + production build"   frontend_checks
 step "frontend dependency audit"               frontend_dependency_audit
 step "Gotenberg renderer network policy"       renderer_network_policy
 step "dependency image identity policy"        dependency_image_policy
+step "standalone storage topology policy"      standalone_storage_topology_policy
 step "production image identity policy"        production_image_policy
 step "single-server production topology policy" single_server_topology_policy
 step "audit-key provisioning documentation"   audit_key_documentation_policy

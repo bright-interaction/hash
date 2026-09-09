@@ -99,6 +99,8 @@ func (s *Server) writeSendError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, send.ErrDraftChangedDuringSend):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, send.ErrUnsupportedBrandingLogo):
+		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, send.ErrSignatureTierUnavailable):
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":          err.Error(),

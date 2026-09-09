@@ -817,13 +817,17 @@ func (s *Server) handleDeleteDocument(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	keys := draftSourceObjectKeys(doc)
-	if len(keys) > 0 && s.Storage == nil {
+	objects, err := draftSourceObjectVersions(doc)
+	if err != nil {
+		writeInternalErrorMsg(w, "draft source lacks an exact cleanup commitment; refusing ambiguous deletion", err)
+		return
+	}
+	if len(objects) > 0 && s.Storage == nil {
 		writeError(w, http.StatusServiceUnavailable, "storage unavailable for document cleanup")
 		return
 	}
-	for _, key := range keys {
-		if err := deleteObjectDetached(r.Context(), s.Storage, key); err != nil {
+	for _, object := range objects {
+		if err := deleteObjectDetached(r.Context(), s.Storage, object); err != nil {
 			writeInternalErrorMsg(w, "delete document source failed; retry the delete", err)
 			return
 		}

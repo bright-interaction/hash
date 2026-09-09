@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,58 @@ func TestReadBounded(t *testing.T) {
 	}
 	if _, err := readBounded(bytes.NewBufferString("123456"), 5); err == nil {
 		t.Fatal("oversized object must fail closed")
+	}
+}
+
+func TestValidateEndpointTransportRejectsExternalPlaintext(t *testing.T) {
+	for _, endpoint := range []string{
+		"storage.example.com:9000",
+		"203.0.113.10:9000",
+		"[2001:db8::1]:9000",
+		"MINIO:9000",
+		"minio:9000 ",
+		"http://minio:9000",
+		"minio:9000.example.com",
+		"localhost:9000/path",
+		"localhost:not-a-port",
+	} {
+		if err := s3policy.ValidateEndpointTransport(endpoint, false, false); err == nil {
+			t.Errorf("production plaintext endpoint %q was accepted", endpoint)
+		}
+		if err := s3policy.ValidateEndpointTransport(endpoint, false, true); err == nil {
+			t.Errorf("development opt-in accepted external/malformed plaintext endpoint %q", endpoint)
+		}
+	}
+}
+
+func TestValidateEndpointTransportAllowsOnlyExactProductionOrLocalDevelopment(t *testing.T) {
+	if err := s3policy.ValidateEndpointTransport("minio:9000", false, false); err != nil {
+		t.Fatalf("canonical production MinIO rejected: %v", err)
+	}
+	for _, endpoint := range []string{
+		"localhost:9000",
+		"127.0.0.1:49152",
+		"[::1]:49152",
+		"hash-minio:9000",
+		"hash-e2e-minio:9000",
+	} {
+		if err := s3policy.ValidateEndpointTransport(endpoint, false, true); err != nil {
+			t.Errorf("local development endpoint %q rejected: %v", endpoint, err)
+		}
+	}
+	if err := s3policy.ValidateEndpointTransport("storage.example.com:443", true, false); err != nil {
+		t.Fatalf("TLS endpoint rejected before provider initialization: %v", err)
+	}
+}
+
+func TestValidateBucketVersioningEnabledRequiresExplicitEnabled(t *testing.T) {
+	if err := validateBucketVersioningEnabled(minio.Enabled); err != nil {
+		t.Fatalf("enabled versioning rejected: %v", err)
+	}
+	for _, status := range []string{"", minio.Suspended, "Disabled", "enabled"} {
+		if err := validateBucketVersioningEnabled(status); err == nil {
+			t.Errorf("unsafe bucket versioning status %q accepted", status)
+		}
 	}
 }
 
@@ -73,6 +126,23 @@ func TestPersistableVersionIDFailsClosedInProduction(t *testing.T) {
 	got, err = development.persistableVersionID("local/object", opaque)
 	if err != nil || got != opaque {
 		t.Fatalf("opaque provider identity = %q, %v; want byte-exact %q", got, err, opaque)
+	}
+}
+
+func TestUnpinnedWritesFailClosedBeforeProviderAccessInProduction(t *testing.T) {
+	client := &Client{requireEvidenceLock: true}
+	payload := []byte("must never reach the object provider")
+
+	if _, err := client.Put(context.Background(), "mutable/branding/logo.png", "image/png", payload); !errors.Is(err, errUnpinnedProductionWrite) {
+		t.Fatalf("Put error = %v, want unpinned-write refusal", err)
+	}
+
+	stream := bytes.NewReader(payload)
+	if err := client.PutStream(context.Background(), "mutable/stream.bin", "application/octet-stream", stream, int64(len(payload))); !errors.Is(err, errUnpinnedProductionWrite) {
+		t.Fatalf("PutStream error = %v, want unpinned-write refusal", err)
+	}
+	if stream.Len() != len(payload) {
+		t.Fatalf("PutStream consumed %d bytes before refusing production write", len(payload)-stream.Len())
 	}
 }
 
@@ -147,6 +217,24 @@ func TestPresignGetFailsClosedForSSEC(t *testing.T) {
 	c := &Client{sseMode: s3policy.SSEModeC}
 	if _, err := c.PresignGet(context.Background(), "legal/evidence.pdf", time.Minute); err == nil || !strings.Contains(err.Error(), "unavailable with SSE-C") {
 		t.Fatalf("SSE-C browser presign did not fail closed: %v", err)
+	}
+}
+
+func TestRetentionConformanceIAMScopeIsExplicitlyDocumented(t *testing.T) {
+	raw, err := os.ReadFile("../../DEPLOY.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	for _, required := range []string{
+		"`s3:DeleteObjectVersion`",
+		"`_hash/bootstrap-estate/v1`",
+		"unrelated IAM denial",
+		"creates no per-deploy retained canary and never touches customer evidence",
+	} {
+		if !strings.Contains(doc, required) {
+			t.Errorf("retention conformance IAM contract is missing %q", required)
+		}
 	}
 }
 
@@ -248,6 +336,42 @@ func TestEnsureBucketExisting(t *testing.T) {
 	}
 	if fake.existsCalls != 1 || fake.makeCalls != 0 {
 		t.Fatalf("calls = exists %d, make %d; want 1, 0", fake.existsCalls, fake.makeCalls)
+	}
+}
+
+func TestVerifyExistingBucketNeverCreates(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		result  bucketExistsResult
+		wantErr bool
+	}{
+		{name: "exists", result: bucketExistsResult{exists: true}},
+		{name: "missing", result: bucketExistsResult{exists: false}, wantErr: true},
+		{name: "check error", result: bucketExistsResult{err: errors.New("provider unavailable")}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeBucketInitializer{existsResults: []bucketExistsResult{test.result}}
+			err := verifyExistingBucket(context.Background(), fake, "hash")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("verifyExistingBucket() error = %v, wantErr %t", err, test.wantErr)
+			}
+			if fake.existsCalls != 1 || fake.makeCalls != 0 {
+				t.Fatalf("calls = exists %d, make %d; want 1, 0", fake.existsCalls, fake.makeCalls)
+			}
+		})
+	}
+}
+
+func TestValidatePingBucketExistsFailsWhenProviderReportsMissing(t *testing.T) {
+	if err := validatePingBucketExists("hash", true, nil); err != nil {
+		t.Fatalf("existing bucket rejected: %v", err)
+	}
+	if err := validatePingBucketExists("hash", false, nil); err == nil {
+		t.Fatal("missing bucket left runtime readiness healthy")
+	}
+	providerErr := errors.New("provider unavailable")
+	if err := validatePingBucketExists("hash", false, providerErr); !errors.Is(err, providerErr) {
+		t.Fatalf("provider error was not preserved: %v", err)
 	}
 }
 

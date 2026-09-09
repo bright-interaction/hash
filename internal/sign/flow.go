@@ -148,11 +148,11 @@ type Engine struct {
 	// from the instance signer key; empty disables the email action buttons.
 	ActionSecret string
 
-	// BrandingCSS is an optional callback returning the org+document
-	// branding as a <style>:root{...}</style> block to inject at the
-	// top of the rendered PDF body. Empty string falls through to the
-	// default palette. Phase 8.5 wires the branding.Resolver here.
-	BrandingCSS func(ctx context.Context, doc *generated.Document) string
+	// BrandingCSS is an optional callback returning the org+document branding
+	// as a <style>:root{...}</style> block to inject at the top of rendered
+	// signer, final-PDF, and certificate bodies. An error aborts rendering so a
+	// failed frozen-branding lookup cannot silently change legal artifacts.
+	BrandingCSS func(ctx context.Context, doc *generated.Document) (string, error)
 
 	// EnvelopeManifestHTML is an optional callback returning the
 	// envelope manifest section to append to the audit cert when the
@@ -180,6 +180,13 @@ type EvidenceStorage interface {
 	ResolveVerifiedLegacy(context.Context, string, []byte) ([]byte, storage.StoredObject, error)
 	PutEvidenceVersioned(context.Context, string, string, []byte, time.Time) (storage.StoredObject, error)
 	RetainEvidenceVersion(context.Context, string, string, []byte, time.Time) error
+}
+
+func (e *Engine) resolveBrandingCSS(ctx context.Context, doc *generated.Document) (string, error) {
+	if e.BrandingCSS == nil {
+		return "", nil
+	}
+	return e.BrandingCSS(ctx, doc)
 }
 
 // SignInput is what the signer page POSTs when they finalize.
@@ -830,6 +837,10 @@ func (e *Engine) completeAcknowledgedDocument(ctx context.Context, orgID, docID 
 	if err != nil {
 		return nil, false, fmt.Errorf("finalize acknowledgement: %w", err)
 	}
+	brandCSS, err := e.resolveBrandingCSS(ctx, prepared)
+	if err != nil {
+		return nil, false, fmt.Errorf("finalize acknowledgement: resolve branding: %w", err)
+	}
 
 	// The document is now durably non-interactive. No accept/decline/change,
 	// reminder, view, or field event can enter the certificate's pre-final
@@ -859,10 +870,6 @@ func (e *Engine) completeAcknowledgedDocument(ctx context.Context, orgID, docID 
 	claims, err := newCertificateEvidenceClaims(prepared, finalSum[:], chainHead, documentEvents)
 	if err != nil {
 		return nil, false, err
-	}
-	brandCSS := ""
-	if e.BrandingCSS != nil {
-		brandCSS = e.BrandingCSS(ctx, prepared)
 	}
 	certArtifacts, err := e.renderAndStoreAuditCertificate(ctx, prepared, nil, claims, artifactDir, brandCSS, retainUntil)
 	if err != nil {
@@ -1928,9 +1935,9 @@ func documentHasCapturedEvidence(ctx context.Context, q *generated.Queries, docI
 // envelope's own block tree is empty by construction; we render only
 // the children + a banner at the top noting the envelope title.
 func (e *Engine) RenderForSigner(ctx context.Context, rc *RecipientContext) (string, error) {
-	brandCSS := ""
-	if e.BrandingCSS != nil {
-		brandCSS = e.BrandingCSS(ctx, rc.Document)
+	brandCSS, err := e.resolveBrandingCSS(ctx, rc.Document)
+	if err != nil {
+		return "", fmt.Errorf("render signer document: resolve branding: %w", err)
 	}
 
 	if rc.Document.IsEnvelope {
@@ -2291,6 +2298,12 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 	if !doc.RequiresSignature {
 		return "", "", false, ErrNotAcknowledgement
 	}
+	// Recheck immutable block evidence before either claiming finalizing or
+	// resuming a prior claim. This covers legacy/pre-gate ceremonies and every
+	// envelope child; no terminal PDF may dereference a mutable storage key.
+	if err := e.validateFrozenDocumentFamily(ctx, doc); err != nil {
+		return "", "", false, fmt.Errorf("finalize block evidence: %w", err)
+	}
 	if doc.Status == "finalizing" {
 		if _, ierr := e.Queries.GetDocumentFinalizationIntent(ctx, generated.GetDocumentFinalizationIntentParams{
 			DocumentID: doc.ID, OrgID: doc.OrgID,
@@ -2325,6 +2338,10 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 	if err != nil {
 		return "", "", false, fmt.Errorf("finalize document: %w", err)
 	}
+	brandCSS, err := e.resolveBrandingCSS(ctx, doc)
+	if err != nil {
+		return "", "", false, fmt.Errorf("finalize document: resolve branding: %w", err)
+	}
 
 	// From this point onward the durable finalizing state closes every
 	// interactive/audit-event path for this document. Capture the chain head and
@@ -2351,11 +2368,6 @@ func (e *Engine) finalize(ctx context.Context, orgID, docID uuid.UUID, capture *
 		}
 		manifestHTML = &section
 	}
-	brandCSS := ""
-	if e.BrandingCSS != nil {
-		brandCSS = e.BrandingCSS(ctx, doc)
-	}
-
 	// Render the exact contract body first. The audit certificate is a separate
 	// artifact and signs this body's SHA-256. Keeping it separate avoids the
 	// impossible self-hash cycle that occurs when a certificate claims the hash
@@ -2848,8 +2860,11 @@ func (e *Engine) validateFrozenDocumentFamily(ctx context.Context, doc *generate
 		if doc.SourceKind != "blocks" {
 			return nil
 		}
-		_, _, err := frozenBlockDocument(doc)
-		return err
+		tree, _, err := frozenBlockDocument(doc)
+		if err != nil {
+			return err
+		}
+		return blocks.ValidateImmutableSigningEvidence(tree)
 	}
 	if e.EnvelopeChildren == nil {
 		return errors.New("validate frozen evidence: envelope children unavailable")
@@ -2871,7 +2886,11 @@ func (e *Engine) validateFrozenDocumentFamily(ctx context.Context, doc *generate
 		if !envelopeChildStatusMatchesParent(doc.Status, child.Status) {
 			return fmt.Errorf("validate frozen evidence: child %s status %s does not match envelope status %s", child.ID, child.Status, doc.Status)
 		}
-		if _, _, err := frozenBlockDocument(child); err != nil {
+		tree, _, err := frozenBlockDocument(child)
+		if err != nil {
+			return fmt.Errorf("validate frozen evidence: child %s: %w", child.ID, err)
+		}
+		if err := blocks.ValidateImmutableSigningEvidence(tree); err != nil {
 			return fmt.Errorf("validate frozen evidence: child %s: %w", child.ID, err)
 		}
 	}

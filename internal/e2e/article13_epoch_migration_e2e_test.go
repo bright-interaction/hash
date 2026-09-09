@@ -8,6 +8,7 @@ package e2e
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,145 @@ import (
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 )
+
+func TestRecoveryInventoryDerivesExactCeremonyRetentionE2E(t *testing.T) {
+	dsn := os.Getenv("HASH_E2E_DB_URL")
+	if dsn == "" {
+		t.Skip("set HASH_E2E_DB_URL to run")
+	}
+	ctx := context.Background()
+	pool, cleanup := scratchDatabase(t, ctx, dsn)
+	defer cleanup()
+	migConn := stdlibConn(t, pool)
+	defer migConn.Close()
+	must(t, mdb.RunMigrations(migConn), "migrate recovery-inventory fixture to latest")
+
+	sentID := seedDocument(t, ctx, pool, "recovery inventory sent")
+	progressID := seedDocument(t, ctx, pool, "recovery inventory in progress")
+	parentID := seedDocument(t, ctx, pool, "recovery inventory envelope sealing")
+	childID := seedEnvelopeChild(t, ctx, pool, parentID, 1)
+	reversibleID := seedDocument(t, ctx, pool, "recovery inventory reversible sealing")
+	deletedDraftID := seedDocument(t, ctx, pool, "recovery inventory soft-deleted draft")
+	missingDeadlineID := seedDocument(t, ctx, pool, "recovery inventory corrupt terminal deadline")
+
+	// Fixture lifecycle rows directly; this test targets the read-only recovery
+	// projection rather than replaying the send engine. All table constraints
+	// remain active, while unrelated transition/audit triggers are disabled only
+	// inside this isolated scratch database.
+	_, err := pool.Exec(ctx, `ALTER TABLE documents DISABLE TRIGGER USER`)
+	must(t, err, "disable lifecycle triggers in isolated recovery fixture")
+	defer func() { _, _ = pool.Exec(context.Background(), `ALTER TABLE documents ENABLE TRIGGER USER`) }()
+	epoch := time.Date(2026, time.September, 9, 10, 11, 12, 0, time.UTC)
+	var postSendDeadline time.Time
+	must(t, pool.QueryRow(ctx, `SELECT hash_evidence_retain_until($1, 7)`, epoch).Scan(&postSendDeadline), "derive post-send deadline")
+	for _, fixture := range []struct {
+		id, key, version, status string
+	}{
+		{sentID.String(), "fixture/sent.pdf", "sent-version", "sent"},
+		{progressID.String(), "fixture/in-progress.pdf", "progress-version", "in_progress"},
+	} {
+		_, err = pool.Exec(ctx, `UPDATE documents
+			SET source_kind='pdf', blocks_json=NULL, pdf_storage_key=$2,
+			    pdf_sha256=decode(repeat('ab',32),'hex'), pdf_storage_version_id=$3,
+			    evidence_version_pins_required=TRUE, status=$4, sent_at=$5,
+			    article13_notice_epoch_at=$5, article13_notice_schema=$6,
+			    article13_notice_epoch_v61_committed=TRUE
+			WHERE id=$1`, fixture.id, fixture.key, fixture.version, fixture.status, epoch, article13.SchemaV1)
+		must(t, err, "seed post-send recovery object")
+	}
+
+	_, err = pool.Exec(ctx, `UPDATE documents SET is_envelope=TRUE, blocks_json=NULL, status='sealing' WHERE id=$1`, parentID)
+	must(t, err, "seed sealing envelope root")
+	_, err = pool.Exec(ctx, `UPDATE documents
+		SET source_kind='pdf', blocks_json=NULL, pdf_storage_key='fixture/envelope-child.pdf',
+		    pdf_sha256=decode(repeat('bc',32),'hex'), pdf_storage_version_id='child-version',
+		    evidence_version_pins_required=TRUE, status='sealing'
+		WHERE id=$1`, childID)
+	must(t, err, "seed sealing envelope child")
+	parentEpoch := epoch.Add(time.Hour)
+	var parentDeadline time.Time
+	must(t, pool.QueryRow(ctx, `SELECT hash_evidence_retain_until($1, 7)`, parentEpoch).Scan(&parentDeadline), "derive parent intent deadline")
+	parentOrgID := documentOrgID(t, ctx, pool, parentID)
+	_, err = pool.Exec(ctx, `INSERT INTO send_sealing_intents
+		(document_id, org_id, article13_notice_epoch_at, retain_until, retention_started_at)
+		VALUES ($1,$2,$3,$4,$3)`, parentID, parentOrgID, parentEpoch, parentDeadline)
+	must(t, err, "seed irreversible root-envelope intent")
+
+	_, err = pool.Exec(ctx, `UPDATE documents
+		SET source_kind='pdf', blocks_json=NULL, pdf_storage_key='fixture/reversible.pdf',
+		    pdf_sha256=decode(repeat('cd',32),'hex'), pdf_storage_version_id='reversible-version',
+		    evidence_version_pins_required=TRUE, status='sealing'
+		WHERE id=$1`, reversibleID)
+	must(t, err, "seed reversible sealing document")
+	reversibleEpoch := epoch.Add(2 * time.Hour)
+	var reversibleDeadline time.Time
+	must(t, pool.QueryRow(ctx, `SELECT hash_evidence_retain_until($1, 7)`, reversibleEpoch).Scan(&reversibleDeadline), "derive reversible intent deadline")
+	_, err = pool.Exec(ctx, `INSERT INTO send_sealing_intents
+		(document_id, org_id, article13_notice_epoch_at, retain_until)
+		VALUES ($1,$2,$3,$4)`, reversibleID, documentOrgID(t, ctx, pool, reversibleID), reversibleEpoch, reversibleDeadline)
+	must(t, err, "seed pre-retention reversible intent")
+	_, err = pool.Exec(ctx, `UPDATE documents
+		SET source_kind='pdf', blocks_json=NULL, pdf_storage_key='fixture/deleted-draft.pdf',
+		    pdf_sha256=decode(repeat('ef',32),'hex'), pdf_storage_version_id='deleted-draft-version',
+		    evidence_version_pins_required=TRUE, deleted_at=$2
+		WHERE id=$1`, deletedDraftID, epoch)
+	must(t, err, "seed successfully cleaned soft-deleted draft row")
+	_, err = pool.Exec(ctx, `UPDATE documents
+		SET source_kind='pdf', blocks_json=NULL, pdf_storage_key='fixture/missing-deadline.pdf',
+		    pdf_sha256=decode(repeat('fa',32),'hex'), pdf_storage_version_id='missing-deadline-version',
+		    evidence_version_pins_required=TRUE, status='declined'
+		WHERE id=$1`, missingDeadlineID)
+	must(t, err, "seed illegal terminal object without a retention deadline")
+
+	var recipientID, fieldID uuid.UUID
+	must(t, pool.QueryRow(ctx, `SELECT id FROM recipients WHERE document_id=$1 LIMIT 1`, progressID).Scan(&recipientID), "load signature fixture recipient")
+	must(t, pool.QueryRow(ctx, `INSERT INTO document_fields
+		(document_id, recipient_id, type, page, x_pct, y_pct, w_pct, h_pct)
+		VALUES ($1,$2,'signature',1,10,10,20,5) RETURNING id`, progressID, recipientID).Scan(&fieldID), "seed signature fixture field")
+	_, err = pool.Exec(ctx, `INSERT INTO signatures
+		(document_id, recipient_id, field_id, font, typed_name, image_storage_key,
+		 image_sha256, image_version_id)
+		VALUES ($1,$2,$3,'Dancing Script','Fixture Signer','fixture/signature.png',
+		        decode(repeat('de',32),'hex'),'signature-version')`, progressID, recipientID, fieldID)
+	must(t, err, "seed in-progress signature image")
+
+	inventorySQL, err := os.ReadFile(filepath.Join("..", "..", "ops", "recovery-object-inventory.sql"))
+	must(t, err, "read canonical recovery inventory SQL")
+	rows, err := pool.Query(ctx, string(inventorySQL))
+	must(t, err, "execute canonical recovery inventory SQL")
+	defer rows.Close()
+	type result struct {
+		legal    bool
+		deadline string
+	}
+	results := map[string]result{}
+	for rows.Next() {
+		var keyB64, keyJSON, classes, owners, orgIDs, sha, version, deadline string
+		var hashConflict, legal, versionConflict, legacy bool
+		var refs int64
+		must(t, rows.Scan(&keyB64, &keyJSON, &classes, &owners, &orgIDs, &sha,
+			&hashConflict, &legal, &refs, &version, &versionConflict, &legacy, &deadline), "scan recovery inventory row")
+		results[keyJSON] = result{legal: legal, deadline: deadline}
+	}
+	must(t, rows.Err(), "drain recovery inventory")
+	postSend := postSendDeadline.UTC().Format(time.RFC3339)
+	parentRetain := parentDeadline.UTC().Format(time.RFC3339)
+	for key, want := range map[string]result{
+		`"fixture/sent.pdf"`:             {true, postSend},
+		`"fixture/in-progress.pdf"`:      {true, postSend},
+		`"fixture/signature.png"`:        {true, postSend},
+		`"fixture/envelope-child.pdf"`:   {true, parentRetain},
+		`"fixture/reversible.pdf"`:       {false, "-"},
+		`"fixture/missing-deadline.pdf"`: {true, "-"},
+	} {
+		if got, ok := results[key]; !ok || got != want {
+			t.Fatalf("recovery inventory %s = %+v/%v, want %+v", key, got, ok, want)
+		}
+	}
+	if _, present := results[`"fixture/deleted-draft.pdf"`]; present {
+		t.Fatal("successfully cleaned soft-deleted draft remained in the canonical provider inventory")
+	}
+}
 
 func TestArticle13EpochMigrationRefusesUnmarkedActiveCeremonyE2E(t *testing.T) {
 	dsn := os.Getenv("HASH_E2E_DB_URL")

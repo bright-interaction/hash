@@ -21,6 +21,17 @@ type fakeProductionLease struct {
 	released bool
 }
 
+func TestProductionServerNeverMutatesBucketLifecycle(t *testing.T) {
+	raw, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	if !strings.Contains(src, "SkipTransientLifecycle:") || !strings.Contains(src, `cfg.Environment != "development"`) {
+		t.Fatal("server storage config may replace an operator-owned production lifecycle policy")
+	}
+}
+
 func TestRuntimeOperatorIdentityIsWiredThroughEveryPublicArtifact(t *testing.T) {
 	raw, err := os.ReadFile("main.go")
 	if err != nil {
@@ -30,7 +41,7 @@ func TestRuntimeOperatorIdentityIsWiredThroughEveryPublicArtifact(t *testing.T) 
 	for _, required := range []string{
 		"OrgName:      cfg.OperatorName",
 		`Issuer:                       "Hash / " + cfg.OperatorName`,
-		"OrgName:   cfg.OperatorName",
+		"OrgName:     cfg.OperatorName",
 		"renderEmailForMCP(cfg.OperatorName)",
 		"OperatorName:               cfg.OperatorName",
 		"PrivacyContact:             cfg.PrivacyContact",

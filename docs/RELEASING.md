@@ -14,7 +14,11 @@ hostnames from history (`scripts/split-public-repo.sh`).
 
 Distribution is the container image, not `go install`: the server embeds the
 built SvelteKit frontend, so a bare `go install` produces a binary without a
-UI. Self-hosters build with the repo `Dockerfile` or run `docker compose up`.
+UI. Self-hosters build with the repo `Dockerfile`; the self-contained local
+stack runs with `docker compose -f docker-compose.yml -f
+docker-compose.local-minio.yml up`. External-S3 deployments instead combine
+the base file with their provider configuration (and the SSE-C overlay when
+required), without the local-MinIO overlay.
 The Go module path is `github.com/bright-interaction/hash` (same choice as
 Reactor), and it must stay byte-identical to the public mirror URL. Go resolves
 a module by fetching the repo its path names, so an unhyphenated

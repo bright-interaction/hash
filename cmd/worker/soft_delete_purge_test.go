@@ -15,44 +15,53 @@ import (
 )
 
 type purgeDeleterStub struct {
-	err   error
-	key   string
-	calls int
+	err       error
+	key       string
+	versionID string
+	digest    []byte
+	calls     int
 }
 
-func (s *purgeDeleterStub) Delete(_ context.Context, key string) error {
+func (s *purgeDeleterStub) DeleteVersion(_ context.Context, key, versionID string, digest []byte) error {
 	s.calls++
 	s.key = key
+	s.versionID = versionID
+	s.digest = append([]byte(nil), digest...)
 	return s.err
 }
 
-func TestPurgeOwnedSourceKeyPreservesSharedAndEvidenceObjects(t *testing.T) {
+func TestPurgeOwnedSourceVersionPreservesSharedAndEvidenceObjects(t *testing.T) {
 	source := pgtype.Text{String: "org/o/documents/source.pdf", Valid: true}
 	tests := []struct {
 		name string
 		doc  *generated.Document
-		want string
+		want bool
 	}{
-		{"owned draft", &generated.Document{Status: "draft", PdfStorageKey: source}, source.String},
-		{"template clone", &generated.Document{Status: "draft", TemplateID: pgtype.UUID{Bytes: uuid.New(), Valid: true}, PdfStorageKey: source}, ""},
-		{"final alias", &generated.Document{Status: "draft", PdfStorageKey: source, FinalPdfKey: source}, ""},
-		{"audit alias", &generated.Document{Status: "draft", PdfStorageKey: source, AuditCertKey: source}, ""},
-		{"terminal", &generated.Document{Status: "completed", PdfStorageKey: source}, ""},
-		{"blocks draft", &generated.Document{Status: "draft"}, ""},
+		{"owned draft", &generated.Document{Status: "draft", PdfStorageKey: source, PdfSha256: make([]byte, 32), PdfStorageVersionID: pgtype.Text{String: "version-1", Valid: true}, EvidenceVersionPinsRequired: true}, true},
+		{"template clone", &generated.Document{Status: "draft", TemplateID: pgtype.UUID{Bytes: uuid.New(), Valid: true}, PdfStorageKey: source}, false},
+		{"final alias", &generated.Document{Status: "draft", PdfStorageKey: source, FinalPdfKey: source}, false},
+		{"audit alias", &generated.Document{Status: "draft", PdfStorageKey: source, AuditCertKey: source}, false},
+		{"terminal", &generated.Document{Status: "completed", PdfStorageKey: source}, false},
+		{"blocks draft", &generated.Document{Status: "draft"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := purgeOwnedSourceKey(tt.doc); got != tt.want {
-				t.Fatalf("purgeOwnedSourceKey() = %q, want %q", got, tt.want)
+			got, err := purgeOwnedSourceVersion(tt.doc)
+			if err != nil || (got != nil) != tt.want {
+				t.Fatalf("purgeOwnedSourceVersion() = %#v, %v; want present=%v", got, err, tt.want)
 			}
 		})
+	}
+	if got, err := purgeOwnedSourceVersion(&generated.Document{Status: "draft", PdfStorageKey: source}); err == nil || got != nil {
+		t.Fatalf("unpinned source cleanup = %#v, %v; want fail-closed refusal", got, err)
 	}
 }
 
 func TestCleanupClaimedSoftDeletedDocument_RetriesStorageBeforeDeletingRow(t *testing.T) {
 	doc := &generated.Document{
-		Status:        "draft",
-		PdfStorageKey: pgtype.Text{String: "org/o/documents/source.pdf", Valid: true},
+		Status: "draft", PdfStorageKey: pgtype.Text{String: "org/o/documents/source.pdf", Valid: true},
+		PdfSha256: make([]byte, 32), PdfStorageVersionID: pgtype.Text{String: "version-1", Valid: true},
+		EvidenceVersionPinsRequired: true,
 	}
 	storageErr := errors.New("object store unavailable")
 	objects := &purgeDeleterStub{err: storageErr}
@@ -78,6 +87,9 @@ func TestCleanupClaimedSoftDeletedDocument_RetriesStorageBeforeDeletingRow(t *te
 	}
 	if objects.key != doc.PdfStorageKey.String {
 		t.Fatalf("deleted key = %q", objects.key)
+	}
+	if objects.versionID != doc.PdfStorageVersionID.String || len(objects.digest) != 32 {
+		t.Fatalf("deleted identity = %q/%d", objects.versionID, len(objects.digest))
 	}
 }
 

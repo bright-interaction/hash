@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "compose": {
     "project": "<verified-compose-project>",
     "app_service": "<verified-app-service>",
@@ -14,20 +14,71 @@
     "minio": "<verified-minio-container>"
   },
   "postgres": {
+    "host": "postgres",
+    "port": 5432,
+    "network": "app_default",
     "database": "<verified-database>",
-    "user": "<verified-dump-role>"
+    "user": "<verified-dump-role>",
+    "application_user": "<verified-application-role>",
+    "ssl_mode": "<disable|require|verify-ca|verify-full>",
+    "system_identifier": "<verified-decimal-pg-control-system-identifier>",
+    "database_oid": 0
   },
   "minio": {
     "volume": "<verified-minio-volume>",
     "data_path": "/absolute/verified/docker-volume/_data",
     "mount_destination": "/data",
-    "expected_image_id": "sha256:<64-lowercase-hex-docker-content-id>"
+    "expected_image_id": "sha256:<64-lowercase-hex-docker-content-id>",
+    "endpoint_host": "minio",
+    "endpoint_port": 9000,
+    "network": "web-proxy",
+    "bucket": "<verified-existing-bucket>"
   },
-  "release_dir": "/absolute/path/to/exact/hash/release",
+  "release": {
+    "store": "/opt/hash/releases",
+    "dir": "/opt/hash/releases/<exact-manifest-commit>",
+    "current_symlink": "/opt/hash/current",
+    "owner_uid": 1000
+  },
+  "contracts": {
+    "storage": "/opt/hash/storage-contract.json",
+    "database": "/opt/hash/database-contract.json",
+    "owner_uid": 1000
+  },
+  "bootstrap_storage_estate": {
+    "root": "/opt/hash/bootstrap-storage-estate",
+    "root_identity": "<device>:<inode>",
+    "intent": "/opt/hash/bootstrap-storage-estate/intent.json",
+    "intent_identity": "<device>:<inode>",
+    "intent_sha256": "<64-lowercase-hex-sha256>",
+    "receipt_dir": "/opt/hash/bootstrap-storage-estate/receipt",
+    "receipt_dir_identity": "<device>:<inode>",
+    "receipt": "/opt/hash/bootstrap-storage-estate/receipt/receipt.json",
+    "receipt_identity": "<device>:<inode>",
+    "receipt_sha256": "<64-lowercase-hex-sha256>",
+    "owner_uid": 1000
+  },
   "inventory_sql": "/absolute/path/to/release-matched/recovery-object-inventory.sql",
   "inventory_sql_sha256": "<64-lowercase-hex-sha256>",
   "verifier_script": "/absolute/path/to/release-matched/verify-recovery-objects.sh",
   "verifier_script_sha256": "<64-lowercase-hex-sha256>",
+  "secret_sources": [
+    {
+      "purpose": "hash-runtime-env",
+      "path": "/opt/hash/.env",
+      "owner_uid": 1000
+    },
+    {
+      "purpose": "hash-database-env",
+      "path": "/opt/hash/runtime-secrets/hash-db.env",
+      "owner_uid": 1000
+    },
+    {
+      "purpose": "minio-runtime-env:primary",
+      "path": "/absolute/path/to/minio/root-credential-source.env",
+      "owner_uid": 0
+    }
+  ],
   "state_dir": "/absolute/pre-created/root-only/hash-cold-backup-state",
   "restic": {
     "env_file": "/absolute/path/to/root-only/storage-box-restic.env",
@@ -38,6 +89,7 @@
     "host": "<stable-restic-host-label>",
     "stop_timeout_seconds": 90,
     "health_timeout_seconds": 180,
+    "worker_settle_seconds": 10,
     "integrity_subset": "1%"
   }
 }

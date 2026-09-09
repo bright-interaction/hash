@@ -343,7 +343,9 @@ func (s *Server) createPDFTemplate(w http.ResponseWriter, r *http.Request, userI
 		// failure after upload leaves an unreferenced customer PDF in MinIO.
 		cleanupErr := errors.New("storage unavailable for orphan cleanup")
 		if s.Storage != nil {
-			cleanupErr = deleteObjectDetached(r.Context(), s.Storage, key)
+			cleanupErr = deleteObjectDetached(r.Context(), s.Storage, cleanupObjectVersion{
+				Key: key, VersionID: stored.VersionID, SHA256: stored.SHA256[:],
+			})
 		}
 		if cleanupErr != nil {
 			writeInternalErrorMsg(w, "create template failed; orphan cleanup failed", errors.Join(err, cleanupErr))

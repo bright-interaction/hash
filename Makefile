@@ -1,8 +1,10 @@
 .PHONY: help dev build test test-go test-e2e lint vet clean migrate sqlc docker-up docker-down
 
+LOCAL_COMPOSE := docker compose -f docker-compose.yml -f docker-compose.local-minio.yml
+
 help:
 	@echo "Hash - common commands"
-	@echo "  make dev           start postgres+minio via compose, run server with live reload"
+	@echo "  make dev           start the opt-in local postgres+minio stack, run server"
 	@echo "  make build         go build server binary + bun build frontend"
 	@echo "  make test          run all tests (Go unit + Playwright e2e)"
 	@echo "  make test-go       run Go unit tests only"
@@ -11,12 +13,12 @@ help:
 	@echo "  make vet           go vet ./..."
 	@echo "  make sqlc          regenerate sqlc Go from queries"
 	@echo "  make migrate       run goose migrations against HASH_DB_URL"
-	@echo "  make docker-up     start postgres + minio + hash locally"
+	@echo "  make docker-up     start hash with the opt-in bundled local MinIO"
 	@echo "  make docker-down   stop and remove containers"
 	@echo "  make clean         remove build artifacts"
 
 dev:
-	docker compose up -d postgres minio
+	$(LOCAL_COMPOSE) up -d postgres minio
 	go run ./cmd/server
 
 build:
@@ -47,10 +49,10 @@ migrate:
 	goose -dir internal/db/migrations postgres "$$HASH_DB_URL" up
 
 docker-up:
-	docker compose up -d --build
+	$(LOCAL_COMPOSE) up -d --build
 
 docker-down:
-	docker compose down
+	$(LOCAL_COMPOSE) down
 
 clean:
 	rm -rf bin frontend/build frontend/.svelte-kit

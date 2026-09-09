@@ -5,12 +5,189 @@ package branding
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/bright-interaction/hash/internal/db/generated"
 )
+
+type resolverQueriesStub struct {
+	orgRow   *generated.OrgBranding
+	orgErr   error
+	docRow   *generated.DocumentBrandingOverride
+	docErr   error
+	orgCalls int
+	docCalls int
+}
+
+func (s *resolverQueriesStub) GetOrgBranding(context.Context, uuid.UUID) (*generated.OrgBranding, error) {
+	s.orgCalls++
+	return s.orgRow, s.orgErr
+}
+
+func (s *resolverQueriesStub) GetDocumentBrandingOverride(context.Context, uuid.UUID) (*generated.DocumentBrandingOverride, error) {
+	s.docCalls++
+	return s.docRow, s.docErr
+}
+
+func TestResolverPropagatesOrgLookupFailure(t *testing.T) {
+	sentinel := errors.New("org branding database unavailable")
+	queries := &resolverQueriesStub{orgErr: sentinel}
+	_, err := newResolver(queries).Resolve(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "resolve org branding") {
+		t.Fatalf("Resolve error = %v, want wrapped org lookup failure", err)
+	}
+	if queries.docCalls != 0 {
+		t.Fatalf("document lookup ran after org lookup failure: %d calls", queries.docCalls)
+	}
+}
+
+func TestResolverPropagatesDocumentLookupFailure(t *testing.T) {
+	sentinel := errors.New("document branding database unavailable")
+	queries := &resolverQueriesStub{
+		orgRow: &generated.OrgBranding{PrimaryHex: "#112233"},
+		docErr: sentinel,
+	}
+	_, err := newResolver(queries).Resolve(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "resolve document branding") {
+		t.Fatalf("Resolve error = %v, want wrapped document lookup failure", err)
+	}
+	if queries.orgCalls != 1 || queries.docCalls != 1 {
+		t.Fatalf("lookup calls = org:%d doc:%d, want one each", queries.orgCalls, queries.docCalls)
+	}
+}
+
+func TestResolverTreatsErrNoRowsAsMissingBranding(t *testing.T) {
+	queries := &resolverQueriesStub{
+		orgErr: pgx.ErrNoRows,
+		docRow: &generated.DocumentBrandingOverride{
+			PrimaryHex: pgtype.Text{String: "#ABCDEF", Valid: true},
+		},
+	}
+	got, err := newResolver(queries).Resolve(context.Background(), uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.PrimaryHex != "#ABCDEF" || got.AccentHex != DefaultBranding().AccentHex {
+		t.Fatalf("resolved branding = %#v, want override over system defaults", got)
+	}
+
+	queries = &resolverQueriesStub{orgErr: pgx.ErrNoRows, docErr: pgx.ErrNoRows}
+	got, err = newResolver(queries).Resolve(context.Background(), uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("Resolve with no rows: %v", err)
+	}
+	if got != DefaultBranding() {
+		t.Fatalf("resolved branding = %#v, want system defaults %#v", got, DefaultBranding())
+	}
+}
+
+func TestResolveFrozenRequiresDocumentSnapshot(t *testing.T) {
+	queries := &resolverQueriesStub{
+		orgRow: &generated.OrgBranding{PrimaryHex: "#BADBAD"},
+		docErr: pgx.ErrNoRows,
+	}
+	_, err := newResolver(queries).ResolveFrozen(context.Background(), uuid.New())
+	if !errors.Is(err, ErrFrozenBrandingUnavailable) || !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("ResolveFrozen error = %v, want unavailable/no-rows error", err)
+	}
+	if queries.orgCalls != 0 {
+		t.Fatalf("ResolveFrozen consulted mutable org branding: %d calls", queries.orgCalls)
+	}
+}
+
+func TestResolveFrozenPropagatesDocumentLookupFailure(t *testing.T) {
+	sentinel := errors.New("frozen snapshot database unavailable")
+	queries := &resolverQueriesStub{docErr: sentinel}
+	_, err := newResolver(queries).ResolveFrozen(context.Background(), uuid.New())
+	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "resolve frozen document branding") {
+		t.Fatalf("ResolveFrozen error = %v, want wrapped database failure", err)
+	}
+}
+
+func TestResolveFrozenRejectsIncompleteSnapshot(t *testing.T) {
+	docID := uuid.New()
+	snapshot := completeFrozenSnapshot(docID)
+	snapshot.FontBody.Valid = false
+	_, err := newResolver(&resolverQueriesStub{docRow: snapshot}).ResolveFrozen(context.Background(), docID)
+	if !errors.Is(err, ErrFrozenBrandingUnavailable) {
+		t.Fatalf("ResolveFrozen error = %v, want incomplete-snapshot failure", err)
+	}
+}
+
+func TestResolveFrozenRejectsInvalidOrNonCanonicalFont(t *testing.T) {
+	t.Parallel()
+	for _, font := range []string{"\t\n", " Inter", "Inter;}"} {
+		docID := uuid.New()
+		snapshot := completeFrozenSnapshot(docID)
+		snapshot.FontBody.String = font
+		_, err := newResolver(&resolverQueriesStub{docRow: snapshot}).ResolveFrozen(context.Background(), docID)
+		if !errors.Is(err, ErrFrozenBrandingUnavailable) {
+			t.Errorf("ResolveFrozen font %q error = %v, want frozen-snapshot refusal", font, err)
+		}
+	}
+}
+
+func TestResolveFrozenUsesOnlyCompleteDocumentSnapshot(t *testing.T) {
+	docID := uuid.New()
+	snapshot := completeFrozenSnapshot(docID)
+	snapshot.PrimaryHex.String = "#123456"
+	queries := &resolverQueriesStub{
+		orgErr: errors.New("mutable org branding must not be queried"),
+		docRow: snapshot,
+	}
+	got, err := newResolver(queries).ResolveFrozen(context.Background(), docID)
+	if err != nil {
+		t.Fatalf("ResolveFrozen: %v", err)
+	}
+	if got.PrimaryHex != "#123456" || got.FontBody != "Inter" {
+		t.Fatalf("resolved frozen branding = %#v", got)
+	}
+	if queries.orgCalls != 0 || queries.docCalls != 1 {
+		t.Fatalf("lookup calls = org:%d doc:%d, want org:0 doc:1", queries.orgCalls, queries.docCalls)
+	}
+}
+
+func completeFrozenSnapshot(docID uuid.UUID) *generated.DocumentBrandingOverride {
+	text := func(value string) pgtype.Text { return pgtype.Text{String: value, Valid: true} }
+	return &generated.DocumentBrandingOverride{
+		DocumentID:     docID,
+		PrimaryHex:     text("#0F172A"),
+		AccentHex:      text("#3B82F6"),
+		SurfaceHex:     text("#FFFFFF"),
+		TextHex:        text("#0F172A"),
+		MutedHex:       text("#64748B"),
+		LogoUrl:        text(""),
+		LogoAlt:        text(""),
+		FontHeading:    text("Inter"),
+		FontBody:       text("Inter"),
+		SignatureColor: text("#0F172A"),
+	}
+}
+
+func TestProductionBrandingRejectsEveryNonEmptyLogoDependency(t *testing.T) {
+	t.Parallel()
+	for _, logo := range []string{"/branding/logo/org.png", "https://cdn.example/logo.png", "  https://cdn.example/logo.png  "} {
+		if err := ValidateLogoURLForEnvironment("production", logo); !errors.Is(err, ErrProductionLogoUnsupported) {
+			t.Errorf("production logo %q error = %v", logo, err)
+		}
+	}
+	if err := ValidateLogoURLForEnvironment("production", ""); err != nil {
+		t.Fatalf("production logo clear rejected: %v", err)
+	}
+	if err := ValidateLogoURLForEnvironment("development", "https://cdn.example/logo.png"); err != nil {
+		t.Fatalf("development logo preview rejected: %v", err)
+	}
+}
 
 func TestValidateHex(t *testing.T) {
 	cases := []struct {
@@ -51,6 +228,39 @@ func TestNormaliseHex(t *testing.T) {
 		if got := NormaliseHex(c.in); got != c.want {
 			t.Errorf("NormaliseHex(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestNormaliseFontFamily(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "single", in: "Inter", want: "Inter"},
+		{name: "collapse unicode whitespace", in: "  Dancing\tScript\n", want: "Dancing Script"},
+		{name: "canonical fallback list", in: " Geist,\tInter,  sans-serif ", want: "Geist, Inter, sans-serif"},
+		{name: "maximum bytes", in: strings.Repeat("A", maxFontFamilyListLength), want: strings.Repeat("A", maxFontFamilyListLength)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NormaliseFontFamily(tc.in)
+			if err != nil || got != tc.want {
+				t.Fatalf("NormaliseFontFamily(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+			}
+		})
+	}
+
+	for _, in := range []string{
+		"", " \t\r\n\u00a0 ", "Inter,,serif", "Inter;}*{display:none}",
+		`"Inter"`, "Noto Sáns", strings.Repeat("A", maxFontFamilyListLength+1), string([]byte{0xff}),
+	} {
+		if got, err := NormaliseFontFamily(in); err == nil {
+			t.Errorf("NormaliseFontFamily(%q) = %q, want rejection", in, got)
+		}
+	}
+	if !IsCanonicalFontFamily("Geist, Inter, sans-serif") || IsCanonicalFontFamily("Geist,Inter") {
+		t.Fatal("IsCanonicalFontFamily did not distinguish canonical list separators")
 	}
 }
 
@@ -101,6 +311,16 @@ func TestCSSVariablesQuotesFontFamilyWithSpaces(t *testing.T) {
 	css := b.CSSVariables()
 	if !strings.Contains(css, `"Source Sans Pro"`) {
 		t.Errorf("font with spaces should be quoted, got: %s", css)
+	}
+}
+
+func TestCSSVariablesQuotesEachCustomFamilyAndPreservesGenericFallback(t *testing.T) {
+	t.Parallel()
+	b := DefaultBranding()
+	b.FontBody = "Source Sans Pro, Inter, system-ui"
+	css := b.CSSVariables()
+	if !strings.Contains(css, `--hash-font-body:"Source Sans Pro", "Inter", system-ui;`) {
+		t.Fatalf("font fallback list was not emitted safely: %s", css)
 	}
 }
 

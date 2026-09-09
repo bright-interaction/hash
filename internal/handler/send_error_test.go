@@ -45,3 +45,12 @@ func TestWriteSendErrorReportsUnsupportedBlockEvidenceAsAuthoringError(t *testin
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 }
+
+func TestWriteSendErrorReportsUnsupportedBrandingLogoAsConflict(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	(&Server{}).writeSendError(recorder, send.ErrUnsupportedBrandingLogo)
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+}

@@ -49,4 +49,18 @@ func TestValidateAutomationBlockRequest(t *testing.T) {
 	if err := ValidateAutomationBlockRequest(unsupportedRaw, []byte(`{}`), validRecipient); !errors.Is(err, ErrUnsupportedBlockEvidence) {
 		t.Fatalf("unsupported evidence error = %v", err)
 	}
+
+	rawStorage := blocks.Tree{Version: blocks.SchemaVersion, Blocks: []blocks.Block{
+		{ID: "nested", Type: blocks.TypeCallout, Content: []blocks.Block{{
+			ID: "raw-storage", Type: blocks.TypeRawHTML, Text: `<img src="/api/v1/storage/org/test/image.png">`,
+		}}},
+		{ID: "signature", Type: blocks.TypeSignatureField, Attrs: map[string]any{"recipient_role": "signer"}},
+	}}
+	rawStorageJSON, err := json.Marshal(rawStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAutomationBlockRequest(rawStorageJSON, []byte(`{}`), validRecipient); !errors.Is(err, ErrUnsupportedBlockEvidence) {
+		t.Fatalf("raw HTML storage reference error = %v", err)
+	}
 }

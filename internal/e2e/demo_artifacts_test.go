@@ -72,12 +72,7 @@ func TestDemoArtifacts(t *testing.T) {
 	q := generated.New(pool)
 	auditLog := audit.New(q, pool)
 
-	store, err := storage.New(ctx, storage.Config{
-		Endpoint: s3ep, Region: "eu-central-1", Bucket: "hash-e2e",
-		AccessKey: os.Getenv("HASH_E2E_S3_ACCESS_KEY"),
-		SecretKey: os.Getenv("HASH_E2E_S3_SECRET_KEY"),
-		UseSSL:    false,
-	})
+	store, err := storage.New(ctx, e2eStorageConfig(t, "hash-e2e"))
 	dmust(t, err, "storage init")
 
 	_, priv, err := ed25519.GenerateKey(rand.Reader)

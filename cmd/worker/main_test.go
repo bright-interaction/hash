@@ -13,6 +13,17 @@ import (
 	"testing"
 )
 
+func TestProductionWorkerNeverMutatesBucketLifecycle(t *testing.T) {
+	raw, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	if !strings.Contains(src, "SkipTransientLifecycle:") || !strings.Contains(src, `cfg.Environment != "development"`) {
+		t.Fatal("worker storage config may replace an operator-owned production lifecycle policy")
+	}
+}
+
 func TestSuperviseWorkerTerminatesOnUnexpectedReturn(t *testing.T) {
 	calls := 0
 	code := 0

@@ -1,3 +1,8 @@
+# Common standalone services. Select exactly one object-storage topology:
+#   local:    add docker-compose.local-minio.yml
+#   external: set HASH_S3_* in .env and, for SSE-C, add docker-compose.sse-c.yml
+# The base deliberately does not define MinIO or make either Hash process depend
+# on it, so an external provider is a real standalone topology.
 services:
   postgres:
     image: postgres:16.15-alpine3.24@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
@@ -14,45 +19,6 @@ services:
       test: ["CMD-SHELL", "pg_isready -U hash -d hash"]
       interval: 5s
       timeout: 3s
-      retries: 10
-
-  minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-      # Hash requires SSE-S3 for every stored object. MinIO cannot serve those
-      # writes without a KMS, so the self-contained development stack enables
-      # its built-in KMS with a public deterministic fixture. Staging may
-      # override this value; production uses docker-compose.prod.yml and its
-      # separately managed KMS rather than this development default.
-      MINIO_KMS_SECRET_KEY: ${MINIO_KMS_SECRET_KEY:-hash-dev-key:qUUkXGsPxO6Vaay3hRuFTBdvO4dikHtLiin3Oy2hnV0=}
-    volumes:
-      - hash_minio:/data
-    # Host ports are env-overridable so production (where 9000/9001 are
-    # already taken by listmonk + production minio at 9030/9031) can pick
-    # collision-free ones. Defaults keep local dev working at the usual
-    # 127.0.0.1:9000 / 9001. Staging deploy overrides via .env on the
-    # server: HASH_MINIO_API_PORT + HASH_MINIO_CONSOLE_PORT.
-    ports:
-      - "127.0.0.1:${HASH_MINIO_API_PORT:-9000}:9000"
-      - "127.0.0.1:${HASH_MINIO_CONSOLE_PORT:-9001}:9001"
-    # Unique alias on the project network. The bare name `minio` can
-    # collide with another MinIO container when this app later joins a
-    # shared proxy network: docker DNS then resolves `minio` to the
-    # wrong container and the app fails with "The Access Key Id you
-    # provided does not exist". Force the app to talk to this compose
-    # file's minio explicitly.
-    networks:
-      default:
-        aliases:
-          - hash-minio
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 10s
-      timeout: 5s
       retries: 10
 
   gotenberg:
@@ -105,8 +71,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
-        condition: service_started
     entrypoint: ["/usr/local/bin/hash-worker"]
     environment:
       # The worker has no listener, but configuration still uses the same
@@ -126,11 +90,12 @@ services:
       HASH_S3_ENDPOINT: ${HASH_S3_ENDPOINT:-hash-minio:9000}
       HASH_S3_REGION: ${HASH_S3_REGION:-eu-central-1}
       HASH_S3_BUCKET: ${HASH_S3_BUCKET:-hash}
-      HASH_S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      HASH_S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
-      HASH_S3_USE_SSL: "false"
+      HASH_S3_ACCESS_KEY: ${HASH_S3_ACCESS_KEY:-${MINIO_ACCESS_KEY:-minioadmin}}
+      HASH_S3_SECRET_KEY: ${HASH_S3_SECRET_KEY:-${MINIO_SECRET_KEY:-minioadmin}}
+      HASH_S3_USE_SSL: ${HASH_S3_USE_SSL:-false}
       HASH_S3_SSE_MODE: ${HASH_S3_SSE_MODE:-sse-s3}
       HASH_S3_SSE_C_KEY_FILE: ${HASH_S3_SSE_C_KEY_FILE:-}
+      HASH_S3_SSE_C_KEY_SHA256: ${HASH_S3_SSE_C_KEY_SHA256:-}
       HASH_S3_BUCKET_LOOKUP: ${HASH_S3_BUCKET_LOOKUP:-auto}
       HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-http://localhost:9999}
       HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
@@ -160,8 +125,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
-        condition: service_started
     environment:
       HASH_PORT: "8080"
       HASH_ENVIRONMENT: ${HASH_ENVIRONMENT:-development}
@@ -177,11 +140,12 @@ services:
       HASH_S3_ENDPOINT: ${HASH_S3_ENDPOINT:-hash-minio:9000}
       HASH_S3_REGION: ${HASH_S3_REGION:-eu-central-1}
       HASH_S3_BUCKET: ${HASH_S3_BUCKET:-hash}
-      HASH_S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
-      HASH_S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
-      HASH_S3_USE_SSL: "false"
+      HASH_S3_ACCESS_KEY: ${HASH_S3_ACCESS_KEY:-${MINIO_ACCESS_KEY:-minioadmin}}
+      HASH_S3_SECRET_KEY: ${HASH_S3_SECRET_KEY:-${MINIO_SECRET_KEY:-minioadmin}}
+      HASH_S3_USE_SSL: ${HASH_S3_USE_SSL:-false}
       HASH_S3_SSE_MODE: ${HASH_S3_SSE_MODE:-sse-s3}
       HASH_S3_SSE_C_KEY_FILE: ${HASH_S3_SSE_C_KEY_FILE:-}
+      HASH_S3_SSE_C_KEY_SHA256: ${HASH_S3_SSE_C_KEY_SHA256:-}
       HASH_S3_BUCKET_LOOKUP: ${HASH_S3_BUCKET_LOOKUP:-auto}
       HASH_OIDC_ISSUER: ${HASH_OIDC_ISSUER:-http://localhost:9999}
       HASH_OIDC_CLIENT_ID: ${HASH_OIDC_CLIENT_ID:-hash-dev}
@@ -210,4 +174,3 @@ services:
 
 volumes:
   hash_pg:
-  hash_minio:

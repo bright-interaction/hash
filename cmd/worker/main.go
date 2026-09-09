@@ -190,16 +190,20 @@ func main() {
 	// be signed by a different ed25519 key.
 	var signEngine *sign.Engine
 	store, serr := storage.New(ctx, storage.Config{
-		Endpoint:          cfg.S3Endpoint,
-		Region:            cfg.S3Region,
-		Bucket:            cfg.S3Bucket,
-		AccessKey:         cfg.S3AccessKey,
-		SecretKey:         cfg.S3SecretKey,
-		UseSSL:            cfg.S3UseSSL,
-		SSEMode:           cfg.S3SSEMode,
-		SSECKeyFile:       cfg.S3SSECKeyFile,
-		BucketLookup:      cfg.S3BucketLookup,
-		RequireObjectLock: !config.IsLocalDevelopment(cfg.PublicURL),
+		Endpoint:                         cfg.S3Endpoint,
+		Region:                           cfg.S3Region,
+		Bucket:                           cfg.S3Bucket,
+		AccessKey:                        cfg.S3AccessKey,
+		SecretKey:                        cfg.S3SecretKey,
+		UseSSL:                           cfg.S3UseSSL,
+		SSEMode:                          cfg.S3SSEMode,
+		SSECKeyFile:                      cfg.S3SSECKeyFile,
+		SSECKeySHA256:                    cfg.S3SSECKeySHA256,
+		BucketLookup:                     cfg.S3BucketLookup,
+		RequireObjectLock:                !config.IsLocalDevelopment(cfg.PublicURL),
+		RequireExistingBucket:            !config.IsLocalDevelopment(cfg.PublicURL),
+		SkipTransientLifecycle:           cfg.Environment != "development",
+		AllowInsecureDevelopmentEndpoint: cfg.Environment == "development" && config.IsLocalDevelopment(cfg.PublicURL),
 	})
 	if serr != nil {
 		slog.Error("worker: storage init failed", "err", serr)
@@ -222,15 +226,15 @@ func main() {
 		Signer:  signer,
 		OrgName: cfg.OperatorName,
 		BaseURL: cfg.PublicURL,
-		BrandingCSS: func(ctx context.Context, doc *generated.Document) string {
+		BrandingCSS: func(ctx context.Context, doc *generated.Document) (string, error) {
 			if doc == nil {
-				return branding.DefaultBranding().CSSVariables()
+				return branding.DefaultBranding().CSSVariables(), nil
 			}
-			b, err := brandingResolver.Resolve(ctx, doc.OrgID, doc.ID)
+			b, err := brandingResolver.ResolveFrozen(ctx, doc.ID)
 			if err != nil {
-				return branding.DefaultBranding().CSSVariables()
+				return "", err
 			}
-			return b.CSSVariables()
+			return b.CSSVariables(), nil
 		},
 		EnvelopeManifestHTML: func(ctx context.Context, doc *generated.Document) string {
 			if doc == nil || !doc.IsEnvelope {
@@ -255,15 +259,16 @@ func main() {
 	// intent commits; recovery rechecks the frozen envelope/eIDAS/source state,
 	// applies retention idempotently, then atomically mints links/outbox/audit.
 	sendEngine := &send.Engine{
-		Pool:      pool,
-		Queries:   queries,
-		Audit:     auditLog,
-		Mailer:    queueMailer,
-		EIDAS:     eidas.New(queries),
-		Envelopes: envelopesEngine,
-		Storage:   store,
-		PublicURL: cfg.PublicURL,
-		OrgName:   cfg.OperatorName,
+		Pool:        pool,
+		Queries:     queries,
+		Audit:       auditLog,
+		Mailer:      queueMailer,
+		EIDAS:       eidas.New(queries),
+		Envelopes:   envelopesEngine,
+		Storage:     store,
+		PublicURL:   cfg.PublicURL,
+		OrgName:     cfg.OperatorName,
+		Environment: cfg.Environment,
 	}
 
 	w := &worker{

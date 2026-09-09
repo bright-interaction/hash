@@ -727,7 +727,7 @@ for i in "${!seed_names[@]}"; do
 done
 
 inventory_verified=0
-while IFS=$'\t' read -r key_b64 key_json classes owners org_ids expected_sha conflict legal refs expected_version version_conflict legacy_lookup; do
+while IFS=$'\t' read -r key_b64 key_json classes owners org_ids expected_sha conflict legal refs expected_version version_conflict legacy_lookup expected_retain_until; do
   [[ -n "$key_b64" ]] || continue
   key="$(printf '%s' "$key_b64" | decode_base64)" || die "invalid base64 key in canonical inventory"
   [[ "$conflict" == "f" ]] || die "canonical inventory contains a database hash conflict: $key_json"
@@ -755,10 +755,17 @@ while IFS=$'\t' read -r key_b64 key_json classes owners org_ids expected_sha con
 	      die "staged finalization object lacks its durable intent owner: $key"
 	    ;;
 	esac
-  if [[ "$expected_sha" != "-" ]]; then
+	  if [[ "$expected_sha" != "-" ]]; then
     [[ "$expected_version" == "-" && "$legacy_lookup" == "t" ]] ||
       die "legacy drill row did not preserve explicit bounded-lookup state: $key_json"
-  fi
+	  fi
+	  if [[ "$legal" == "t" ]]; then
+	    [[ "$expected_retain_until" != "-" ]] ||
+	      die "legal recovery inventory row lacks its exact database retention deadline: $key_json"
+	  else
+	    [[ "$expected_retain_until" == "-" ]] ||
+	      die "mutable recovery inventory row unexpectedly carries a retention deadline: $key_json"
+	  fi
   inventory_verified=$((inventory_verified + 1))
 done < "$output_dir/restored/recovery-object-inventory.tsv"
 [[ "$inventory_verified" == "${#seed_keys[@]}" ]] \

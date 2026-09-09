@@ -149,8 +149,13 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 		writeInternalErrorMsg(w, "create document failed", err)
 		return
 	}
+	cleanupObject, err := requiredDraftSourceObjectVersion(d)
+	if err != nil {
+		writeInternalErrorMsg(w, "create document returned an incomplete storage commitment", err)
+		return
+	}
 	if err := s.Billing.EnforceDocumentQuotaMutation(r.Context(), q, orgID); err != nil {
-		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, d.PdfStorageKey.String)
+		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, cleanupObject)
 		if cleanupErr != nil {
 			writeInternalErrorMsg(w, "create document failed; orphan cleanup failed", errors.Join(err, cleanupErr))
 			return
@@ -167,12 +172,12 @@ func (s *Server) finishPDFDocument(w http.ResponseWriter, r *http.Request, userI
 		Payload: map[string]any{"name": name, "source_kind": "pdf", "intake": "import"},
 	})
 	if err != nil {
-		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, d.PdfStorageKey.String)
+		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, cleanupObject)
 		writeInternalErrorMsg(w, "audit document import failed", errors.Join(err, cleanupErr))
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
-		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, d.PdfStorageKey.String)
+		cleanupErr := deleteObjectDetached(r.Context(), s.Storage, cleanupObject)
 		writeInternalErrorMsg(w, "commit document import failed", errors.Join(err, cleanupErr))
 		return
 	}

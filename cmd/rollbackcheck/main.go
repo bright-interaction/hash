@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -64,11 +65,17 @@ type firstInstallSchemaResult struct {
 	LifecycleIntents       int64 `json:"lifecycle_intents"`
 }
 
+type databaseIdentityResult struct {
+	Safe     bool `json:"safe"`
+	Complete bool `json:"complete"`
+}
+
 const lawfulBasisCutoverArg = "--lawful-basis-cutover"
 const article13CutoverArg = "--article13-cutover"
 const firstInstallDatabaseArg = "--first-install-database"
 const firstInstallSchemaArg = "--first-install-schema-applied"
 const firstInstallCandidateArg = "--first-install-candidate-estate"
+const databaseIdentityArg = "--database-identity"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -84,6 +91,18 @@ func main() {
 		os.Exit(2)
 	}
 	defer pool.Close()
+	if len(os.Args) == 6 && os.Args[1] == databaseIdentityArg {
+		result, verifyErr := verifyDatabaseIdentity(ctx, pool, os.Args[2], os.Args[3], os.Args[4], os.Args[5])
+		if verifyErr != nil {
+			_, _ = fmt.Fprintln(os.Stderr, "rollbackcheck: database identity could not be verified")
+			os.Exit(2)
+		}
+		encodeResult(result)
+		if !result.Safe || !result.Complete {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == article13CutoverArg {
 		result, verifyErr := verifyArticle13CutoverBoundary(ctx, pool)
 		if verifyErr != nil {
@@ -331,6 +350,98 @@ func encodeResult(result any) {
 
 type rollbackQuerier interface {
 	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
+}
+
+// verifyDatabaseIdentity authenticates through HASH_DB_URL, then compares the
+// connected logical database and physical PostgreSQL cluster with the
+// non-secret immutable deployment contract. It deliberately emits only
+// booleans; neither the DSN nor observed identifiers enter diagnostics.
+func verifyDatabaseIdentity(ctx context.Context, db rollbackQuerier, expectedDatabase, expectedUsername, expectedSystemIdentifier, expectedDatabaseOID string) (databaseIdentityResult, error) {
+	var result databaseIdentityResult
+	if expectedDatabase != "hash" || !validDatabaseUsername(expectedUsername) ||
+		!validSystemIdentifier(expectedSystemIdentifier) || !validDatabaseOID(expectedDatabaseOID) {
+		return result, fmt.Errorf("invalid expected database identity")
+	}
+	tx, err := db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var actualDatabase, sessionUsername, currentUsername, actualSystemIdentifier, actualDatabaseOID string
+	var canonicalSchema, canonicalSearchPath, leastPrivilegedDatabaseOwner bool
+	const query = `
+SELECT current_database(), session_user, current_user, system_identifier::text,
+       (SELECT oid::text FROM pg_database WHERE datname = current_database()),
+       current_schema() = 'public',
+       current_schemas(false) = ARRAY['public']::name[],
+       EXISTS (
+         SELECT 1
+         FROM pg_roles r
+         JOIN pg_database d ON d.datdba = r.oid
+         WHERE d.datname = current_database()
+           AND r.rolname = current_user
+           AND NOT r.rolsuper AND NOT r.rolcreaterole AND NOT r.rolcreatedb
+           AND NOT r.rolreplication AND NOT r.rolbypassrls
+       )
+FROM pg_control_system()`
+	if err := tx.QueryRow(ctx, query).Scan(
+		&actualDatabase, &sessionUsername, &currentUsername, &actualSystemIdentifier, &actualDatabaseOID,
+		&canonicalSchema, &canonicalSearchPath, &leastPrivilegedDatabaseOwner,
+	); err != nil { //nolint:rawsql -- release-only physical database identity
+		return result, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return result, err
+	}
+	result.Complete = true
+	result.Safe = databaseIdentityMatches(
+		actualDatabase, sessionUsername, currentUsername, actualSystemIdentifier, actualDatabaseOID,
+		expectedDatabase, expectedUsername, expectedSystemIdentifier, expectedDatabaseOID,
+		canonicalSchema, canonicalSearchPath, leastPrivilegedDatabaseOwner,
+	)
+	return result, nil
+}
+
+func databaseIdentityMatches(actualDatabase, sessionUsername, currentUsername, actualSystemIdentifier, actualDatabaseOID,
+	expectedDatabase, expectedUsername, expectedSystemIdentifier, expectedDatabaseOID string,
+	canonicalSchema, canonicalSearchPath, leastPrivilegedDatabaseOwner bool,
+) bool {
+	return actualDatabase == expectedDatabase && sessionUsername == expectedUsername && currentUsername == expectedUsername &&
+		actualSystemIdentifier == expectedSystemIdentifier && actualDatabaseOID == expectedDatabaseOID &&
+		canonicalSchema && canonicalSearchPath && leastPrivilegedDatabaseOwner
+}
+
+func validSystemIdentifier(value string) bool {
+	if value == "" || len(value) > 20 {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return strings.TrimLeft(value, "0") != ""
+}
+
+func validDatabaseOID(value string) bool {
+	if value == "" || len(value) > 10 {
+		return false
+	}
+	parsed, err := strconv.ParseUint(value, 10, 32)
+	return err == nil && parsed != 0
+}
+
+func validDatabaseUsername(value string) bool {
+	if value == "" || len(value) > 63 || value != strings.ToLower(value) {
+		return false
+	}
+	for index, char := range value {
+		if (char >= 'a' && char <= 'z') || char == '_' || (index > 0 && char >= '0' && char <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func verifyRollbackBoundary(ctx context.Context, db rollbackQuerier) (rollbackResult, error) {

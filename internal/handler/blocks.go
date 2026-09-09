@@ -261,7 +261,11 @@ func (s *Server) handlePreviewHTML(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body := blocks.RenderHTML(tree, vars)
-	brand, _ := s.resolveBrandingForDoc(r.Context(), doc)
+	brand, err := s.resolveBrandingForDoc(r.Context(), doc)
+	if err != nil {
+		writeInternalErrorMsg(w, "resolve branding", err)
+		return
+	}
 	html := brand.CSSVariables() + body
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(html))

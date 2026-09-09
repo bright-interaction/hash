@@ -109,7 +109,7 @@ manifest="$release_dir/manifest.json"
 archive="$release_dir/images.tar"
 [[ -f "$manifest" && ! -L "$manifest" ]] || die 'release manifest must be a regular file'
 [[ -f "$archive" && ! -L "$archive" ]] || die 'release archive must be a regular file'
-[[ "$(jq -er .schema_version "$manifest")" == 3 ]] || die 'release manifest schema is not supported'
+[[ "$(jq -er .schema_version "$manifest")" == 4 ]] || die 'release manifest schema is not supported'
 commit="$(jq -er .commit_sha "$manifest")"
 [[ "$commit" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die 'release manifest commit is invalid'
 archive_sha="$(jq -er .image_archive_sha256 "$manifest")"

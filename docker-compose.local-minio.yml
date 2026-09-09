@@ -1,0 +1,67 @@
+# Opt-in bundled object storage for local development. Keep this separate from
+# docker-compose.yml so external S3 deployments neither start nor depend on an
+# unused MinIO container. This overlay is development-only; production uses the
+# immutable docker-compose.prod.yml storage contract.
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      # Hash requires SSE-S3 for every stored object. MinIO cannot serve those
+      # writes without a KMS, so the self-contained development stack enables
+      # its built-in KMS with a public deterministic fixture.
+      MINIO_KMS_SECRET_KEY: ${MINIO_KMS_SECRET_KEY:-hash-dev-key:qUUkXGsPxO6Vaay3hRuFTBdvO4dikHtLiin3Oy2hnV0=}
+    volumes:
+      - hash_minio:/data
+    ports:
+      - "127.0.0.1:${HASH_MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${HASH_MINIO_CONSOLE_PORT:-9001}:9001"
+    # The unique alias prevents collision with an unrelated `minio` service if
+    # this project later joins a shared proxy network.
+    networks:
+      default:
+        aliases:
+          - hash-minio
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      HASH_S3_ENDPOINT: hash-minio:9000
+      HASH_S3_REGION: ${HASH_S3_REGION:-eu-central-1}
+      HASH_S3_BUCKET: ${HASH_S3_BUCKET:-hash}
+      HASH_S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      HASH_S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      HASH_S3_USE_SSL: "false"
+      HASH_S3_SSE_MODE: sse-s3
+      HASH_S3_SSE_C_KEY_FILE: ""
+      HASH_S3_SSE_C_KEY_SHA256: ""
+      HASH_S3_BUCKET_LOOKUP: auto
+
+  hash:
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      HASH_S3_ENDPOINT: hash-minio:9000
+      HASH_S3_REGION: ${HASH_S3_REGION:-eu-central-1}
+      HASH_S3_BUCKET: ${HASH_S3_BUCKET:-hash}
+      HASH_S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      HASH_S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      HASH_S3_USE_SSL: "false"
+      HASH_S3_SSE_MODE: sse-s3
+      HASH_S3_SSE_C_KEY_FILE: ""
+      HASH_S3_SSE_C_KEY_SHA256: ""
+      HASH_S3_BUCKET_LOOKUP: auto
+
+volumes:
+  hash_minio:

@@ -132,9 +132,9 @@
         />
       </label>
       <p class="text-xs text-text-muted mt-3">
-        Upload via the API (<code class="font-mono">POST /api/v1/branding/logo</code>) to
-        host the file inside Hash; remote URLs work but you keep the
-        third-party fetch in your CSP.
+        Logo URLs and Hash-hosted logo uploads are disabled in production until
+        each asset is pinned to an exact retained storage version. Palette and
+        font settings remain available and are frozen when a document is sent.
       </p>
     </section>
 
@@ -161,8 +161,8 @@
         </label>
       </div>
       <p class="text-xs text-text-muted mt-3">
-        Only families bundled with Hash (Inter, Geist, JetBrains Mono,
-        plus the calligraphy set) resolve in the rendered PDF; unknown
+        Only families embedded in Hash's PDF renderer (Inter, Geist,
+        plus the calligraphy set) resolve consistently; unknown
         families fall back to <code class="font-mono">system-ui</code>.
       </p>
     </section>

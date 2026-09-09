@@ -6,6 +6,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,26 @@ func TestLoad_MissingRequired(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HASH_DB_URL") {
 		t.Errorf("error should mention DB_URL, got %q", err)
+	}
+}
+
+func TestLoad_ProductionRejectsAmbientLibpqOverrides(t *testing.T) {
+	for _, entry := range []string{"PGOPTIONS=-csearch_path=evil", "PGSERVICE=evil", "PGHOST=evil"} {
+		if err := validateNoProductionLibpqEnv([]string{"PATH=/usr/bin", entry}); err == nil {
+			t.Errorf("libpq override %q accepted", entry)
+		}
+	}
+	if err := validateNoProductionLibpqEnv([]string{"PATH=/usr/bin", "HASH_DB_URL=postgres://redacted"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateNoProductionLibpqEnv([]string{"PGOPTIONS=", "pgservice=allowed-lowercase"}); err != nil {
+		t.Fatalf("empty or differently cased variables rejected: %v", err)
+	}
+
+	setAllRequired(t)
+	t.Setenv("PGSERVICE", "hostile")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PG*") {
+		t.Fatalf("production Load accepted PGSERVICE: %v", err)
 	}
 }
 
@@ -120,8 +141,8 @@ func TestLoad_OK(t *testing.T) {
 	if c.Release != strings.Repeat("ab", 20) || c.Environment != "production" {
 		t.Errorf("telemetry identity = %q/%q, want immutable test release/production", c.Release, c.Environment)
 	}
-	if c.S3SSEMode != "sse-s3" || c.S3SSECKeyFile != "" || c.S3BucketLookup != "auto" {
-		t.Fatalf("default S3 policy = %q/%q/%q, want sse-s3/no-key/auto", c.S3SSEMode, c.S3SSECKeyFile, c.S3BucketLookup)
+	if c.S3SSEMode != "sse-s3" || c.S3SSECKeyFile != "" || c.S3SSECKeySHA256 != "" || c.S3BucketLookup != "auto" {
+		t.Fatalf("default S3 policy = %q/%q/%q/%q, want sse-s3/no-key/no-digest/auto", c.S3SSEMode, c.S3SSECKeyFile, c.S3SSECKeySHA256, c.S3BucketLookup)
 	}
 	if c.OperatorName != "Example Hash Operator AB" || c.PrivacyContact != "privacy@example.test" || c.SupervisoryAuthority != "Example Data Protection Authority" || c.PrivacyPolicyURL != "https://example.test/privacy" {
 		t.Fatalf("operator disclosure identity was not loaded exactly: %#v", c)
@@ -138,39 +159,98 @@ func TestLoad_ValidatesSSECPolicyBeforeNetworkAccess(t *testing.T) {
 	setAllRequired(t)
 	t.Setenv("HASH_S3_SSE_MODE", "sse-c")
 	t.Setenv("HASH_S3_SSE_C_KEY_FILE", keyFile)
+	keyHash := sha256.Sum256(key[:])
+	keyDigest := hex.EncodeToString(keyHash[:])
+	t.Setenv("HASH_S3_SSE_C_KEY_SHA256", keyDigest)
 	t.Setenv("HASH_S3_BUCKET_LOOKUP", "path")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("valid SSE-C policy rejected: %v", err)
 	}
-	if cfg.S3SSEMode != "sse-c" || cfg.S3SSECKeyFile != keyFile || cfg.S3BucketLookup != "path" {
+	if cfg.S3SSEMode != "sse-c" || cfg.S3SSECKeyFile != keyFile || cfg.S3SSECKeySHA256 != keyDigest || cfg.S3BucketLookup != "path" {
 		t.Fatal("validated SSE-C configuration was not preserved")
 	}
 
 	for _, test := range []struct {
-		name    string
-		mode    string
-		keyFile string
-		lookup  string
-		useSSL  string
-		want    string
+		name      string
+		mode      string
+		keyFile   string
+		keyDigest string
+		lookup    string
+		useSSL    string
+		want      string
 	}{
-		{name: "missing key file", mode: "sse-c", lookup: "auto", useSSL: "true", want: "HASH_S3_SSE_C_KEY_FILE is required"},
-		{name: "plaintext transport", mode: "sse-c", keyFile: keyFile, lookup: "auto", useSSL: "false", want: "requires HASH_S3_USE_SSL=true"},
+		{name: "missing key file", mode: "sse-c", keyDigest: keyDigest, lookup: "auto", useSSL: "true", want: "HASH_S3_SSE_C_KEY_FILE is required"},
+		{name: "missing key digest", mode: "sse-c", keyFile: keyFile, lookup: "auto", useSSL: "true", want: "exact lowercase 64-character SHA-256"},
+		{name: "wrong key digest", mode: "sse-c", keyFile: keyFile, keyDigest: strings.Repeat("0", 64), lookup: "auto", useSSL: "true", want: "does not match"},
+		{name: "plaintext transport", mode: "sse-c", keyFile: keyFile, keyDigest: keyDigest, lookup: "auto", useSSL: "false", want: "requires HASH_S3_USE_SSL=true"},
 		{name: "key path under sse-s3", mode: "sse-s3", keyFile: keyFile, lookup: "auto", useSSL: "true", want: "must be empty"},
-		{name: "unknown encryption", mode: "SSE-C", keyFile: keyFile, lookup: "auto", useSSL: "true", want: "must be exactly sse-s3 or sse-c"},
+		{name: "key digest under sse-s3", mode: "sse-s3", keyDigest: keyDigest, lookup: "auto", useSSL: "true", want: "HASH_S3_SSE_C_KEY_SHA256 must be empty"},
+		{name: "unknown encryption", mode: "SSE-C", keyFile: keyFile, keyDigest: keyDigest, lookup: "auto", useSSL: "true", want: "must be exactly sse-s3 or sse-c"},
 		{name: "unknown addressing", mode: "sse-s3", lookup: "virtual", useSSL: "true", want: "must be exactly auto, path, or dns"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			setAllRequired(t)
 			t.Setenv("HASH_S3_SSE_MODE", test.mode)
 			t.Setenv("HASH_S3_SSE_C_KEY_FILE", test.keyFile)
+			t.Setenv("HASH_S3_SSE_C_KEY_SHA256", test.keyDigest)
 			t.Setenv("HASH_S3_BUCKET_LOOKUP", test.lookup)
 			t.Setenv("HASH_S3_USE_SSL", test.useSSL)
 			if _, err := Load(); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("invalid S3 policy accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoad_RejectsExternalPlaintextStorageBeforeNetworkAccess(t *testing.T) {
+	for _, endpoint := range []string{
+		"storage.example.com:9000",
+		"203.0.113.10:9000",
+		"minio:9000.example.com",
+		"http://minio:9000",
+		"minio:9000 ",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			setAllRequired(t)
+			t.Setenv("HASH_S3_USE_SSL", "false")
+			t.Setenv("HASH_S3_ENDPOINT", endpoint)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "plaintext object storage") {
+				t.Fatalf("external or malformed plaintext endpoint was accepted: %v", err)
+			}
+		})
+	}
+
+	setAllRequired(t)
+	t.Setenv("HASH_S3_USE_SSL", "false")
+	t.Setenv("HASH_S3_ENDPOINT", "minio:9000")
+	if _, err := Load(); err != nil {
+		t.Fatalf("exact production MinIO plaintext endpoint rejected: %v", err)
+	}
+
+	setAllRequired(t)
+	t.Setenv("HASH_ENVIRONMENT", "development")
+	t.Setenv("HASH_PUBLIC_URL", "http://localhost:8080")
+	t.Setenv("HASH_OIDC_REDIRECT_URL", "http://localhost:8080/auth/callback")
+	t.Setenv("HASH_S3_USE_SSL", "false")
+	t.Setenv("HASH_S3_ENDPOINT", "hash-minio:9000")
+	if _, err := Load(); err != nil {
+		t.Fatalf("explicit local development MinIO rejected: %v", err)
+	}
+}
+
+func TestLoad_RejectsProductionLibpqEnvironmentOverrides(t *testing.T) {
+	for _, name := range []string{"PGOPTIONS", "PGSERVICE"} {
+		t.Run(name, func(t *testing.T) {
+			setAllRequired(t)
+			t.Setenv(name, "hostile-override")
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PG*") {
+				t.Fatalf("nonempty production %s accepted: %v", name, err)
+			}
+		})
+	}
+	if err := validateNoProductionLibpqEnv([]string{"PGOPTIONS=", "pgservice=allowed-lowercase", "PATH=/bin"}); err != nil {
+		t.Fatalf("empty/exactly non-PG entries rejected: %v", err)
 	}
 }
 
@@ -183,6 +263,7 @@ func TestLoad_RejectsWrongLengthSSECKeyWithoutRenderingIt(t *testing.T) {
 	setAllRequired(t)
 	t.Setenv("HASH_S3_SSE_MODE", "sse-c")
 	t.Setenv("HASH_S3_SSE_C_KEY_FILE", keyFile)
+	t.Setenv("HASH_S3_SSE_C_KEY_SHA256", strings.Repeat("0", 64))
 	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "exactly 32 raw bytes") {
 		t.Fatalf("wrong-length SSE-C key accepted: %v", err)
@@ -870,6 +951,7 @@ func setAllRequired(t *testing.T) {
 	t.Setenv("HASH_S3_USE_SSL", "true")
 	t.Setenv("HASH_S3_SSE_MODE", "")
 	t.Setenv("HASH_S3_SSE_C_KEY_FILE", "")
+	t.Setenv("HASH_S3_SSE_C_KEY_SHA256", "")
 	t.Setenv("HASH_S3_BUCKET_LOOKUP", "")
 	t.Setenv("HASH_EVIDENCE_OTS_ENABLED", "false")
 	t.Setenv("HASH_BRIGHTCRM_URL", "")

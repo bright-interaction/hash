@@ -1,8 +1,8 @@
 # Explicit SSE-C overlay for docker-compose.prod.yml. Both production writers
-# receive the same read-only key file. Service-derived auditverify commands use
-# this overlay; a networkless configcheck needs the equivalent direct file bind
-# documented in DEPLOY.md. The estate automation does not consume this overlay
-# yet, so it remains a production HOLD until that workflow is wired and tested.
+# receive the same read-only key file. The immutable release manifest binds this
+# file, and deploy-hash-prod selects it only after validating the production
+# storage contract. Exact-image config, migration, rollback, and audit commands
+# receive the equivalent direct read-only mount from the same workflow.
 secrets:
   hash-s3-sse-c:
     file: ${HASH_S3_SSE_C_KEY_HOST_FILE:?set HASH_S3_SSE_C_KEY_HOST_FILE to the raw 32-byte host key file}

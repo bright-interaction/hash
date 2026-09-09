@@ -35,6 +35,8 @@ func (*intakeQueriesStub) UpdateMetadataRedactionReport(context.Context, generat
 type intakeStoreStub struct {
 	putKeys      []string
 	deletedKeys  []string
+	deletedIDs   []string
+	deletedSHAs  [][]byte
 	deleteCtxErr error
 	deleteErr    error
 }
@@ -44,8 +46,10 @@ func (s *intakeStoreStub) PutVersioned(_ context.Context, key, _ string, _ []byt
 	return storage.StoredObject{SHA256: [32]byte{1}, VersionID: "version-intake"}, nil
 }
 
-func (s *intakeStoreStub) Delete(ctx context.Context, key string) error {
+func (s *intakeStoreStub) DeleteVersion(ctx context.Context, key, versionID string, digest []byte) error {
 	s.deletedKeys = append(s.deletedKeys, key)
+	s.deletedIDs = append(s.deletedIDs, versionID)
+	s.deletedSHAs = append(s.deletedSHAs, append([]byte(nil), digest...))
 	s.deleteCtxErr = ctx.Err()
 	return s.deleteErr
 }
@@ -76,6 +80,9 @@ func TestCreatePDFSourceDocumentDeletesObjectWhenDatabaseInsertFails(t *testing.
 	}
 	if st.deletedKeys[0] != st.putKeys[0] {
 		t.Fatalf("deleted key %q, want uploaded key %q", st.deletedKeys[0], st.putKeys[0])
+	}
+	if st.deletedIDs[0] != "version-intake" || len(st.deletedSHAs[0]) != 32 {
+		t.Fatalf("cleanup identity = VersionId %q, SHA bytes %d", st.deletedIDs[0], len(st.deletedSHAs[0]))
 	}
 	if st.deleteCtxErr != nil {
 		t.Fatalf("cleanup inherited canceled request context: %v", st.deleteCtxErr)

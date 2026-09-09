@@ -29,6 +29,101 @@ func TestRollbackResultJSONExposesEveryDurableBoundary(t *testing.T) {
 	}
 }
 
+func TestDatabaseIdentityModeExposesNoTargetOrCredentialMaterial(t *testing.T) {
+	raw, err := json.Marshal(databaseIdentityResult{Safe: true, Complete: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"safe":true,"complete":true}` {
+		t.Fatalf("database identity result = %s", raw)
+	}
+	for _, value := range []string{"", "0", "-1", "+1", "abc", strings.Repeat("1", 21)} {
+		if validSystemIdentifier(value) {
+			t.Errorf("invalid PostgreSQL system identifier %q accepted", value)
+		}
+	}
+	for _, value := range []string{"1", "0123", "18446744073709551615"} {
+		if !validSystemIdentifier(value) {
+			t.Errorf("valid PostgreSQL system identifier %q rejected", value)
+		}
+	}
+	for _, value := range []string{"", "0", "-1", "4294967296", "abc"} {
+		if validDatabaseOID(value) {
+			t.Errorf("invalid database OID %q accepted", value)
+		}
+	}
+	for _, value := range []string{"1", "16384", "4294967295"} {
+		if !validDatabaseOID(value) {
+			t.Errorf("valid database OID %q rejected", value)
+		}
+	}
+	for _, value := range []string{"", "Mithras", "9mithras", "bad-role", strings.Repeat("a", 64)} {
+		if validDatabaseUsername(value) {
+			t.Errorf("invalid database username %q accepted", value)
+		}
+	}
+	for _, value := range []string{"mithras", "hash_app", "role9"} {
+		if !validDatabaseUsername(value) {
+			t.Errorf("valid database username %q rejected", value)
+		}
+	}
+}
+
+func TestDatabaseIdentityProofIsReadOnlyAndUsesPhysicalClusterIdentity(t *testing.T) {
+	raw, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	start := strings.Index(src, "func verifyDatabaseIdentity")
+	end := strings.Index(src[start:], "func validSystemIdentifier")
+	if start < 0 || end < 0 {
+		t.Fatal("database identity verifier is missing")
+	}
+	body := src[start : start+end]
+	for _, required := range []string{
+		"pgx.RepeatableRead", "pgx.ReadOnly", "current_database()", "session_user", "current_user",
+		"pg_control_system()", "pg_database", "actualDatabaseOID == expectedDatabaseOID",
+		"current_schema() = 'public'", "current_schemas(false) = ARRAY['public']::name[]",
+		"NOT r.rolsuper", "NOT r.rolcreaterole", "NOT r.rolcreatedb", "NOT r.rolreplication", "NOT r.rolbypassrls",
+		"leastPrivilegedDatabaseOwner",
+	} {
+		if !strings.Contains(body, required) {
+			t.Errorf("database identity proof is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"INSERT ", "UPDATE ", "DELETE ", "TRUNCATE ", "HASH_DB_URL"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("database identity proof contains forbidden material %q", forbidden)
+		}
+	}
+}
+
+func TestDatabaseIdentityRejectsSchemaRoleAndDatabaseRecreationMismatch(t *testing.T) {
+	args := []string{"hash", "mithras", "mithras", "7521111222233334444", "16384", "hash", "mithras", "7521111222233334444", "16384"}
+	if !databaseIdentityMatches(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8], true, true, true) {
+		t.Fatal("exact database identity rejected")
+	}
+	for _, tc := range []struct {
+		name                         string
+		actualOID                    string
+		canonicalSchema              bool
+		canonicalSearchPath          bool
+		leastPrivilegedDatabaseOwner bool
+	}{
+		{"drop-recreate-oid", "16385", true, true, true},
+		{"current-schema", "16384", false, true, true},
+		{"search-path", "16384", true, false, true},
+		{"role-flags-or-owner", "16384", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if databaseIdentityMatches(args[0], args[1], args[2], args[3], tc.actualOID, args[5], args[6], args[7], args[8], tc.canonicalSchema, tc.canonicalSearchPath, tc.leastPrivilegedDatabaseOwner) {
+				t.Fatal("database identity mismatch was accepted")
+			}
+		})
+	}
+}
+
 func TestLawfulBasisCutoverResultExposesOnlyAggregateInventory(t *testing.T) {
 	raw, err := json.Marshal(lawfulBasisCutoverResult{
 		Safe: false, Complete: true, ActiveDocuments: 7, MissingMatchingConfirmations: 3,
