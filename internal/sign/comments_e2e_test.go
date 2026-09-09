@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/bright-interaction/hash/internal/article13"
 	"github.com/bright-interaction/hash/internal/audit"
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
@@ -74,14 +75,7 @@ func TestCommentsSerializeWithFinalizationAndRollbackOnAuditFailureE2E(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	sentAt := time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := pool.Exec(ctx, "UPDATE documents SET status = 'sent', sent_at = $2 WHERE id = $1", doc.ID, sentAt); err != nil { //nolint:rawsql
-		t.Fatal(err)
-	}
-	doc, err = q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: org.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	doc = completeDurableSendSignE2E(t, ctx, pool, q, doc, recipient)
 
 	// Force only this document's comment audit insert to fail. Because the
 	// comment row and LogTx share a transaction, neither author path may leave a
@@ -184,7 +178,14 @@ $body$`, deliveryFunctionName)
 		_ = tx.Rollback(ctx)
 		t.Fatal(err)
 	}
-	if _, err := tx.Exec(ctx, "UPDATE documents SET status = 'finalizing', completion_effective_at = now() WHERE id = $1", doc.ID); err != nil { //nolint:rawsql
+	txq := q.WithTx(tx)
+	if _, err := txq.SetDocumentStatus(ctx, generated.SetDocumentStatusParams{ID: doc.ID, OrgID: org.ID, Status: "in_progress"}); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if _, err := txq.BeginDocumentFinalization(ctx, generated.BeginDocumentFinalizationParams{
+		RetentionYears: int32(article13.RetentionYearsV1), ID: doc.ID, OrgID: org.ID,
+	}); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatal(err)
 	}
@@ -265,14 +266,7 @@ func TestMarkViewedRejectsPreResendNoticeEpochE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochOne := time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := pool.Exec(ctx, `UPDATE documents SET status = 'sent', sent_at = $2 WHERE id = $1`, doc.ID, epochOne); err != nil { //nolint:rawsql
-		t.Fatal(err)
-	}
-	doc, err = q.GetDocument(ctx, generated.GetDocumentParams{ID: doc.ID, OrgID: org.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	doc = completeDurableSendSignE2E(t, ctx, pool, q, doc, recipient)
 	rc := &RecipientContext{
 		Document: doc,
 		Recipient: &generated.GetRecipientByTokenHashRow{
@@ -282,8 +276,18 @@ func TestMarkViewedRejectsPreResendNoticeEpochE2E(t *testing.T) {
 	}
 	evidence := ParticipantResponseEvidence{Notice: testArticle13NoticeEvidence(t, rc)}
 
-	if _, err := pool.Exec(ctx, `UPDATE documents SET sent_at = $2 WHERE id = $1`, doc.ID, epochOne.Add(time.Minute)); err != nil { //nolint:rawsql
+	if _, err := q.RequestChangesOnDocument(ctx, generated.RequestChangesOnDocumentParams{ID: doc.ID, OrgID: org.ID}); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := q.ReopenDocumentToDraft(ctx, generated.ReopenDocumentToDraftParams{ID: doc.ID, OrgID: org.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.ResetRecipientsForRevision(ctx, doc.ID); err != nil {
+		t.Fatal(err)
+	}
+	doc = completeDurableSendSignE2E(t, ctx, pool, q, doc, recipient)
+	if !doc.SentAt.Time.After(rc.Document.SentAt.Time) {
+		t.Fatalf("revised ceremony epoch = %s, want after %s", doc.SentAt.Time, rc.Document.SentAt.Time)
 	}
 	if err := engine.MarkViewed(ctx, rc, evidence); !errors.Is(err, ErrInvalidNoticeEvidence) {
 		t.Fatalf("MarkViewed() stale epoch error = %v, want ErrInvalidNoticeEvidence", err)
@@ -292,7 +296,7 @@ func TestMarkViewedRejectsPreResendNoticeEpochE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if freshRecipient.Status != "pending" {
+	if freshRecipient.Status != "sent" {
 		t.Fatalf("stale epoch mutated recipient status to %q", freshRecipient.Status)
 	}
 	var viewedEvents int
@@ -315,6 +319,104 @@ func assertCommentCountE2E(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	if count != want {
 		t.Fatalf("comment rows = %d, want %d", count, want)
 	}
+}
+
+func seedCompleteFrozenBrandingSignE2E(t *testing.T, ctx context.Context, pool *pgxpool.Pool, documentID uuid.UUID) {
+	t.Helper()
+	_, err := pool.Exec(ctx, `INSERT INTO document_branding_override (
+		document_id, primary_hex, accent_hex, surface_hex, text_hex, muted_hex,
+		logo_url, logo_alt, font_heading, font_body, signature_color
+	) VALUES ($1, '#0F172A', '#3B82F6', '#FFFFFF', '#0F172A', '#64748B',
+	          '', '', 'Inter', 'Inter', '#0F172A')
+	ON CONFLICT (document_id) DO UPDATE SET
+		primary_hex=EXCLUDED.primary_hex, accent_hex=EXCLUDED.accent_hex,
+		surface_hex=EXCLUDED.surface_hex, text_hex=EXCLUDED.text_hex,
+		muted_hex=EXCLUDED.muted_hex, logo_url=EXCLUDED.logo_url,
+		logo_alt=EXCLUDED.logo_alt, font_heading=EXCLUDED.font_heading,
+		font_body=EXCLUDED.font_body, signature_color=EXCLUDED.signature_color`, documentID) //nolint:rawsql
+	if err != nil {
+		t.Fatalf("seed complete canonical frozen branding: %v", err)
+	}
+}
+
+func completeDurableSendSignE2E(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	q *generated.Queries,
+	doc *generated.Document,
+	recipient *generated.Recipient,
+) *generated.Document {
+	t.Helper()
+	seedCompleteFrozenBrandingSignE2E(t, ctx, pool, doc.ID)
+
+	sealingTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sealingTx.Rollback(ctx) }()
+	sealingQ := q.WithTx(sealingTx)
+	if _, err := sealingQ.CreateSendSealingIntent(ctx, generated.CreateSendSealingIntentParams{
+		DocumentID: doc.ID, OrgID: doc.OrgID,
+		ActorUserID: pgtype.UUID{Bytes: doc.SenderID, Valid: true},
+		ActorEmail:  "sender@comment.test", ActorIp: "127.0.0.1", Via: "e2e", Tool: "sign-comment-fixture",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sealingQ.BeginDocumentSendSealing(ctx, generated.BeginDocumentSendSealingParams{ID: doc.ID, OrgID: doc.OrgID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sealingTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := q.MarkSendSealingRetentionStarted(ctx, generated.MarkSendSealingRetentionStartedParams{
+		DocumentID: doc.ID, OrgID: doc.OrgID,
+	}); err != nil || rows != 1 {
+		t.Fatalf("mark sign fixture send retention started: rows=%d err=%v", rows, err)
+	}
+	if rows, err := q.MarkSendSealingRetentionComplete(ctx, generated.MarkSendSealingRetentionCompleteParams{
+		DocumentID: doc.ID, OrgID: doc.OrgID,
+	}); err != nil || rows != 1 {
+		t.Fatalf("mark sign fixture send retention complete: rows=%d err=%v", rows, err)
+	}
+
+	publishTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = publishTx.Rollback(ctx) }()
+	publishQ := q.WithTx(publishTx)
+	sent, err := publishQ.CompleteDocumentSendSealing(ctx, generated.CompleteDocumentSendSealingParams{ID: doc.ID, OrgID: doc.OrgID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := publishQ.MarkRecipientSent(ctx, generated.MarkRecipientSentParams{ID: recipient.ID, DocumentID: doc.ID}); err != nil || rows != 1 {
+		t.Fatalf("mark sign fixture recipient sent: rows=%d err=%v", rows, err)
+	}
+	canonicalEpoch, err := article13.CanonicalSentAt(sent.SentAt.Time)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := audit.New(q, pool).LogTx(ctx, publishTx, audit.Entry{
+		OrgID: doc.OrgID, DocumentID: &doc.ID, Kind: audit.KindDocumentSent,
+		Payload: map[string]any{
+			article13.AuditRequiredNoticeSchemaKey: article13.SchemaV1,
+			article13.AuditRequiredNoticeSentAtKey: canonicalEpoch,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := publishQ.DeleteSendSealingIntent(ctx, generated.DeleteSendSealingIntentParams{
+		DocumentID: doc.ID, OrgID: doc.OrgID,
+	}); err != nil || rows != 1 {
+		t.Fatalf("delete sign fixture send intent: rows=%d err=%v", rows, err)
+	}
+	if err := publishTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	audit.New(q, pool).Publish(pending)
+	return sent
 }
 
 func assertEmailDeliveryCountE2E(t *testing.T, ctx context.Context, pool *pgxpool.Pool, recipients []string, want int) {

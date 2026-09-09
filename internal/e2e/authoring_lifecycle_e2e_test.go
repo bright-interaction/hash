@@ -118,6 +118,7 @@ func TestAuthoringMutationsRejectActiveAndCompletedDocuments(t *testing.T) {
 
 	t.Run("send lock wins stale delete", func(t *testing.T) {
 		doc, rec, field := seedAuthoringDraft(t, ctx, q, org.ID, user.ID)
+		seedCompleteFrozenBrandingFixture(t, ctx, pool, doc.ID)
 		tx, err := pool.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -310,6 +311,7 @@ func TestLegacyPDFTemplateClonePinsExactVersionDuringSealing(t *testing.T) {
 	if doc.EvidenceVersionPinsRequired || doc.PdfStorageVersionID.Valid {
 		t.Fatal("legacy template clone unexpectedly required a missing VersionId while still draft")
 	}
+	seedCompleteFrozenBrandingFixture(t, ctx, pool, doc.ID)
 	if _, err := q.BeginDocumentSendSealing(ctx, generated.BeginDocumentSendSealingParams{ID: doc.ID, OrgID: org.ID}); err != nil {
 		t.Fatal(err)
 	}
@@ -372,6 +374,7 @@ func TestLegacyActiveEvidencePinsBeforeFinalizationAreOneWay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedCompleteFrozenBrandingFixture(t, ctx, pool, doc.ID)
 	recipient, err := q.CreateRecipient(ctx, recipientParams(doc.ID))
 	if err != nil {
 		t.Fatal(err)
@@ -580,6 +583,7 @@ func seedAuthoringDraft(t *testing.T, ctx context.Context, q *generated.Queries,
 
 func prepareAuthoringSendSealingE2E(t *testing.T, ctx context.Context, pool *pgxpool.Pool, q *generated.Queries, doc *generated.Document) {
 	t.Helper()
+	seedCompleteFrozenBrandingFixture(t, ctx, pool, doc.ID)
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)

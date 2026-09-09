@@ -21,6 +21,7 @@ import (
 	mdb "github.com/bright-interaction/hash/internal/db"
 	"github.com/bright-interaction/hash/internal/db/generated"
 	"github.com/bright-interaction/hash/internal/dispatch"
+	"github.com/bright-interaction/hash/internal/send"
 	"github.com/bright-interaction/hash/internal/sign"
 )
 
@@ -47,15 +48,18 @@ func TestCommentThread(t *testing.T) {
 	dmust(t, err, "org")
 	user, err := q.CreateUser(ctx, generated.CreateUserParams{OrgID: org.ID, Email: demoEmail(), Name: "Sender", Role: "owner", ZitadelSub: pgtype.Text{String: uuid.NewString(), Valid: true}})
 	dmust(t, err, "user")
-	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org.ID, Name: "Avtal", BlocksJson: []byte(`{"version":1,"blocks":[]}`), VariablesJson: []byte(`{}`), SenderID: user.ID})
+	doc, err := q.CreateBlocksDocument(ctx, generated.CreateBlocksDocumentParams{OrgID: org.ID, Name: "Avtal", BlocksJson: []byte(`{"version":1,"blocks":[{"id":"signature","type":"signature_field","attrs":{"recipient_role":"signer"}}]}`), VariablesJson: []byte(`{}`), SenderID: user.ID})
 	dmust(t, err, "doc")
 	_, hash, err := auth.MintMagicToken()
 	dmust(t, err, "token")
 	rec, err := q.CreateRecipient(ctx, generated.CreateRecipientParams{DocumentID: doc.ID, Role: "signer", Email: "client@example.com", Name: "Client", OrderIndex: 0, MagicTokenHash: hash, MagicTokenExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(72 * time.Hour), Valid: true}, Locale: "sv"})
 	dmust(t, err, "recipient")
-	sentAt := time.Now().UTC().Truncate(time.Microsecond)
-	_, err = pool.Exec(ctx, "UPDATE documents SET status = 'sent', sent_at = $2 WHERE id = $1", doc.ID, sentAt) //nolint:rawsql
-	dmust(t, err, "activate comment ceremony")
+	sendEng := &send.Engine{Pool: pool, Queries: q, Audit: audit.New(q, pool), Mailer: dispatch.NoopMailer{}, PublicURL: "http://localhost:8080", OrgName: "Bright Interaction"}
+	result, err := sendEng.Send(ctx, send.Actor{UserID: &user.ID, OrgID: org.ID, Email: user.Email, Via: "demo", LawfulBasis: "contract"}, doc.ID)
+	dmust(t, err, "activate comment ceremony through durable send")
+	if result.Status != "sent" {
+		t.Fatalf("send status = %q, want sent", result.Status)
+	}
 
 	// Signer asks a question.
 	rc, err := signEng.LookupByRecipientID(ctx, rec.ID, org.ID)

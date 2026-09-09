@@ -49,8 +49,8 @@ import (
 // It runs in the `e2e` job of .github/workflows/hash-ci.yml and, more
 // importantly, in the `e2e` step of the real deploy gate
 // (ci/userworkflows/deploy_hash.go, runHashE2E), both of which run
-// `go test -tags e2e ./internal/e2e/...` with HASH_E2E_DB_URL pointing at a
-// service container.
+// `go test -tags e2e ./...` with HASH_E2E_DB_URL pointing at a service
+// container.
 //
 // The test creates and drops its OWN database on that server, so it neither
 // depends on nor disturbs the shared e2e schema.

@@ -340,6 +340,7 @@ func TestAutomationSignatureRequestIsAtomicConcurrentAndReplaySafeE2E(t *testing
 
 	stageExpiringSealing := func() {
 		t.Helper()
+		seedCompleteFrozenBrandingHandlerE2E(t, ctx, pool, expiringDocumentID)
 		if _, err := pool.Exec(ctx, `UPDATE documents SET expires_at = clock_timestamp() + interval '10 minutes' WHERE id = $1 AND status = 'draft'`, expiringDocumentID); err != nil { //nolint:rawsql
 			t.Fatal(err)
 		}

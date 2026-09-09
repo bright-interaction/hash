@@ -167,6 +167,7 @@ func TestSignerDisclosurePreflightFailsBeforeSendRetentionBoundary(t *testing.T)
 		}); err != nil {
 			t.Fatal(err)
 		}
+		seedCompleteFrozenBrandingFixture(t, ctx, pool, doc.ID)
 		if _, err := q.BeginDocumentSendSealing(ctx, generated.BeginDocumentSendSealingParams{
 			ID: doc.ID, OrgID: org.ID,
 		}); err != nil {

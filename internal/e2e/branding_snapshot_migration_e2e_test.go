@@ -17,18 +17,6 @@ import (
 	mdb "github.com/bright-interaction/hash/internal/db"
 )
 
-const completeFrozenBrandingFixtureSQL = `INSERT INTO document_branding_override (
-	document_id, primary_hex, accent_hex, surface_hex, text_hex, muted_hex,
-	logo_url, logo_alt, font_heading, font_body, signature_color
-) VALUES ($1, '#0F172A', '#3B82F6', '#FFFFFF', '#0F172A', '#64748B',
-	      '', '', 'Inter', 'Inter', '#0F172A')
-ON CONFLICT (document_id) DO UPDATE SET
-	primary_hex=EXCLUDED.primary_hex, accent_hex=EXCLUDED.accent_hex,
-	surface_hex=EXCLUDED.surface_hex, text_hex=EXCLUDED.text_hex,
-	muted_hex=EXCLUDED.muted_hex, logo_url=EXCLUDED.logo_url,
-	logo_alt=EXCLUDED.logo_alt, font_heading=EXCLUDED.font_heading,
-	font_body=EXCLUDED.font_body, signature_color=EXCLUDED.signature_color`
-
 func TestFrozenBrandingMigrationRefusesUnboundActiveDocumentE2E(t *testing.T) {
 	dsn := os.Getenv("HASH_E2E_DB_URL")
 	if dsn == "" {

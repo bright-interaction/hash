@@ -692,10 +692,11 @@ bash scripts/ci.sh
 go test -race -count=1 -timeout=120s ./...
 ```
 
-End-to-end (real send -> sign -> stamped-PDF loop against live Postgres + MinIO +
-Gotenberg). The test in `internal/e2e` is behind the `e2e` build tag and skips
-unless `HASH_E2E_*` is set, so it never runs in the unit suite. To run it
-locally:
+End-to-end (real send -> sign -> stamped-PDF plus transactional auth, handler,
+and signing checks against live Postgres + MinIO + Gotenberg). Tagged tests live
+in `internal/e2e`, `internal/auth`, `internal/handler`, and `internal/sign`; they
+skip unless `HASH_E2E_*` is set, so they never run in the unit suite. To run all
+of them locally:
 
 ```bash
 docker run -d -p 5432:5432 -e POSTGRES_USER=hash -e POSTGRES_PASSWORD=e2e -e POSTGRES_DB=hash postgres:16.15-alpine3.24
@@ -713,14 +714,14 @@ HASH_E2E_S3_ENDPOINT=localhost:9000 \
 HASH_E2E_S3_ACCESS_KEY=minioadmin HASH_E2E_S3_SECRET_KEY=minioadmin \
 HASH_E2E_S3_EPHEMERAL_BUCKET=true \
 HASH_E2E_GOTENBERG_URL=http://localhost:3000 \
-go test -tags e2e -count=1 -timeout=180s ./internal/e2e/...
+go test -tags e2e -count=1 -timeout=180s ./...
 ```
 
 CI runs all of this; the `e2e` job in `.github/workflows/hash-ci.yml` starts
-the three services and runs the tagged Go test. Its `browser-e2e` job builds a
-live Hash + worker + MailHog stack, verifies worker stability, seeds a public
-non-secret test identity and signed session cookie, and runs the full Playwright
-suite. The signing journey uses the real MCP send result and drives the signer
+the three services and runs every tagged Go package. Its `browser-e2e` job
+builds a live Hash + worker + MailHog stack, verifies worker stability, seeds a
+public non-secret test identity and signed session cookie, and runs the full
+Playwright suite. The signing journey uses the real MCP send result and drives the signer
 SPA through Article 13 acknowledgement, signature adoption, finalisation,
 stable PDF download, and queued invite delivery through the real worker SMTP
 path.

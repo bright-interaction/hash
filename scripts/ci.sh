@@ -96,10 +96,10 @@ gofmt_check() {
   echo "every Go file in the module is gofmt-clean"
 }
 
-# vet twice. The default build misses internal/e2e entirely, because that package is
-# behind `//go:build e2e` (it drives a real Postgres + MinIO, so it cannot run here).
+# Vet twice. The default build misses the E2E-only files spread across internal/e2e,
+# auth, handler, and sign (they drive real Postgres + MinIO, so they cannot run here).
 # Tag-gated code that nothing type-checks rots quietly and you find out during a
-# release. vet with the tag compiles it without running it, which is the honest half
+# release. Vet with the tag compiles it without running it, which is the honest half
 # of the check we can do without services.
 vet_all() {
   go vet ./... || return 1
