@@ -237,6 +237,14 @@ renderer_source_policy() {
     echo "renderer image must deny every HTTP(S) request before DNS resolution by default" >&2
     return 1
   }
+  grep -Fq 'XDG_CONFIG_HOME=/tmp/.config' gotenberg/Dockerfile || {
+    echo "renderer must keep Chromium crash-handler config on the writable /tmp tmpfs" >&2
+    return 1
+  }
+  grep -Fq 'CHROMIUM_AUTO_START=true' gotenberg/Dockerfile || {
+    echo "renderer must start Chromium before API readiness can go green" >&2
+    return 1
+  }
   echo "renderer source/image provenance is checksum-pinned to Gotenberg v8.36.0; banned converter modules are absent"
 }
 

@@ -51,7 +51,14 @@ COPY --from=builder --chown=1001:1001 /out/chromium-hyphen-data/ /opt/gotenberg/
 COPY LICENSE /licenses/HASH.txt
 COPY --from=builder /out/GOTENBERG-MIT.txt /licenses/GOTENBERG-MIT.txt
 
-ENV CHROMIUM_BIN_PATH=/usr/bin/chromium \
+# Alpine Chromium 152 starts Crashpad even in headless mode. Keep its config
+# database on the only writable filesystem in the read-only runtime; otherwise
+# the first conversion fails with "chrome_crashpad_handler: --database is
+# required" while the API health endpoint remains green. Auto-start makes
+# container readiness exercise this browser bootstrap before Hash sends work.
+ENV XDG_CONFIG_HOME=/tmp/.config \
+    CHROMIUM_AUTO_START=true \
+    CHROMIUM_BIN_PATH=/usr/bin/chromium \
     CHROMIUM_HYPHEN_DATA_DIR_PATH=/opt/gotenberg/chromium-hyphen-data \
     CHROMIUM_DENY_PRIVATE_IPS=true \
     CHROMIUM_DENY_PUBLIC_IPS=true \
