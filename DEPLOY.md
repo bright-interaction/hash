@@ -718,6 +718,32 @@ audit verification key is served at
 The built-in verifier does not validate OpenTimestamps calendar proofs, so
 staging/production reject it and no timestamp-authority claim should rely on it.
 
+## CloudRebellion production profile
+
+The Cloud Rebellion instance uses the OVH host `core-prod-gra1-01` (public
+address `37.187.155.214`, Tailscale address `100.118.61.16`) and is operated by
+`tom@cloudrebellion.se`. The production origin is:
+
+```text
+HASH_PUBLIC_URL=https://hash.cloudrebellion.tech
+HASH_OIDC_REDIRECT_URL=https://hash.cloudrebellion.tech/auth/callback
+```
+
+This profile is a fresh Hash instance: use a new Hash database and a distinct
+Object-Locked storage scope. Do not point it at Stage, Dockyard, or Mesh data,
+and do not reuse their credentials, indexes, or signing keys. Keep the existing
+`hash.brightinteraction.com` service available until the new origin has passed
+deep health, browser sign/send/finalize, webhook, audit-verification, and
+coupled restore checks.
+
+The new origin is private/internal. Its nginx vhost must listen only on
+`100.118.61.16:443` and proxy through the managed CloudRebellion Caddy route to
+`hash:8080`. That route must overwrite exactly one `X-Hash-Proxy-Auth` and one
+authenticated `X-Hash-Client-IP`; never add a direct public listener or reload
+the shared proxy by hand. Promote the exact staging-attested image pair through
+the managed CI workflow and retain the release, backup, Object Lock
+proof, and rollback receipts with the deployment record.
+
 ## 5. Continuous deployment (any CI)
 
 Hash has no CI coupling. Any pipeline that can build two container images and
