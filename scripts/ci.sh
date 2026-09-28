@@ -981,7 +981,7 @@ resolve_scanner() {
     govulncheck)
       expected_command="golang.org/x/vuln/cmd/govulncheck"
       expected_module="golang.org/x/vuln"
-      expected_h1="h1:Ju8QsuyhX3Hk8ma3CesTbO8vfJD9EvUBgHvkxHBzj0I="
+      expected_h1="h1:4MQBuhmXbz2uepNJrf3v+aaZLGDqw1JluwYboegA1qg="
       ;;
     *) echo "unsupported security scanner $name" >&2; return 1 ;;
   esac
@@ -1034,7 +1034,7 @@ renderer_vulnerability_scan() {
   local review="gotenberg/vulnerability-review.json" report rc
   local actual_version actual_h1 actual_revision expires reviewed today
   local detected approved unknown expected_review actual_review
-  resolve_scanner govulncheck golang.org/x/vuln/cmd/govulncheck@v1.1.4 || return $?
+  resolve_scanner govulncheck golang.org/x/vuln/cmd/govulncheck@v1.7.0 || return $?
   command -v jq >/dev/null 2>&1 || {
     echo "jq is required to reconcile renderer vulnerability results" >&2
     return 1
@@ -1222,7 +1222,7 @@ if [ "$IN_MIRROR" = "1" ] && [ "$HAVE_GIT" = "1" ]; then
 else
   step "secret scan (working tree; split-public-repo.sh scans the filtered history)" secret_scan
 fi
-step "vulnerability scan" scan govulncheck golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+step "vulnerability scan" scan govulncheck golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 step "renderer vulnerability scan"             renderer_vulnerability_scan
 
 printf '\n'
